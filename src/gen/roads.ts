@@ -171,19 +171,40 @@ function coarseRoute(a: Site, b: Site, field: CoarseField): number[] {
       z[j * w + i] = field.z(x, y);
       river[j * w + i] = field.area(x, y) > 15 ? 1 : 0;
     }
-  const node = (x: number, y: number) => Math.round(y / COARSE - oy) * w + Math.round(x / COARSE - ox);
-  const start = node(a.x, a.y);
-  const goal = node(b.x, b.y);
-  const gx = goal % w;
-  const gy = (goal - gx) / w;
-  const cost = new Float64Array(N).fill(Infinity);
-  const from = new Int32Array(N).fill(-1);
+  // Start from (and finish at) whichever of the 4 grid nodes around a site suits the
+  // route: the nearest node can lie behind the site, making the road double back.
+  const around = (x: number, y: number) => {
+    const i = Math.floor(x / COARSE) - ox;
+    const j = Math.floor(y / COARSE) - oy;
+    return [j * w + i, j * w + i + 1, (j + 1) * w + i, (j + 1) * w + i + 1];
+  };
+  const pos = (k: number): [number, number] => [(ox + (k % w)) * COARSE, (oy + Math.floor(k / w)) * COARSE];
+  const goals = new Set(around(b.x, b.y));
+  const GOAL = N; // virtual node: "arrived at b"
+  const cost = new Float64Array(N + 1).fill(Infinity);
+  const from = new Int32Array(N + 1).fill(-1);
   const heap = new MinHeap(256);
-  cost[start] = 0;
-  heap.push(start, 0);
+  const h0 = (k: number) => {
+    const [x, y] = pos(k);
+    return Math.hypot(x - b.x, y - b.y);
+  };
+  for (const k of around(a.x, a.y)) {
+    const [x, y] = pos(k);
+    cost[k] = Math.hypot(x - a.x, y - a.y);
+    from[k] = -2; // starts at a
+    heap.push(k, cost[k] + h0(k));
+  }
   while (heap.size) {
     const c = heap.pop();
-    if (c === goal) break;
+    if (c === GOAL) break;
+    if (goals.has(c)) {
+      const nc = cost[c] + h0(c);
+      if (nc < cost[GOAL]) {
+        cost[GOAL] = nc;
+        from[GOAL] = c;
+        heap.push(GOAL, nc);
+      }
+    }
     const ci = c % w;
     const cj = (c - ci) / w;
     for (const [dx, dy] of CMOVES) {
@@ -203,28 +224,53 @@ function coarseRoute(a: Site, b: Site, field: CoarseField): number[] {
       if (nc < cost[q]) {
         cost[q] = nc;
         from[q] = c;
-        heap.push(q, nc + Math.hypot(i - gx, j - gy) * COARSE);
+        heap.push(q, nc + h0(q));
       }
     }
   }
   const nodes: number[] = [];
-  for (let c = goal; c >= 0 && c !== start; c = from[c]) nodes.push(c);
+  for (let c = from[GOAL]; c >= 0; c = from[c]) nodes.push(c);
   nodes.reverse();
-  nodes.pop(); // the goal node is replaced by the site itself
   const route = [a.x, a.y];
-  for (const c of nodes) route.push((ox + (c % w)) * COARSE, (oy + Math.floor(c / w)) * COARSE);
-  route.push(b.x, b.y);
+  const add = (x: number, y: number) => {
+    if (x !== route[route.length - 2] || y !== route[route.length - 1]) route.push(x, y);
+  };
+  for (const c of nodes) add(...pos(c));
+  add(b.x, b.y);
   return route;
 }
 
-/** Greedy line-of-sight simplification: from each kept vertex, jump to the farthest one reachable. */
-export function stringPull(pts: number[], ok: (x0: number, y0: number, x1: number, y1: number) => boolean): number[] {
+/**
+ * Greedy line-of-sight simplification: from each kept vertex, jump to the farthest
+ * one reachable. A shortcut must pass `ok` and stay within `maxDev` metres of every
+ * vertex it skips — enough to iron out the 8-direction staircase, but not to cut a
+ * hairpin's U-turn into a V.
+ */
+export function stringPull(
+  pts: number[],
+  ok: (x0: number, y0: number, x1: number, y1: number) => boolean,
+  maxDev = Infinity,
+): number[] {
   const n = pts.length / 2;
   const out = [pts[0], pts[1]];
+  const close = (i: number, j: number) => {
+    const ax = pts[2 * i];
+    const ay = pts[2 * i + 1];
+    const dx = pts[2 * j] - ax;
+    const dy = pts[2 * j + 1] - ay;
+    const len2 = dx * dx + dy * dy || 1;
+    for (let k = i + 1; k < j; k++) {
+      const px = pts[2 * k] - ax;
+      const py = pts[2 * k + 1] - ay;
+      const t = Math.max(0, Math.min(1, (px * dx + py * dy) / len2));
+      if (Math.hypot(px - t * dx, py - t * dy) > maxDev) return false;
+    }
+    return true;
+  };
   let i = 0;
   while (i < n - 1) {
     let j = n - 1;
-    while (j > i + 1 && !ok(pts[2 * i], pts[2 * i + 1], pts[2 * j], pts[2 * j + 1])) j--;
+    while (j > i + 1 && !(close(i, j) && ok(pts[2 * i], pts[2 * i + 1], pts[2 * j], pts[2 * j + 1]))) j--;
     out.push(pts[2 * j], pts[2 * j + 1]);
     i = j;
   }
@@ -281,7 +327,10 @@ export interface RoadPatch {
 /** Fine-patch margin around a chunk (nodes), enough for any owned segment's box. */
 export const ROAD_PAD = 32;
 const BOX = 14;
+/** String pulling may move the road this far (m): staircase yes, hairpin no. */
+const STAIR_DEV = 8;
 const SNAP = 3;
+const SNAP_WIDE = 12;
 const FDIST = DX.map((dx, i) => Math.hypot(dx, DY[i]) * NODE);
 
 /**
@@ -342,19 +391,23 @@ export function routeSegments(tasks: SegmentTask[], p: RoadPatch): SegmentPath[]
     const [ci, cj] = at(x, y);
     let best = -1;
     let bestScore = Infinity;
-    for (let dj = -SNAP; dj <= SNAP; dj++)
-      for (let di = -SNAP; di <= SNAP; di++) {
+    // Usually a few nodes; a waypoint that fell in a lake looks further for dry land.
+    for (const R of [SNAP, SNAP_WIDE]) {
+      if (best >= 0) break;
+      for (let dj = -R; dj <= R; dj++)
+        for (let di = -R; di <= R; di++) {
         const i = ci + di;
         const j = cj + dj;
         if (!inside(i, j)) continue;
         const k = j * w + i;
         if (bad(k)) continue;
-        const score = 10 * slopeAt(k) + (p.A[k] > 0.3 ? 2 : 0) + 0.15 * Math.hypot(di, dj);
-        if (score < bestScore) {
-          bestScore = score;
-          best = k;
+          const score = 10 * slopeAt(k) + (p.A[k] > 0.3 ? 2 : 0) + 0.15 * Math.hypot(di, dj);
+          if (score < bestScore) {
+            bestScore = score;
+            best = k;
+          }
         }
-      }
+    }
     return best >= 0 ? best : Math.max(0, Math.min(w * h - 1, cj * w + ci));
   };
 
@@ -362,7 +415,14 @@ export function routeSegments(tasks: SegmentTask[], p: RoadPatch): SegmentPath[]
     const { ax, ay, bx, by } = t;
     const A0 = snap(ax, ay);
     const B0 = snap(bx, by);
-    const path = fineAStar(p, A0, B0, -1, -1, t.cls);
+    // Water is a last resort (a causeway); if the path still touches it, give the
+    // router the whole patch to find a way round the shore.
+    const wet = (path: number[]) => path.reduce((n, k) => n + (bad(k) ? 1 : 0), 0);
+    let path = fineAStar(p, A0, B0, -1, -1, t.cls, BOX);
+    if (wet(path) > 0) {
+      const wide = fineAStar(p, A0, B0, -1, -1, t.cls, Math.max(w, h));
+      if (wet(wide) < wet(path)) path = wide;
+    }
     const pts: number[] = [];
     for (const k of path) pts.push((p.gx + (k % w)) * NODE, (p.gy + Math.floor(k / w)) * NODE);
     // Straighten the 8-direction staircase where a straight line keeps within the
@@ -382,23 +442,23 @@ export function routeSegments(tasks: SegmentTask[], p: RoadPatch): SegmentPath[]
       }
       return true;
     };
-    const xy = Float32Array.from(resample(stringPull(pts, ok), NODE));
+    const xy = Float32Array.from(resample(stringPull(pts, ok, STAIR_DEV), NODE));
     return { key: t.key, cls: t.cls, xy };
   });
 }
 
 /** A* over (node, heading) with a hard gradient limit and limited turning. */
-function fineAStar(p: RoadPatch, a: number, b: number, hA: number, hB: number, cls: RoadClass): number[] {
+function fineAStar(p: RoadPatch, a: number, b: number, hA: number, hB: number, cls: RoadClass, box: number): number[] {
   const { w, h } = p;
   if (a === b) return [a];
   const ai = a % w;
   const aj = (a - ai) / w;
   const bi = b % w;
   const bj = (b - bi) / w;
-  const i0 = Math.max(1, Math.min(ai, bi) - BOX);
-  const j0 = Math.max(1, Math.min(aj, bj) - BOX);
-  const i1 = Math.min(w - 2, Math.max(ai, bi) + BOX);
-  const j1 = Math.min(h - 2, Math.max(aj, bj) + BOX);
+  const i0 = Math.max(1, Math.min(ai, bi) - box);
+  const j0 = Math.max(1, Math.min(aj, bj) - box);
+  const i1 = Math.min(w - 2, Math.max(ai, bi) + box);
+  const j1 = Math.min(h - 2, Math.max(aj, bj) + box);
   const bw = i1 - i0 + 1;
   const bh = j1 - j0 + 1;
   const S = bw * bh * 8;
@@ -437,12 +497,12 @@ function fineAStar(p: RoadPatch, a: number, b: number, hA: number, hB: number, c
       const nj = lj + DY[d];
       if (ni < 0 || nj < 0 || ni >= bw || nj >= bh) continue;
       const q = (nj + j0) * w + ni + i0;
-      if (!Number.isNaN(p.lake[q])) continue;
       const dist = FDIST[d];
       const g = Math.abs(p.zE[q] - p.zE[k]) / dist;
       let step = dist * (1 + 3 * (g / gmax) ** 2) + turnCost * Math.abs(t);
       if (g > gmax) step += dist * 40 * (g / gmax - 1); // over the limit: only if there's no way round
       if (p.A[q] > 1 && p.A[k] <= 1) step += 40; // bridge
+      if (!Number.isNaN(p.lake[q])) step += dist * 60; // across water: only if there's no way round
       // Arriving at the goal against the outgoing heading costs a kink.
       if (q === b && hB >= 0) step += 20 * Math.min(Math.abs(d - hB), 8 - Math.abs(d - hB));
       const ns = ((nj * bw + ni) << 3) | d;
