@@ -11,7 +11,9 @@ import {
   type HydroWindow,
   type PreResult,
 } from '../gen/hydro';
+import { NET_CELL, NET_REACH, ownedSegments, ROAD_PAD, type NetCell, type RoadEdge, type RoadPatch, type SegmentPath } from '../gen/roads';
 import { expand, intersects, SeedStore, type Rect } from '../gen/seeds';
+import type { Site } from '../gen/settle';
 import type { TaskRunner } from '../worker/pool';
 import type { TaskKind, TaskRequest, TaskResult } from '../worker/protocol';
 
@@ -26,6 +28,8 @@ export interface Chunk {
   pre?: PreResult;
   /** Core of the window solve centred on this chunk. */
   hydro?: HydroCore;
+  /** Fine road segments owned by this chunk (midpoint inside it). */
+  roads?: SegmentPath[];
   dem?: Float32Array;
   water?: Float32Array;
   cover?: Int8Array;
@@ -56,6 +60,16 @@ export function forChunksIn(r: Rect, f: (cx: number, cy: number) => void): void 
 }
 
 const PRE_BATCH = 8;
+/** Longest road edge (m): net cells this far around a chunk can route roads through it. */
+const EDGE_REACH = 9000 + CHUNK;
+/** Sites within this distance matter to a chunk's land cover and placeholders (m). */
+const SITE_REACH = 1600;
+
+interface NetState {
+  busy: boolean;
+  failed?: boolean;
+  data?: NetCell;
+}
 const COARSE_RADIUS_M = COARSE_REACH + (WIN_CHUNKS + 1) * CHUNK + 512;
 
 /**
@@ -75,13 +89,19 @@ export class ChunkManager {
   readonly stats: Record<TaskKind, { ms: number; n: number }> & { errors: number } = {
     pre: { ms: 0, n: 0 },
     hydro: { ms: 0, n: 0 },
+    net: { ms: 0, n: 0 },
+    roads: { ms: 0, n: 0 },
     dem: { ms: 0, n: 0 },
     render: { ms: 0, n: 0 },
     errors: 0,
   };
 
   private genRect: Rect = { x0: 0, y0: 0, x1: 0, y1: 0 };
+  private roadsRect: Rect = this.genRect;
   private hydroRect: Rect = this.genRect;
+  private netRect: Rect = this.genRect;
+  readonly nets = new Map<string, NetState>();
+  private lastPrune: Rect | undefined;
   private preRect: Rect = this.genRect;
   private keepBitmapRect: Rect = this.genRect;
   private forgetRect: Rect = this.genRect;
@@ -123,8 +143,10 @@ export class ChunkManager {
       y1: Math.max(actual.y1, desired.y1),
     };
     this.genRect = expand(union, GEN_MARGIN);
-    this.hydroRect = expand(this.genRect, CHUNK);
+    this.roadsRect = expand(this.genRect, CHUNK);
+    this.hydroRect = expand(this.roadsRect, CHUNK);
     this.preRect = expand(this.hydroRect, WIN_CHUNKS * CHUNK);
+    this.netRect = expand(this.roadsRect, EDGE_REACH);
     this.keepBitmapRect = expand(union, 2 * CHUNK);
     this.forgetRect = expand(actual, FORGET);
     this.focus = focus;
@@ -147,14 +169,28 @@ export class ChunkManager {
         for (let dy = -1; dy <= 1; dy++)
           for (let dx = -1; dx <= 1; dx++) {
             const n = this.get(c.cx + dx, c.cy + dy);
-            if (n && n.dem && !n.busy) this.dropSurface(n);
+            if (n && !n.busy) {
+              if (n.dem) this.dropSurface(n);
+              n.roads = undefined; // its segment snaps used this chunk's nodes
+            }
           }
       } else if (c.bitmap && !c.busy && !intersects(r, this.keepBitmapRect)) {
         c.bitmap.close();
         c.bitmap = undefined;
       }
     }
-    this.seeds.prune(this.forgetRect);
+    const netKeep = expand(this.forgetRect, 20000);
+    for (const [k, n] of this.nets) {
+      const [gx, gy] = k.split(',').map(Number);
+      const r = { x0: gx * NET_CELL, y0: gy * NET_CELL, x1: (gx + 1) * NET_CELL, y1: (gy + 1) * NET_CELL };
+      if (!n.busy && !intersects(r, netKeep)) this.nets.delete(k);
+    }
+    // Pruning walks every seed; only bother once the view has moved a bit.
+    const lp = this.lastPrune;
+    if (!lp || Math.abs(lp.x0 - this.forgetRect.x0) + Math.abs(lp.y0 - this.forgetRect.y0) > 256 || Math.abs(lp.x1 - lp.x0 - (this.forgetRect.x1 - this.forgetRect.x0)) > 256) {
+      this.seeds.prune(this.forgetRect);
+      this.lastPrune = this.forgetRect;
+    }
   }
 
   private dropSurface(c: Chunk): void {
@@ -167,10 +203,84 @@ export class ChunkManager {
 
   schedule(): void {
     while (this.pool.idle > 0) {
+      if (this.scheduleNet()) continue;
       const next = this.pick();
       if (!next.length) return;
       this.dispatch(next);
     }
+  }
+
+  // --- Net cells (settlements + road corridors) -------------------------------
+
+  private netCells(r: Rect): [number, number][] {
+    const out: [number, number][] = [];
+    for (let gy = Math.floor(r.y0 / NET_CELL); gy <= Math.floor(r.y1 / NET_CELL); gy++)
+      for (let gx = Math.floor(r.x0 / NET_CELL); gx <= Math.floor(r.x1 / NET_CELL); gx++) out.push([gx, gy]);
+    return out;
+  }
+
+  private netsReady(r: Rect): boolean {
+    return this.netCells(r).every(([gx, gy]) => this.nets.get(`${gx},${gy}`)?.data);
+  }
+
+  /** Dispatches the nearest missing net cell, if any. */
+  private scheduleNet(): boolean {
+    const [fx, fy] = this.focus;
+    let best: [number, number] | undefined;
+    let bestD = Infinity;
+    for (const [gx, gy] of this.netCells(this.netRect)) {
+      const n = this.nets.get(`${gx},${gy}`);
+      if (n && (n.busy || n.data || n.failed)) continue;
+      const d = Math.hypot((gx + 0.5) * NET_CELL - fx, (gy + 0.5) * NET_CELL - fy);
+      if (d < bestD) {
+        bestD = d;
+        best = [gx, gy];
+      }
+    }
+    if (!best) return false;
+    const [gx, gy] = best;
+    const key = `${gx},${gy}`;
+    const state: NetState = { busy: true };
+    this.nets.set(key, state);
+    const cx = (gx + 0.5) * NET_CELL;
+    const cy = (gy + 0.5) * NET_CELL;
+    this.pool
+      .run({
+        kind: 'net',
+        gx,
+        gy,
+        seeds: this.seeds.payloadFor(
+          { x0: cx, y0: cy, x1: cx + 16, y1: cy + 16 },
+          expand({ x0: gx * NET_CELL, y0: gy * NET_CELL, x1: (gx + 1) * NET_CELL, y1: (gy + 1) * NET_CELL }, NET_REACH),
+        ),
+      })
+      .then((res) => {
+        state.busy = false;
+        this.stats.net.ms += res.ms;
+        this.stats.net.n++;
+        if (res.kind === 'net' && this.nets.get(key) === state) state.data = res.result;
+      })
+      .catch((err) => {
+        state.busy = false;
+        state.failed = true;
+        this.stats.errors++;
+        console.error(`net cell ${key} failed`, err);
+      });
+    return true;
+  }
+
+  private edgesNear(r: Rect): RoadEdge[] {
+    const out: RoadEdge[] = [];
+    for (const [gx, gy] of this.netCells(expand(r, EDGE_REACH))) out.push(...(this.nets.get(`${gx},${gy}`)?.data?.edges ?? []));
+    return out;
+  }
+
+  private sitesNear(r: Rect): Site[] {
+    const out: Site[] = [];
+    for (const [gx, gy] of this.netCells(r))
+      for (const s of this.nets.get(`${gx},${gy}`)?.data?.sites ?? [])
+        if (s.x >= r.x0 && s.x < r.x1 && s.y >= r.y0 && s.y < r.y1) out.push(s);
+    return out;
   }
 
   private ensure(cx: number, cy: number): Chunk {
@@ -186,10 +296,21 @@ export class ChunkManager {
     return true;
   }
 
-  private demReady(c: Chunk): boolean {
-    for (let dy = -1; dy <= 1; dy++)
-      for (let dx = -1; dx <= 1; dx++) if (!this.get(c.cx + dx, c.cy + dy)?.hydro) return false;
+  private ring(c: Chunk, f: (n: Chunk | undefined) => boolean): boolean {
+    for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) if (!f(this.get(c.cx + dx, c.cy + dy))) return false;
     return true;
+  }
+
+  private roadsReady(c: Chunk): boolean {
+    return this.ring(c, (n) => !!n?.hydro && !!n.pre) && this.netsReady(expand(chunkRect(c.cx, c.cy), EDGE_REACH));
+  }
+
+  private demReady(c: Chunk): boolean {
+    return this.ring(c, (n) => !!n?.hydro) && this.netsReady(expand(chunkRect(c.cx, c.cy), SITE_REACH));
+  }
+
+  private renderReady(c: Chunk): boolean {
+    return this.ring(c, (n) => !!n?.roads);
   }
 
   /** Best next task (a pre task may batch several chunks). */
@@ -214,14 +335,18 @@ export class ChunkManager {
         if (intersects(r, this.hydroRect)) consider({ chunk: c, kind: 'hydro', priority: d }, () => this.hydroReady(c));
         return;
       }
+      if (!c.roads) {
+        if (intersects(r, this.roadsRect)) consider({ chunk: c, kind: 'roads', priority: d }, () => this.roadsReady(c));
+        return;
+      }
       if (!intersects(r, this.genRect)) return;
       if (!c.dem) {
         consider({ chunk: c, kind: 'dem', priority: d }, () => this.demReady(c));
         return;
       }
-      if (!c.bitmap) consider({ chunk: c, kind: 'render', priority: d }, () => true);
+      if (!c.bitmap) consider({ chunk: c, kind: 'render', priority: d }, () => this.renderReady(c));
       else if (c.bitmapBucket !== this.renderBucket)
-        consider({ chunk: c, kind: 'render', priority: d + 3000 }, () => true); // stale zoom: still drawable
+        consider({ chunk: c, kind: 'render', priority: d + 3000 }, () => this.renderReady(c)); // stale zoom: still drawable
     });
     pres.sort((a, b) => a.priority - b.priority);
     // Pre tasks are cheap and everything waits on them: prefer a batch when one is closer.
@@ -264,12 +389,24 @@ export class ChunkManager {
         };
         break;
       }
+      case 'net':
+        throw new Error('net cells are scheduled by scheduleNet');
+      case 'roads':
+        task = {
+          kind,
+          cx: c.cx,
+          cy: c.cy,
+          segments: ownedSegments(this.edgesNear(chunkRect(c.cx, c.cy)), c.cx, c.cy),
+          patch: this.roadPatch(c),
+        };
+        break;
       case 'dem':
         task = {
           kind,
           cx: c.cx,
           cy: c.cy,
           patch: this.demPatch(c),
+          sites: this.sitesNear(expand(chunkRect(c.cx, c.cy), SITE_REACH)),
           seeds: this.seeds.payloadFor(expand(chunkRect(c.cx, c.cy), 16)),
         };
         break;
@@ -278,7 +415,21 @@ export class ChunkManager {
         const water = c.water!.slice();
         const cover = c.cover!.slice();
         const streams = c.streams!.slice();
-        task = { kind, cx: c.cx, cy: c.cy, dem, water, cover, streams, pxSize: this.pxSize, dpr: Math.min(this.dpr, DPR_MAX) };
+        const roads: SegmentPath[] = [];
+        this.ring(c, (n) => (roads.push(...n!.roads!), true));
+        task = {
+          kind,
+          cx: c.cx,
+          cy: c.cy,
+          dem,
+          water,
+          cover,
+          streams,
+          roads,
+          sites: this.sitesNear(expand(chunkRect(c.cx, c.cy), 400)),
+          pxSize: this.pxSize,
+          dpr: Math.min(this.dpr, DPR_MAX),
+        };
         transfer = [dem.buffer, water.buffer, cover.buffer, streams.buffer];
         break;
       }
@@ -317,6 +468,9 @@ export class ChunkManager {
         break;
       case 'hydro':
         if (this.alive(c)) c.hydro = res.result.core;
+        break;
+      case 'roads':
+        if (this.alive(c)) c.roads = res.result;
         break;
       case 'dem':
         if (!this.alive(c)) return;
@@ -363,6 +517,36 @@ export class ChunkManager {
         }
       }
     return win;
+  }
+
+  /**
+   * Fine node data for routing roads around a chunk. Each node comes from the solve
+   * of its own chunk (no blending), so the dependency stays within ±1 chunk while
+   * every chunk still sees identical values for shared nodes.
+   */
+  private roadPatch(c: Chunk): RoadPatch {
+    const w = NODES + 2 * ROAD_PAD;
+    const p: RoadPatch = {
+      gx: c.cx * NODES - ROAD_PAD,
+      gy: c.cy * NODES - ROAD_PAD,
+      w,
+      h: w,
+      zE: new Float32Array(w * w),
+      A: new Float32Array(w * w),
+      lake: new Float32Array(w * w),
+    };
+    for (let j = 0; j < w; j++)
+      for (let i = 0; i < w; i++) {
+        const gx = p.gx + i;
+        const gy = p.gy + j;
+        const own = this.get(Math.floor(gx / NODES), Math.floor(gy / NODES))!;
+        const k = (gy - (own.cy * NODES - CORE_PAD)) * CORE + (gx - (own.cx * NODES - CORE_PAD));
+        const o = j * w + i;
+        p.zE[o] = own.hydro!.zE[k];
+        p.A[o] = own.hydro!.A[k];
+        p.lake[o] = own.hydro!.lake[k];
+      }
+    return p;
   }
 
   /**

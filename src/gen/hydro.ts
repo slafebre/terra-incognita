@@ -115,7 +115,7 @@ const TILE_N = 2 * TILE_STRIDE + 1;
 export const COARSE_REACH = 2 * TILE_STRIDE * COARSE;
 const COARSE_AREA = (COARSE * COARSE) / 1e6;
 
-interface Coarse {
+export interface Coarse {
   ox: number; // world x of node 0
   oy: number;
   n: number;
@@ -207,7 +207,7 @@ function tileZ(c: Coarse, x: number, y: number): number {
 
 /** Coarse tiles survive across solves (per worker), keyed by tile + seed hash. */
 const tileCache = new Map<string, Coarse>();
-const TILE_CACHE_MAX = 24;
+const TILE_CACHE_MAX = 128;
 
 /** Hash of every coarse seed a tile's terrain can depend on. */
 function tileSignature(view: SeedView, tx: number, ty: number): number {
@@ -226,7 +226,7 @@ function tileSignature(view: SeedView, tx: number, ty: number): number {
 }
 
 /** Blended coarse eroded surface over a fixed tile lattice. */
-class CoarseField {
+export class CoarseField {
   constructor(
     private readonly t: Terrain,
     private readonly view: SeedView,
@@ -249,6 +249,19 @@ class CoarseField {
     tileCache.set(k, c);
     this.local.set(lk, c);
     return c;
+  }
+
+  /** Coarse eroded elevation from the nearest tile only (smaller reach than `z`). */
+  zNearest(x: number, y: number): number {
+    return tileZ(this.nearest(x, y), x, y);
+  }
+
+  /** Coarse drainage area (km²) at the node nearest (x, y), from the nearest tile. */
+  area(x: number, y: number): number {
+    const c = this.nearest(x, y);
+    const i = Math.min(c.n - 1, Math.max(0, Math.round((x - c.ox) / COARSE)));
+    const j = Math.min(c.n - 1, Math.max(0, Math.round((y - c.oy) / COARSE)));
+    return c.A[j * c.n + i];
   }
 
   /** Tile whose centre is nearest to (x, y). */
@@ -302,6 +315,13 @@ export interface HydroResult {
 /** Lake requirements: filled depth and area (nodes). */
 const LAKE_MIN_DEPTH = 1.5;
 const LAKE_MIN_NODES = 25;
+/**
+ * Lakes must lie at least this many nodes from the window edge. Every window whose
+ * blend weight matters near such a lake then sees the whole basin and agrees about
+ * it; bigger basins would be a lake in one window and drained in the next, giving
+ * straight, chunk-aligned shores. They stay as filled flats (wetland) instead.
+ */
+const LAKE_EDGE_MARGIN = NODES;
 /** Chance that a chunk has one dammed lake, by region. */
 const LAKES_PER_CHUNK = (R: number) => (R > 0.8 ? 0.12 : R > 0.52 ? 0.05 : R > 0.25 ? 0.06 : 0.07);
 /** Valley floors for channels with A above this (km²). */
@@ -551,6 +571,13 @@ export function solveHydro(win: HydroWindow, cx: number, cy: number, view: SeedV
     carve();
   }
 
+  const awayFromEdge = (nodes: number[]) =>
+    nodes.every((k) => {
+      const i = k % w;
+      const j = (k - i) / w;
+      return i >= LAKE_EDGE_MARGIN && j >= LAKE_EDGE_MARGIN && i < w - LAKE_EDGE_MARGIN && j < h - LAKE_EDGE_MARGIN;
+    });
+
   // --- Dammed lakes ------------------------------------------------------------
   // Erosion drains almost every depression, but real valleys hold lakes behind
   // riegels, moraines and landslides. Every chunk in the window gets the same
@@ -611,7 +638,7 @@ export function solveHydro(win: HydroWindow, cx: number, cy: number, view: SeedV
           queue.push(q);
         }
       }
-      if (!ok || members.length < LAKE_MIN_NODES) continue;
+      if (!ok || members.length < LAKE_MIN_NODES || !awayFromEdge(members)) continue;
       for (const c of members) {
         zE[c] = level;
         lake[c] = level;
@@ -649,7 +676,7 @@ export function solveHydro(win: HydroWindow, cx: number, cy: number, view: SeedV
         stack.push(q);
       }
     }
-    if (members.length < LAKE_MIN_NODES || depth < LAKE_MIN_DEPTH) continue;
+    if (members.length < LAKE_MIN_NODES || depth < LAKE_MIN_DEPTH || !awayFromEdge(members)) continue;
     for (const c of members) {
       zE[c] = level;
       lake[c] = level;

@@ -1,5 +1,8 @@
 import { generateDem } from '../gen/dem';
-import { generatePre, solveHydro } from '../gen/hydro';
+import { CoarseField, generatePre, solveHydro } from '../gen/hydro';
+import { netCell, routeSegments } from '../gen/roads';
+import { Settlements } from '../gen/settle';
+import { Terrain } from '../gen/terrain';
 import { SeedView } from '../gen/seeds';
 import { renderChunk } from '../render/chunkRender';
 import type { TaskRequest, TaskResult } from './protocol';
@@ -25,8 +28,19 @@ export function runTask(t: TaskRequest): { result: TaskResult; transfer: Transfe
         transfer: [core.zE, core.A, core.rec, core.lake].map((a) => a.buffer),
       };
     }
+    case 'net': {
+      const view = new SeedView(t.seeds);
+      const terrain = new Terrain(view);
+      const field = new CoarseField(terrain, view);
+      const result = netCell(t.gx, t.gy, field, new Settlements(field, terrain, view));
+      return { result: { kind: 'net', result, ms: ms() }, transfer: [] };
+    }
+    case 'roads': {
+      const result = routeSegments(t.segments, t.patch);
+      return { result: { kind: 'roads', result, ms: ms() }, transfer: result.map((r) => r.xy.buffer) };
+    }
     case 'dem': {
-      const result = generateDem(t.cx, t.cy, new SeedView(t.seeds), t.patch);
+      const result = generateDem(t.cx, t.cy, new SeedView(t.seeds), t.patch, t.sites);
       return {
         result: { kind: 'dem', result, ms: ms() },
         transfer: [result.dem.buffer, result.water.buffer, result.cover.buffer, result.streams.buffer],

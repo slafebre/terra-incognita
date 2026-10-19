@@ -1,6 +1,6 @@
 # Topo — infinite generated topographic map
 
-Status: milestones 1 (terrain & viewer), 2 (hydrology & erosion) and 3 (land cover) implemented, 2026-10-19.
+Status: milestones 1–3 implemented; milestone 4 (settlements & roads) in progress, 2026-10-19.
 
 ## 1. Product requirements (agreed)
 
@@ -44,8 +44,10 @@ Grid overlay
 |---|---|---|
 | `pre` | Uplift surface `zPre` and region R on a 16 m node grid. Batched 8 chunks per task. | Chunk is within generation rectangle + 1 chunk + 3 chunks. |
 | `hydro` | Window solve centred on the chunk (§3.3). Keeps the chunk ± 16 nodes. | Every chunk within ±3 chunks has `pre`. Solves are independent, so they run fully in parallel. |
-| `dem` | 4 m DEM, lake depth field, stream polylines, built from a blend of the 3×3 surrounding solves. | The chunk and its 8 neighbours have `hydro`. |
-| `render` | Raster (hillshade, lakes, contours, shorelines, streams). | DEM exists. Re-run when the zoom bucket changes. |
+| `net` | Per 8.2 km net cell: settlement sites and road edges with coarse routes (§3.4–3.5). | Cell is within ~9.5 km of the roads rectangle. |
+| `roads` | Fine road segments whose midpoint lies in the chunk. | The chunk and its 8 neighbours have `hydro`, and the net cells within 9.5 km exist. |
+| `dem` | 4 m DEM, lake depth field, land cover, stream polylines, built from a blend of the 3×3 surrounding solves. | The chunk and its 8 neighbours have `hydro`, and the nearby net cells exist. |
+| `render` | Raster (land cover, hillshade, contours, water, settlements, roads). | DEM exists and the 3×3 chunks have `roads`. Re-run when the zoom bucket changes. |
 
 - Every stage is a **pure function of the seeds**; nothing depends on the order in which chunks are generated.
 - The **finished set** contains chunks with a bitmap. The viewport must always lie inside it.
@@ -123,29 +125,58 @@ Grid overlay
 
 ### 3.4 Settlements
 
-- Sites are suitability-weighted Poisson-disc samples. Suitability favours flat land, nearby water, ground outside the floodplain, and in alpine areas sunny valley floors. Spacing depends on the region type.
-- Hierarchy: town (rare, about one per 10–15 km), village (2–4 km apart in lowland), hamlet, isolated farm.
-- Patterns by region: nucleated villages in lowland, scattered hamlets in bocage, linear villages along valley roads in mountains.
+*(Milestone 4, as implemented in `src/gen/settle.ts`. Everything is a pure function of the long-lived coarse seeds.)*
 
-### 3.5 Road and rail networks
+**Suitability.** Computed from the coarse eroded surface, using the nearest 256 m tile:
+- Flatness relative to the region (tolerance 0.08 in lowland up to 0.3 in alpine terrain).
+- Valley position: hilltops and ridges are penalised.
+- River proximity: towns want real rivers, villages and hamlets are happy with streams.
+- Altitude: nothing above about 1,850 m.
 
-| Class | IGN symbol | Max gradient | Min radius | Connects |
+**Candidates.** Each rank has candidates on a seeded, jittered lattice:
+
+| Rank | Lattice | Spacing | Keep-out from higher ranks | Min suitability |
 |---|---|---|---|---|
-| N (national) | red/orange, cased | 7 % | 120 m | towns |
-| D (departmental) | yellow, cased | 10 % | 40 m | villages to towns |
-| C (local) | white, cased | 15 % | 15 m | hamlets, farms |
-| Track | dashed double line | 20 % | — | fields, forest |
-| Path | thin dashed | — | — | anywhere |
-| Railway | black/white hatched | 2.5 % | 300 m | towns, with stations |
+| Town | 3 km | 6.5 km | – | 0.30 |
+| Village | 0.9 km | 1.9–3.4 km (by region) | 1.7 km | 0.15 |
+| Hamlet | 0.35 km | 0.65–1.1 km | 0.55 km | 0.06 |
 
-- **Topology.** Sites plus pending stubs are joined in a relative-neighbourhood graph, with extra edges added for redundancy. Each edge gets a class from the classes of the sites it connects.
-- **Routing.** A\* runs on an 8 m cost grid with **state = (cell, heading)**. Each move's cost includes the gradient (impassable above the class limit), curvature, water crossings (bridges are costly, must be roughly perpendicular, and get longer on wide rivers), forest, and existing roads (reusing them is cheap). Switchbacks *emerge* on steep slopes because the gradient limit plus a turning radius forces hairpins. Results are smoothed with clothoid/spline fitting.
-- **Tunnels and viaducts** are only allowed for N roads and railways, when they are cheaper than going around.
-- **Frontier stubs.** Any road leaving the generated area is stored as a stub (class, heading, position). The next networks stage has to connect every stub to a site or to a road of equal or higher class. When land is forgotten, the cut roads turn back into stubs.
-- **Invariants:**
-  - N and D roads never dead-end except at the retention boundary.
-  - Every village connects to the network.
-  - No road exceeds its class gradient except on bridges and in tunnels.
+- A candidate becomes a site if its score (suitability × seeded random) beats every same-rank candidate within its spacing, and no higher-ranked site is within the keep-out distance.
+- These rules are local, so every worker agrees.
+- Measured density: villages about 0.065 per km² (France averages about 1 commune per 16 km²), hamlets about 0.5 per km².
+- Land within 4× a site's built-up radius is cleared of forest.
+- Until milestone 5, sites render as a built-up tint plus a church symbol.
+
+### 3.5 Road network
+
+*(Milestone 4, as implemented in `src/gen/roads.ts`.)*
+
+**Net cells.** Topology and coarse routes are computed per 8.2 km net cell, using coarse terrain up to 44 km around the cell. Coarse seeds are kept within viewport + 4.5 km + 52 km.
+
+| Class | Connects | Max length | Max gradient | Symbol |
+|---|---|---|---|---|
+| N | towns ↔ towns (relative-neighbourhood graph) | 9 km | 7 % | red, cased |
+| D | villages ↔ villages / towns (relative-neighbourhood graph) | 4.5 km | 10 % | yellow, cased |
+| C | each hamlet → the nearest of: a D-road waypoint, a village or town, or a hamlet closer to that network | 1.6 km (3.2 km fallback) | 15 % | white, cased |
+
+- Every road ends at a site or exactly on a D road's waypoint. There are no dead ends, and C roads form trees draining into the network instead of running alongside other roads.
+- Each cell routes all D roads near it, not only those it owns, so cells agree on where the junction waypoints are.
+
+**Coarse routing.** A* on 256 m nodes:
+- Cost is distance × (1 + 4·(g/gmax)²), steeper slopes are discouraged, and a bridge costs extra.
+- The 8-direction staircase is removed by string pulling (line-of-sight within 1.3·gmax, staying out of big rivers).
+- Waypoints are then resampled to at most 256 m apart.
+
+**Fine routing.** Each segment between consecutive waypoints is owned by the chunk containing its midpoint, and routed by A* over (16 m node, heading):
+- Turns are limited to 45° per step, with a turn cost by class, so hairpins sweep round rather than spike.
+- Gradient above the class limit is heavily penalised. Lakes are impassable, and crossing a stream costs a bridge.
+- Waypoints are snapped locally to buildable ground. Each segment leaves and enters a waypoint along the coarse route's direction there (preferred, not forced), with short tangent stubs where these agree.
+- After A*, the path is string-pulled (straight wherever gentle enough), then resampled.
+- Node data comes from each node's own-chunk solve (not the blend), so roads only depend on hydro within ±1 chunk.
+
+**Rendering.** Per segment, Gaussian-smoothed with endpoints fixed (more passes for N and D roads). All casings are drawn first, then fills from C up to N.
+
+**Open.** Bridges and tunnels as symbols, sharing corridors between N and D roads, and farm and field tracks (milestones 5–6).
 
 ### 3.6 Built-up areas
 

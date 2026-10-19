@@ -20,9 +20,10 @@ export const COARSE_SPACINGS = [16384, 8192, 4096, 2048, 1024] as const;
 export const MAX_WARP = 600;
 /**
  * Coarse seeds are kept this far beyond the retention rectangle (m), because the
- * hydrology solve estimates base levels from coarse tiles reaching ~21 km away.
+ * hydrology reads coarse tiles ~21 km away, and settlements and roads (net cells)
+ * decide far-away towns from coarse terrain up to ~37 km beyond a cell.
  */
-export const COARSE_KEEP_EXTRA = 24000;
+export const COARSE_KEEP_EXTRA = 52000;
 
 export interface Rect {
   x0: number;

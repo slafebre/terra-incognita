@@ -38,6 +38,16 @@ export const STYLE = {
     glacierContour: 'rgba(70, 145, 205, 0.55)',
   },
 
+  /** Roads (IGN-like): N red, D yellow, C white; all cased. */
+  roads: {
+    fill: ['rgb(226, 74, 50)', 'rgb(250, 206, 72)', 'rgb(255, 255, 255)'],
+    casing: 'rgb(70, 58, 52)',
+    casingWidth: 0.65,
+  },
+  /** Settlement placeholders until buildings exist. */
+  builtUp: 'rgba(196, 160, 150, 0.45)',
+  church: 'rgb(45, 40, 38)',
+
   grid: 'rgba(30, 110, 210, 0.55)',
   gridLabel: 'rgb(30, 100, 200)',
   gridWidth: 0.8,

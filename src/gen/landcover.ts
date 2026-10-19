@@ -2,6 +2,7 @@ import { APRON, CELL, CHUNK, DEM_W } from '../lib/constants';
 import { clamp, gnoise, smoothstep } from '../lib/noise';
 import type { Lattice, SeedView } from './seeds';
 import { erodeSmax } from './terrain';
+import { SITE_RADIUS, type Site } from './settle';
 
 /**
  * Land cover as continuous fields on the DEM vertex grid: a class is present
@@ -56,6 +57,9 @@ const SALTS = {
 };
 
 /** Fraction of land that's forest by region (lowland … alpine), as a field bias. */
+/** Land around a settlement is cleared out to this many times its built-up radius. */
+const CLEAR_FACTOR = 4;
+
 const FOREST_BIAS = [-0.02, -0.2, -0.2, -0.05, -0.3];
 
 function table(t: number[], r: number): number {
@@ -64,7 +68,7 @@ function table(t: number[], r: number): number {
   return t[i] + (t[i + 1] - t[i]) * (f - i);
 }
 
-export function computeCover(cx: number, cy: number, view: SeedView, inp: CoverInputs): Int8Array {
+export function computeCover(cx: number, cy: number, view: SeedView, inp: CoverInputs, sites: Site[] = []): Int8Array {
   const out = new Int8Array(COVER_FIELDS * DEM_W * DEM_W);
   const L = (S: number): Lattice => view.lattice(S);
   const l512 = L(512);
@@ -146,6 +150,16 @@ export function computeCover(cx: number, cy: number, view: SeedView, inp: CoverI
         0.6 * (smoothstep(0.5, 1.0, s / erodeSmax(R)) - 0.5) +
         0.012 * clamp(tpi, -20, 20);
       forest = Math.min(forest, (treeline - z) / 80);
+      // Settlements clear the land around them for fields and pasture.
+      const wx = cx * CHUNK + (i - APRON) * CELL;
+      const wy = cy * CHUNK + (j - APRON) * CELL;
+      let cleared = 0;
+      for (const st of sites) {
+        const r = SITE_RADIUS[st.rank];
+        const d = Math.hypot(wx - st.x, wy - st.y);
+        cleared = Math.max(cleared, smoothstep(r * CLEAR_FACTOR, r * 1.2, d));
+      }
+      forest -= 1.6 * cleared;
       if (wet) forest = -1;
 
       // Conifer share: higher up and in the mountains.

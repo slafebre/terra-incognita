@@ -3,6 +3,7 @@ import { smoothstep } from '../lib/noise';
 import { DX, DY, NODE, NODES } from './hydro';
 import type { SeedView } from './seeds';
 import { computeCover, type CoverInputs } from './landcover';
+import type { Site } from './settle';
 import { terrainGrid, upliftOf } from './terrain';
 
 /** Share of fine terrain detail kept on steep eroded slopes. */
@@ -57,7 +58,7 @@ export function streamThreshold(R: number): number {
  * (everything zPre lacks) faded out where erosion has carved the land.
  * Un-eroded land therefore equals the full terrain plus regional uplift.
  */
-export function generateDem(cx: number, cy: number, view: SeedView, p: DemPatch): DemResult {
+export function generateDem(cx: number, cy: number, view: SeedView, p: DemPatch, sites: Site[] = []): DemResult {
   const full = terrainGrid(cx, cy, view).dem;
   const dem = new Float32Array(DEM_W * DEM_W);
   const water = new Float32Array(DEM_W * DEM_W);
@@ -143,7 +144,7 @@ export function generateDem(cx: number, cy: number, view: SeedView, p: DemPatch)
         // Shoreline: where the ground rises above the level, or where the smoothed
         // lake mask ends (avoids blocky node-grid edges), whichever comes first.
         const ground = Math.min(full[o] + Us[o], z);
-        water[o] = Math.min(level - ground, (spline(lakeMask, i, j) - 0.4) * 30);
+        water[o] = Math.min(level - ground, (spline(lakeMask, i, j) - 0.3) * 40);
         if (z < level && water[o] > 0) z = level;
         else if (z < level) z = level + 0.05;
       } else water[o] = -100;
@@ -171,7 +172,7 @@ export function generateDem(cx: number, cy: number, view: SeedView, p: DemPatch)
       inp.gy[o] = spline(nodeGy, i, j);
       inp.tpi[o] = spline(nodeTpi, i, j);
     }
-  const cover = computeCover(cx, cy, view, inp);
+  const cover = computeCover(cx, cy, view, inp, sites);
 
   const c = DEM_PAD + NODES / 2;
   return { dem, water, cover, streams: extractStreams(p), region: p.R[c * W + c] };

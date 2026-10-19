@@ -1,7 +1,11 @@
 import { APRON, CELL, CELLS, CHUNK, DEM_W } from '../lib/constants';
 import { marchingSquares } from '../lib/contours';
+import { smoothPolyline } from '../lib/polyline';
 import { COVER } from '../gen/landcover';
+import type { SegmentPath } from '../gen/roads';
+import type { Site } from '../gen/settle';
 import { cellCoverage, drawCoverSymbols, FILLS } from './landcover';
+import { drawChurches, drawRoads, drawSites } from './roads';
 import { CONTOURS, STYLE } from './style';
 
 export interface RenderInput {
@@ -14,6 +18,10 @@ export interface RenderInput {
   water: Float32Array;
   /** Stream polylines from `extractStreams`. */
   streams: Float32Array;
+  /** Road segments that may cross this chunk. */
+  roads: SegmentPath[];
+  /** Settlement sites near this chunk. */
+  sites: Site[];
   /** Raster edge length in device pixels. */
   pxSize: number;
   /** Device pixels per CSS pixel (line widths are specified in CSS px). */
@@ -48,7 +56,7 @@ function shadeAndSlope(dem: Float32Array): { shade: Float32Array; slope: Float32
 /** River width in metres for drainage area A (km²). */
 export const riverWidth = (A: number) => 1.1 * Math.pow(A, 0.55);
 
-export function renderChunk({ cx, cy, dem, cover, water, streams, pxSize, dpr }: RenderInput): OffscreenCanvas {
+export function renderChunk({ cx, cy, dem, cover, water, streams, roads, sites, pxSize, dpr }: RenderInput): OffscreenCanvas {
   const canvas = new OffscreenCanvas(pxSize, pxSize);
   const ctx = canvas.getContext('2d')!;
   const pxPerM = pxSize / CHUNK;
@@ -183,35 +191,10 @@ export function renderChunk({ cx, cy, dem, cover, water, streams, pxSize, dpr }:
   ctx.stroke(shorePath);
 
   drawStreams(ctx, streams, pxPerM, dpr);
+  drawSites(ctx, sites, cx, cy, pxPerM);
+  drawRoads(ctx, roads, cx, cy, pxPerM, dpr);
+  drawChurches(ctx, sites, cx, cy, pxPerM, dpr);
   return canvas;
-}
-
-const SMOOTH_W = [0.06, 0.12, 0.2, 0.24, 0.2, 0.12, 0.06];
-
-/**
- * Gaussian smoothing over ±3 vertices, endpoints fixed (they're confluences or
- * patch edges). Removes the 16 m D8 zig-zag. Local, so neighbouring chunks agree.
- */
-function smoothPolyline(xs: number[], ys: number[]): void {
-  const n = xs.length;
-  if (n < 3) return;
-  const x0 = xs.slice();
-  const y0 = ys.slice();
-  for (let v = 1; v < n - 1; v++) {
-    let sx = 0;
-    let sy = 0;
-    let sw = 0;
-    for (let d = -3; d <= 3; d++) {
-      const u = v + d;
-      if (u < 0 || u >= n) continue;
-      const wgt = SMOOTH_W[d + 3];
-      sx += x0[u] * wgt;
-      sy += y0[u] * wgt;
-      sw += wgt;
-    }
-    xs[v] = sx / sw;
-    ys[v] = sy / sw;
-  }
 }
 
 /**
