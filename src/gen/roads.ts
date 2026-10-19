@@ -1,5 +1,7 @@
 import { CHUNK } from '../lib/constants';
+import { hash3 } from '../lib/hash';
 import { MinHeap } from '../lib/heap';
+import { smoothstep } from '../lib/noise';
 import { COARSE, type CoarseField, DX, DY, NODE } from './hydro';
 import { HAMLET, type Site, Settlements, TOWN, VILLAGE } from './settle';
 
@@ -99,37 +101,61 @@ export function netCell(gx: number, gy: number, field: CoarseField, set: Settlem
       if (inCell(a)) edges.push(e);
     }
 
-  // C: each hamlet gets one road to the nearest of: a D-road waypoint, a village or
-  // town, or a hamlet that is itself closer to that network. This forms trees that
-  // drain into the network (no parallel roads), and junctions sit exactly on a D
-  // road's waypoint, which its fine geometry passes through.
+  // C: each hamlet gets one road towards the nearest of: a D-road waypoint, a village
+  // or town, or a hamlet that is itself closer to that network. The road ends at its
+  // first contact with the network — on it or one node beside it, joining across —
+  // so it never runs alongside. Join targets must be computable identically by every
+  // cell: D roads, and roads of hamlets that head straight for the network
+  // ("depth 1"). Deeper chains also join the road of the hamlet they head for.
   const points: { x: number; y: number; key: string }[] = [];
-  for (const e of trunk) for (let i = 0; i < e.route.length; i += 2) points.push({ x: e.route[i], y: e.route[i + 1], key: `${e.id}#${i / 2}` });
+  const trunkNodes: number[] = [];
+  for (const e of trunk)
+    for (let i = 0; i < e.route.length; i += 2) {
+      points.push({ x: e.route[i], y: e.route[i + 1], key: `${e.id}#${i / 2}` });
+      if (i > 0 && i < e.route.length - 2) trunkNodes.push(e.route[i], e.route[i + 1]);
+    }
+  const trunkJoins = joinMap(trunkNodes);
   for (const s of tv) points.push({ x: s.x, y: s.y, key: s.id });
   const hamlets = sites(HAMLET, 2 * MAX_LEN[ROAD_C]);
   const netDist = new Map<Site, number>();
   for (const h of hamlets) netDist.set(h, Math.min(...points.map((p) => dist(h, p)), Infinity));
+  const target = new Map<Site, { x: number; y: number; key: string; hamlet?: Site }>();
   for (const h of hamlets) {
-    if (!inCell(h)) continue;
     const own = netDist.get(h)!;
-    let target: { x: number; y: number; key: string } | undefined;
+    let best: { x: number; y: number; key: string; hamlet?: Site } | undefined;
     let td = Infinity;
     for (const p of points)
       if (dist(h, p) < td) {
         td = dist(h, p);
-        target = p;
+        best = p;
       }
     for (const o of hamlets) {
       if (o === h || netDist.get(o)! >= own) continue;
       const d = dist(h, o);
       if (d < td) {
         td = d;
-        target = { x: o.x, y: o.y, key: o.id };
+        best = { x: o.x, y: o.y, key: o.id, hamlet: o };
       }
     }
-    if (!target || td > 2 * MAX_LEN[ROAD_C]) continue;
-    const b: Site = { id: target.key, rank: HAMLET, x: target.x, y: target.y, z: 0, R: h.R };
-    edges.push({ id: `${h.id}>${target.key}`, cls: ROAD_C, a: h, b, route: coarseRoute(h, b, field) });
+    if (best && td <= 2 * MAX_LEN[ROAD_C]) target.set(h, best);
+  }
+  const asSite = (t: { x: number; y: number; key: string }, R: number): Site => ({ id: t.key, rank: HAMLET, x: t.x, y: t.y, z: 0, R });
+  // Depth-1 roads, for every hamlet near the cell (every cell computes the same ones).
+  const depth1 = new Map<Site, number[]>();
+  for (const [h, t] of target) {
+    if (t.hamlet) continue;
+    depth1.set(h, coarseRoute(h, asSite(t, h.R), field, trunkJoins));
+  }
+  for (const h of hamlets) {
+    if (!inCell(h)) continue;
+    const t = target.get(h);
+    if (!t) continue;
+    let route = depth1.get(h);
+    if (!route) {
+      const r1 = t.hamlet ? depth1.get(t.hamlet) : undefined;
+      route = coarseRoute(h, asSite(t, h.R), field, r1 ? joinMap([...trunkNodes, ...r1.slice(2)]) : trunkJoins);
+    }
+    edges.push({ id: `${h.id}>${t.key}`, cls: ROAD_C, a: h, b: asSite(t, h.R), route });
   }
 
   const all = [...towns, ...tv, ...hamlets];
@@ -140,6 +166,40 @@ export function netCell(gx: number, gy: number, field: CoarseField, set: Settlem
 // ---------------------------------------------------------------------------
 // Coarse routing
 
+/**
+ * Where a road may join the network: every grid node on it, and every node next to
+ * one (joining across). Grid-aligned nodes only (sites are not join points). Keys are
+ * "x,y"; values are the network node to finish on. Depends only on the node set, not
+ * on its order, so every cell builds the same map.
+ */
+function joinMap(nodes: number[]): Map<string, [number, number]> {
+  const on = new Set<string>();
+  for (let i = 0; i < nodes.length; i += 2)
+    if (nodes[i] % COARSE === 0 && nodes[i + 1] % COARSE === 0) on.add(`${nodes[i]},${nodes[i + 1]}`);
+  const out = new Map<string, [number, number]>();
+  const best = new Map<string, number>();
+  for (const k of on) {
+    const [x, y] = k.split(',').map(Number);
+    out.set(k, [x, y]);
+    best.set(k, -1);
+  }
+  for (const k of on) {
+    const [x, y] = k.split(',').map(Number);
+    for (let dy = -1; dy <= 1; dy++)
+      for (let dx = -1; dx <= 1; dx++) {
+        const n = `${x + dx * COARSE},${y + dy * COARSE}`;
+        if (on.has(n)) continue;
+        // Nearest network node; ties broken by the node itself, never by visiting order.
+        const d = Math.abs(dx) + Math.abs(dy) + edgeJitter(x, y, x + dx * COARSE, y + dy * COARSE) * 1e-3;
+        if (d < (best.get(n) ?? Infinity)) {
+          best.set(n, d);
+          out.set(n, [x, y]);
+        }
+      }
+  }
+  return out;
+}
+
 
 /** Coarse moves: 8 neighbours plus knight moves (16 directions), so corridors bend less. */
 const CMOVES: [number, number][] = [
@@ -149,13 +209,31 @@ const CMOVES: [number, number][] = [
 /** Gradient scale for coarse routing — the same for every class, so roads heading the
  * same way pick the same corridor (shortest paths to a shared node coincide). */
 const COARSE_GRADE = 0.1;
+/** Valley floors (drainage area ramp, km², around a node) cost up to this much less. */
+const VALLEY_AREA = [0.3, 4];
+const VALLEY_BONUS = 0.35;
+
+/**
+ * Fixed tie-break per coarse edge, 0..1, symmetric in its ends. On flat ground many
+ * paths cost exactly the same, and which one A* returns depends on where it is
+ * heading; then two roads through the same nodes split into parallel tracks between
+ * them. With every edge cost distinct (and symmetric), the best path between any two
+ * nodes is unique, so roads that meet stay together.
+ */
+function edgeJitter(i0: number, j0: number, i1: number, j1: number): number {
+  const first = j0 < j1 || (j0 === j1 && i0 < i1);
+  const h = first ? hash3(hash3(0x51ed27, i0, j0), i1, j1) : hash3(hash3(0x51ed27, i1, j1), i0, j0);
+  return h / 4294967296;
+}
 
 /**
  * Coarse route between two sites. Waypoints are the sites and the coarse grid
  * nodes in between: roads that share a corridor share these exact waypoints, so
  * their fine geometry (a function of the two waypoints only) coincides too.
+ * With `joins` ("x,y" of grid nodes on existing roads), the route ends at the
+ * first such node it can reach most cheaply instead of running on beside it.
  */
-function coarseRoute(a: Site, b: Site, field: CoarseField): number[] {
+function coarseRoute(a: Site, b: Site, field: CoarseField, joins?: Map<string, [number, number]>): number[] {
   const margin = 1536;
   const ox = Math.floor((Math.min(a.x, b.x) - margin) / COARSE);
   const oy = Math.floor((Math.min(a.y, b.y) - margin) / COARSE);
@@ -164,12 +242,28 @@ function coarseRoute(a: Site, b: Site, field: CoarseField): number[] {
   const N = w * h;
   const z = new Float32Array(N);
   const river = new Uint8Array(N);
+  const area = new Float32Array(N);
   for (let j = 0; j < h; j++)
     for (let i = 0; i < w; i++) {
       const x = (ox + i) * COARSE;
       const y = (oy + j) * COARSE;
       z[j * w + i] = field.z(x, y);
-      river[j * w + i] = field.area(x, y) > 15 ? 1 : 0;
+      area[j * w + i] = field.area(x, y);
+      river[j * w + i] = area[j * w + i] > 15 ? 1 : 0;
+    }
+  // Valley floors: on or beside a stream. Roads run along them (gentle, and where
+  // people live) rather than over the spurs between.
+  const valley = new Float32Array(N);
+  for (let j = 0; j < h; j++)
+    for (let i = 0; i < w; i++) {
+      let A = 0;
+      for (let dj = -1; dj <= 1; dj++)
+        for (let di = -1; di <= 1; di++) {
+          const u = i + di;
+          const v = j + dj;
+          if (u >= 0 && v >= 0 && u < w && v < h) A = Math.max(A, area[v * w + u]);
+        }
+      valley[j * w + i] = smoothstep(VALLEY_AREA[0], VALLEY_AREA[1], A);
     }
   // Start from (and finish at) whichever of the 4 grid nodes around a site suits the
   // route: the nearest node can lie behind the site, making the road double back.
@@ -181,6 +275,7 @@ function coarseRoute(a: Site, b: Site, field: CoarseField): number[] {
   const pos = (k: number): [number, number] => [(ox + (k % w)) * COARSE, (oy + Math.floor(k / w)) * COARSE];
   const goals = new Set(around(b.x, b.y));
   const GOAL = N; // virtual node: "arrived at b"
+  let join: [number, number] | undefined;
   const cost = new Float64Array(N + 1).fill(Infinity);
   const from = new Int32Array(N + 1).fill(-1);
   const heap = new MinHeap(256);
@@ -188,20 +283,24 @@ function coarseRoute(a: Site, b: Site, field: CoarseField): number[] {
     const [x, y] = pos(k);
     return Math.hypot(x - b.x, y - b.y);
   };
+  // Heuristic: a step can cost as little as (1 - VALLEY_BONUS) × its length.
+  const hA = (k: number) => (1 - VALLEY_BONUS) * h0(k);
   for (const k of around(a.x, a.y)) {
     const [x, y] = pos(k);
     cost[k] = Math.hypot(x - a.x, y - a.y);
     from[k] = -2; // starts at a
-    heap.push(k, cost[k] + h0(k));
+    heap.push(k, cost[k] + hA(k));
   }
   while (heap.size) {
     const c = heap.pop();
     if (c === GOAL) break;
-    if (goals.has(c)) {
-      const nc = cost[c] + h0(c);
+    const joinHere = joins?.get(pos(c).join(','));
+    if (goals.has(c) || joinHere) {
+      const nc = cost[c] + (joinHere ? 0 : h0(c));
       if (nc < cost[GOAL]) {
         cost[GOAL] = nc;
         from[GOAL] = c;
+        join = joinHere;
         heap.push(GOAL, nc);
       }
     }
@@ -219,12 +318,14 @@ function coarseRoute(a: Site, b: Site, field: CoarseField): number[] {
       const g = (Math.abs(zm - z[c]) + Math.abs(z[q] - zm)) / dist;
       let step = dist * (1 + 4 * (g / COARSE_GRADE) ** 2);
       if (g > 2 * COARSE_GRADE) step *= 8; // coarse slopes are smoothed: discourage, don't forbid
-      if (river[q] && !river[c]) step += 300; // a bridge
+      if (river[q] !== river[c]) step += 150; // a bridge (half on each bank: costs are symmetric)
+      step *= 1 - (VALLEY_BONUS * (valley[c] + valley[q])) / 2;
+      step *= 1 + 0.01 * edgeJitter(ox + ci, oy + cj, ox + i, oy + j);
       const nc = cost[c] + step;
       if (nc < cost[q]) {
         cost[q] = nc;
         from[q] = c;
-        heap.push(q, nc + h0(q));
+        heap.push(q, nc + hA(q));
       }
     }
   }
@@ -236,7 +337,8 @@ function coarseRoute(a: Site, b: Site, field: CoarseField): number[] {
     if (x !== route[route.length - 2] || y !== route[route.length - 1]) route.push(x, y);
   };
   for (const c of nodes) add(...pos(c));
-  add(b.x, b.y);
+  if (join) add(...join);
+  else add(b.x, b.y);
   return route;
 }
 
@@ -418,9 +520,9 @@ export function routeSegments(tasks: SegmentTask[], p: RoadPatch): SegmentPath[]
     // Water is a last resort (a causeway); if the path still touches it, give the
     // router the whole patch to find a way round the shore.
     const wet = (path: number[]) => path.reduce((n, k) => n + (bad(k) ? 1 : 0), 0);
-    let path = fineAStar(p, A0, B0, -1, -1, t.cls, BOX);
+    let path = fineAStar(p, A0, B0, t.cls, BOX);
     if (wet(path) > 0) {
-      const wide = fineAStar(p, A0, B0, -1, -1, t.cls, Math.max(w, h));
+      const wide = fineAStar(p, A0, B0, t.cls, Math.max(w, h));
       if (wet(wide) < wet(path)) path = wide;
     }
     const pts: number[] = [];
@@ -447,14 +549,137 @@ export function routeSegments(tasks: SegmentTask[], p: RoadPatch): SegmentPath[]
   });
 }
 
-/** A* over (node, heading) with a hard gradient limit and limited turning. */
-function fineAStar(p: RoadPatch, a: number, b: number, hA: number, hB: number, cls: RoadClass, box: number): number[] {
+/**
+ * Approach trees: near a waypoint, every segment ending there follows the same
+ * cheapest-path tree grown from it (radius TREE_R nodes, or less on short segments).
+ * Roads leaving a waypoint the same way then share one track until they part, the
+ * way real roads fork, instead of running side by side into the waypoint. The tree
+ * depends only on the waypoint, the class and the (shared) node data.
+ */
+const TREE_R = 8;
+/** At most 45° per 16 m step: a hairpin sweeps round over ~4 steps instead of spiking. */
+const MAX_TURN = 1;
+const TURN_COST = [45, 28, 16];
+
+/** Cost of the step k → q in direction d; symmetric, so a path costs the same both ways. */
+function stepCost(p: RoadPatch, k: number, q: number, d: number, cls: RoadClass): number {
+  const dist = FDIST[d];
+  const gmax = MAX_GRADE[cls];
+  const g = Math.abs(p.zE[q] - p.zE[k]) / dist;
+  let step = dist * (1 + 3 * (g / gmax) ** 2);
+  if (g > gmax) step += dist * 40 * (g / gmax - 1); // over the limit: only if there's no way round
+  if (p.A[q] > 1 !== p.A[k] > 1) step += 20; // a bridge: half on each bank
+  // Across water: only if there's no way round.
+  step += dist * 30 * ((Number.isNaN(p.lake[q]) ? 0 : 1) + (Number.isNaN(p.lake[k]) ? 0 : 1));
+  return step;
+}
+
+const turnOf = (d0: number, d1: number) => Math.min((d1 - d0 + 8) & 7, (d0 - d1 + 8) & 7);
+
+interface Tree {
+  /** Centre node (patch index), radius (nodes), local box side. */
+  c: number;
+  r: number;
+  side: number;
+  /** Per local (node, heading) state: cost from the centre, and predecessor state. */
+  cost: Float64Array;
+  from: Int32Array;
+  /**
+   * Per local node: its cheapest state (or -1). Only these are used — the others
+   * reach the node with an awkward heading, by curling round.
+   */
+  best: Int32Array;
+}
+
+/** Cheapest-path tree from node c over (node, heading) states within radius r. */
+function approachTree(p: RoadPatch, c: number, r: number, cls: RoadClass): Tree {
+  const { w } = p;
+  const ci = c % w;
+  const cj = (c - ci) / w;
+  const side = 2 * r + 1;
+  const cost = new Float64Array(side * side * 8).fill(Infinity);
+  const from = new Int32Array(side * side * 8).fill(-1);
+  const heap = new MinHeap(256);
+  const centre = (r * side + r) * 8;
+  for (let d = 0; d < 8; d++) {
+    cost[centre + d] = 0;
+    heap.push(centre + d, 0);
+  }
+  while (heap.size) {
+    const s = heap.pop();
+    const d0 = s & 7;
+    const cell = s >> 3;
+    const li = cell % side;
+    const lj = (cell - li) / side;
+    const k = (cj + lj - r) * w + ci + li - r;
+    for (let t = -MAX_TURN; t <= MAX_TURN; t++) {
+      const d = (d0 + t + 8) & 7;
+      const ni = li + DX[d];
+      const nj = lj + DY[d];
+      if ((ni - r) ** 2 + (nj - r) ** 2 > r * r) continue;
+      const gi = ci + ni - r;
+      const gj = cj + nj - r;
+      if (gi < 1 || gj < 1 || gi >= w - 1 || gj >= p.h - 1) continue;
+      const ns = ((nj * side + ni) << 3) | d;
+      const nc = cost[s] + stepCost(p, k, gj * w + gi, d, cls) + TURN_COST[cls] * Math.abs(t);
+      if (nc < cost[ns]) {
+        cost[ns] = nc;
+        from[ns] = s;
+        heap.push(ns, nc);
+      }
+    }
+  }
+  const best = new Int32Array(side * side).fill(-1);
+  for (let cell = 0; cell < side * side; cell++)
+    for (let d = 0; d < 8; d++) {
+      const st = cell * 8 + d;
+      if (cost[st] < Infinity && (best[cell] < 0 || cost[st] < cost[best[cell]])) best[cell] = st;
+    }
+  return { c, r, side, cost, from, best };
+}
+
+/** Local tree cell of patch node k, or -1 outside the tree's disc. */
+function treeCell(t: Tree, k: number, w: number): number {
+  const ci = t.c % w;
+  const cj = (t.c - ci) / w;
+  const ki = k % w;
+  const kj = (k - ki) / w;
+  const li = ki - ci + t.r;
+  const lj = kj - cj + t.r;
+  if ((li - t.r) ** 2 + (lj - t.r) ** 2 > t.r * t.r) return -1;
+  return lj * t.side + li;
+}
+
+/** Patch nodes of the tree path from the centre to state s (centre first). */
+function treePath(t: Tree, s: number, w: number): number[] {
+  const ci = t.c % w;
+  const cj = (t.c - ci) / w;
+  const out: number[] = [];
+  for (let q = s; q >= 0; q = t.from[q]) {
+    const cell = q >> 3;
+    const li = cell % t.side;
+    out.push((cj + (cell - li) / t.side - t.r) * w + ci + li - t.r);
+  }
+  out.reverse();
+  return out.filter((k, n) => n === 0 || k !== out[n - 1]);
+}
+
+/**
+ * A* over (node, heading) with a hard gradient limit and limited turning, from a to
+ * b. Within the approach trees of a and b the path is the tree's: the search starts
+ * from every state of a's tree and finishes as soon as it steps into b's.
+ */
+function fineAStar(p: RoadPatch, a: number, b: number, cls: RoadClass, box: number): number[] {
   const { w, h } = p;
   if (a === b) return [a];
   const ai = a % w;
   const aj = (a - ai) / w;
   const bi = b % w;
   const bj = (b - bi) / w;
+  // Trees may not overlap: short segments get smaller ones.
+  const r = Math.min(TREE_R, Math.floor((Math.max(Math.abs(ai - bi), Math.abs(aj - bj)) - 1) / 2));
+  const ta = r >= 1 ? approachTree(p, a, r, cls) : undefined;
+  const tb = r >= 1 ? approachTree(p, b, r, cls) : undefined;
   const i0 = Math.max(1, Math.min(ai, bi) - box);
   const j0 = Math.max(1, Math.min(aj, bj) - box);
   const i1 = Math.min(w - 2, Math.max(ai, bi) + box);
@@ -463,67 +688,201 @@ function fineAStar(p: RoadPatch, a: number, b: number, hA: number, hB: number, c
   const bh = j1 - j0 + 1;
   const S = bw * bh * 8;
   const local = (k: number) => ((Math.floor(k / w) - j0) * bw + (k % w) - i0) * 8;
-  const gmax = MAX_GRADE[cls];
-  // At most 45° per 16 m step: a hairpin sweeps round over ~4 steps instead of
-  // spiking back and forth. Turning costs, so legs between bends stay long.
-  const maxTurn = 1;
-  const turnCost = cls === ROAD_N ? 45 : cls === ROAD_D ? 28 : 16;
+  const turnCost = TURN_COST[cls];
   const cost = new Float64Array(S).fill(Infinity);
   const from = new Int32Array(S).fill(-1);
+  /** For states seeded from a's tree: the tree state they stand for. */
+  const seedOf = new Map<number, number>();
   const heap = new MinHeap(512);
-  // Leaving the waypoint along its heading is preferred, not forced: a forced
-  // heading makes the road loop round when the real way out lies elsewhere.
-  for (let d = 0; d < 8; d++) {
-    const s0 = local(a) + d;
-    const dev = hA < 0 ? 0 : Math.min(Math.abs(d - hA), 8 - Math.abs(d - hA));
-    cost[s0] = 15 * dev;
-    heap.push(s0, cost[s0]);
-  }
-  let goal = -1;
+  const hEst = (k: number) => Math.hypot((k % w) - bi, Math.floor(k / w) - bj) * NODE;
+  const GOAL = S;
+  let goalCost = Infinity;
+  let goalFrom = -1;
+  let goalTree = -1;
+  if (ta) {
+    for (let cell = 0; cell < ta.side * ta.side; cell++) {
+      const st = ta.best[cell];
+      if (st < 0) continue;
+      const li = cell % ta.side;
+      const k = (aj + (cell - li) / ta.side - ta.r) * w + ai + li - ta.r;
+      const s0 = local(k) + (st & 7);
+      cost[s0] = ta.cost[st];
+      seedOf.set(s0, st);
+      heap.push(s0, ta.cost[st] + hEst(k));
+    }
+  } else
+    for (let d = 0; d < 8; d++) {
+      cost[local(a) + d] = 0;
+      heap.push(local(a) + d, hEst(a));
+    }
   while (heap.size) {
     const s = heap.pop();
+    if (s === GOAL) break;
     const d0 = s & 7;
     const cell = s >> 3;
     const li = cell % bw;
     const lj = (cell - li) / bw;
     const k = (lj + j0) * w + li + i0;
-    if (k === b) {
-      goal = s;
+    if (!tb && k === b) {
+      goalCost = cost[s];
+      goalFrom = s;
       break;
     }
-    for (let t = -maxTurn; t <= maxTurn; t++) {
+    for (let t = -MAX_TURN; t <= MAX_TURN; t++) {
       const d = (d0 + t + 8) & 7;
       const ni = li + DX[d];
       const nj = lj + DY[d];
       if (ni < 0 || nj < 0 || ni >= bw || nj >= bh) continue;
       const q = (nj + j0) * w + ni + i0;
-      const dist = FDIST[d];
-      const g = Math.abs(p.zE[q] - p.zE[k]) / dist;
-      let step = dist * (1 + 3 * (g / gmax) ** 2) + turnCost * Math.abs(t);
-      if (g > gmax) step += dist * 40 * (g / gmax - 1); // over the limit: only if there's no way round
-      if (p.A[q] > 1 && p.A[k] <= 1) step += 40; // bridge
-      if (!Number.isNaN(p.lake[q])) step += dist * 60; // across water: only if there's no way round
-      // Arriving at the goal against the outgoing heading costs a kink.
-      if (q === b && hB >= 0) step += 20 * Math.min(Math.abs(d - hB), 8 - Math.abs(d - hB));
+      // a's tree is fixed: no way back into it.
+      if (ta && treeCell(ta, q, w) >= 0) continue;
+      const nc = cost[s] + stepCost(p, k, q, d, cls) + turnCost * Math.abs(t);
+      const bc = tb ? treeCell(tb, q, w) : -1;
+      if (bc >= 0) {
+        // Into b's tree: finish along its path, reversed (leaving q against the
+        // heading the tree arrived with). A join at up to 90° is a junction-like bend.
+        const st = tb!.best[bc];
+        if (st < 0) continue;
+        const atB = q === b; // b itself has no arriving heading: any will do
+        const turn = atB ? 0 : turnOf(d, ((st & 7) + 4) & 7);
+        if (turn > 2) continue;
+        const total = nc + tb!.cost[st] + turnCost * turn;
+        if (total < goalCost) {
+          goalCost = total;
+          goalFrom = s;
+          goalTree = st;
+          heap.push(GOAL, total);
+        }
+        continue;
+      }
       const ns = ((nj * bw + ni) << 3) | d;
-      const nc = cost[s] + step;
       if (nc < cost[ns]) {
         cost[ns] = nc;
         from[ns] = s;
-        heap.push(ns, nc + Math.hypot(ni + i0 - bi, nj + j0 - bj) * NODE);
+        heap.push(ns, nc + hEst(q));
       }
     }
   }
-  if (goal < 0) return [a, b]; // no path at all (enclosed by water): draw it straight
+  if (goalFrom < 0) return [a, b]; // no path at all (enclosed by water): draw it straight
   const out: number[] = [];
-  for (let s = goal; s >= 0; s = from[s]) {
+  let s = goalFrom;
+  for (; s >= 0 && !seedOf.has(s); s = from[s]) {
     const cell = s >> 3;
     const li = cell % bw;
     out.push(((cell - li) / bw + j0) * w + li + i0);
   }
   out.reverse();
+  const head = ta ? treePath(ta, seedOf.get(s)!, w) : [];
+  const tail = tb && goalTree >= 0 ? treePath(tb, goalTree, w).reverse() : [];
+  const all = [...head, ...out, ...tail];
   // Collapse repeats (heading-only steps don't exist, but be safe).
-  return out.filter((k, n) => n === 0 || k !== out[n - 1]);
+  return all.filter((k, n) => n === 0 || k !== all[n - 1]);
+}
+
+// ---------------------------------------------------------------------------
+// Junction merging
+
+/** Roads closer than this (m) near a shared waypoint are drawn as one. */
+const MERGE_DIST = 24;
+/** Longest shared stretch (m), and at most this share of a segment's length. */
+const MERGE_MAX = 240;
+const MERGE_SHARE = 0.4;
+
+/**
+ * Where roads leave a waypoint the same way, draw them on one line until they
+ * really part: the later road (by class, then key) takes the earlier one's geometry
+ * up to the point where it moves more than MERGE_DIST away, so the junction sits
+ * where the roads fork rather than at the waypoint. Depends only on the segments
+ * at each waypoint, so every chunk drawing a junction draws it the same.
+ */
+export function mergeApproaches(segs: SegmentPath[]): SegmentPath[] {
+  const orient = (xy: number[], rev: boolean) => {
+    if (!rev) return xy.slice();
+    const r: number[] = [];
+    for (let i = xy.length - 2; i >= 0; i -= 2) r.push(xy[i], xy[i + 1]);
+    return r;
+  };
+  const original = segs.map((s) => Array.from(s.xy));
+  const edited = original.map((xy) => xy);
+  const ends = new Map<string, { i: number; rev: boolean }[]>();
+  original.forEach((xy, i) => {
+    const n = xy.length;
+    const a = `${xy[0]},${xy[1]}`;
+    const b = `${xy[n - 2]},${xy[n - 1]}`;
+    if (n < 4 || a === b) return;
+    for (const [k, rev] of [[a, false], [b, true]] as const) {
+      if (!ends.has(k)) ends.set(k, []);
+      ends.get(k)!.push({ i, rev });
+    }
+  });
+  // Edits at the two ends of a segment never overlap (MERGE_SHARE < 0.5), so the
+  // order of waypoints doesn't matter.
+  for (const inc of ends.values()) {
+    if (inc.length < 2) continue;
+    inc.sort((a, b) => segs[a.i].cls - segs[b.i].cls || (segs[a.i].key < segs[b.i].key ? -1 : 1));
+    // Leading stretches (from the waypoint) of the roads drawn so far.
+    const placed: number[][] = [];
+    for (const { i, rev } of inc) {
+      const t = orient(original[i], rev);
+      const limit = Math.min(MERGE_MAX, MERGE_SHARE * lengthTo(t, t.length - 2));
+      let best: { m: number[]; ti: number; mj: number; px: number; py: number } | undefined;
+      let bestLen = 24;
+      for (const m of placed) {
+        // Walk t from the waypoint while it stays close to m (to m's middle at most:
+        // its far end may be edited by another junction).
+        const reach = Math.min(MERGE_MAX + 64, 0.5 * lengthTo(m, m.length - 2));
+        let s = 0;
+        for (let ti = 2; ti < t.length; ti += 2) {
+          s += Math.hypot(t[ti] - t[ti - 2], t[ti + 1] - t[ti - 1]);
+          if (s > limit) break;
+          const pr = nearestOn(m, t[ti], t[ti + 1], reach);
+          if (pr.d > MERGE_DIST) break;
+          if (s > bestLen) {
+            bestLen = s;
+            best = { m, ti, mj: pr.j, px: pr.x, py: pr.y };
+          }
+        }
+      }
+      if (!best) {
+        placed.push(t);
+        continue;
+      }
+      // Shared stretch: m up to the fork point, then t's own way on.
+      const prefix = best.m.slice(0, best.mj + 2);
+      prefix.push(best.px, best.py);
+      placed.push([...prefix, ...t.slice(best.ti + 2)]);
+      // The rest comes from the current geometry: its far end may be edited already.
+      const cur = orient(edited[i], rev);
+      edited[i] = orient([...prefix, ...cur.slice(best.ti + 2)], rev);
+    }
+  }
+  return segs.map((s, i) => (edited[i] === original[i] ? s : { ...s, xy: Float32Array.from(edited[i]) }));
+}
+
+function lengthTo(xy: number[], upto: number): number {
+  let L = 0;
+  for (let i = 2; i <= upto; i += 2) L += Math.hypot(xy[i] - xy[i - 2], xy[i + 1] - xy[i - 1]);
+  return L;
+}
+
+/** Nearest point on polyline m (first `reach` metres) to (x, y): distance, piece start index, point. */
+function nearestOn(m: number[], x: number, y: number, reach: number): { d: number; j: number; x: number; y: number } {
+  let best = { d: Infinity, j: 0, x: m[0], y: m[1] };
+  let s = 0;
+  for (let j = 0; j + 3 < m.length && s <= reach; j += 2) {
+    const ax = m[j];
+    const ay = m[j + 1];
+    const dx = m[j + 2] - ax;
+    const dy = m[j + 3] - ay;
+    const L2 = dx * dx + dy * dy || 1;
+    const u = Math.max(0, Math.min(1, ((x - ax) * dx + (y - ay) * dy) / L2));
+    const px = ax + u * dx;
+    const py = ay + u * dy;
+    const d = Math.hypot(x - px, y - py);
+    if (d < best.d) best = { d, j, x: px, y: py };
+    s += Math.sqrt(L2);
+  }
+  return best;
 }
 
 export const netCellOf = (x: number, y: number): [number, number] => [cellOf(x), cellOf(y)];

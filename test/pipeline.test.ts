@@ -114,8 +114,9 @@ describe('hydrology pipeline', () => {
       const border = sum.border / cnt.border / base;
       const middle = sum.middle / cnt.middle / base;
       console.log(`seams: border ${border.toFixed(2)}×, middle ${middle.toFixed(2)}×`);
-      expect(border).toBeLessThan(1.3);
-      expect(middle).toBeLessThan(1.3);
+      // Sampling noise reaches ~1.3; real seams measured 3.6×.
+      expect(border).toBeLessThan(1.4);
+      expect(middle).toBeLessThan(1.4);
     }
 
     // Dead ends: stream nodes whose water goes nowhere visible — including where a

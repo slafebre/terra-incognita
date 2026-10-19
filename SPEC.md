@@ -159,22 +159,24 @@ Grid overlay
 | D | villages ↔ villages / towns (relative-neighbourhood graph) | 4.5 km | 10 % | yellow, cased |
 | C | each hamlet → the nearest of: a D-road waypoint, a village or town, or a hamlet closer to that network | 1.6 km (3.2 km fallback) | 15 % | white, cased |
 
-- Every road ends at a site or exactly on a D road's waypoint. There are no dead ends, and C roads form trees draining into the network instead of running alongside other roads.
+- Every road ends at a site or exactly on the network. A C road stops at its first contact with a D road (or with the road of the hamlet it heads for): on one of its waypoints, or one coarse node beside it, joining across. There are no dead ends, and C roads form trees draining into the network instead of running alongside other roads.
 - Each cell routes all D roads near it, not only those it owns, so cells agree on where the junction waypoints are.
 
-**Coarse routing.** A* on 256 m nodes:
-- Cost is distance × (1 + 4·(g/gmax)²), steeper slopes are discouraged, and a bridge costs extra.
-- The 8-direction staircase is removed by string pulling (line-of-sight within 1.3·gmax, staying out of big rivers).
-- Waypoints are then resampled to at most 256 m apart.
+**Coarse routing.** A* on 256 m nodes, 16 directions:
+- Cost is distance × (1 + 4·(g/0.1)²), the same for every class so roads heading the same way pick the same corridor. Steep coarse slopes cost 8× more.
+- Valley floors (on or beside a stream draining 0.3–4 km² or more) cost up to 35 % less, so roads follow valleys rather than climbing over the spurs between them. A big river (> 15 km²) costs a bridge, half on each bank.
+- Costs are symmetric, and each edge carries a fixed tie-break of up to 1 %. The best path between two nodes is then unique, so roads through the same nodes share the stretch between them instead of splitting into parallel tracks on flat ground.
+- A route may start and end on any of the 4 nodes around a site. Waypoints are the site and the grid nodes.
 
 **Fine routing.** Each segment between consecutive waypoints is owned by the chunk containing its midpoint, and routed by A* over (16 m node, heading):
 - Turns are limited to 45° per step, with a turn cost by class, so hairpins sweep round rather than spike.
-- Gradient above the class limit is heavily penalised. Lakes are impassable, and crossing a stream costs a bridge.
-- Waypoints are snapped locally to buildable ground. Each segment leaves and enters a waypoint along the coarse route's direction there (preferred, not forced), with short tangent stubs where these agree.
-- After A*, the path is string-pulled (straight wherever gentle enough), then resampled.
+- Gradient above the class limit is heavily penalised. Water costs 60× distance (a way round is wanted) and crossing a stream costs a bridge. All costs are symmetric.
+- Waypoints are snapped locally to buildable ground.
+- **Approach trees:** within ~130 m of a waypoint (less on short segments), a segment follows the cheapest-path tree grown from that waypoint. Segments that leave a waypoint the same way share its branches and fork further out, like real junctions.
+- After A*, the path is string-pulled (straight wherever gentle enough, moving it at most 8 m), then resampled.
 - Node data comes from each node's own-chunk solve (not the blend), so roads only depend on hydro within ±1 chunk.
 
-**Rendering.** Per segment, Gaussian-smoothed with endpoints fixed (more passes for N and D roads). All casings are drawn first, then fills from C up to N.
+**Rendering.** Segments sharing a waypoint that stay within 24 m of each other leaving it are drawn on one line until they part, for up to 240 m and 40 % of the segment's length. This uses only the segments at that waypoint, so every chunk draws a junction the same way. Each segment is then Gaussian-smoothed with endpoints fixed (more passes for N and D roads). All casings are drawn first, then fills from C up to N.
 
 **Open.** Bridges and tunnels as symbols, sharing corridors between N and D roads, and farm and field tracks (milestones 5–6).
 
