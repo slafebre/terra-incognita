@@ -8,8 +8,8 @@ export const STYLE = {
   lightAzimuthDeg: 315,
   lightAltitudeDeg: 45,
 
-  contour: 'rgb(206, 140, 78)',
-  contourIndex: 'rgb(184, 108, 48)',
+  contour: 'rgba(206, 140, 78, 0.4)',
+  contourIndex: 'rgba(184, 108, 48, 0.4)',
   contourWidth: 0.55,
   contourIndexWidth: 1.15,
 
