@@ -4,8 +4,11 @@ export const CHUNK = 512;
 export const CELL = 4;
 /** DEM cells per chunk edge. */
 export const CELLS = CHUNK / CELL;
-/** Extra DEM vertices on each side of a chunk (for gradients and seamless contours). */
-export const APRON = 2;
+/**
+ * Extra DEM vertices on each side of a chunk (for gradients, seamless contours, and
+ * classifying map symbols that straddle the chunk border).
+ */
+export const APRON = 4;
 /** DEM vertices per row, including both chunk edges and the apron. */
 export const DEM_W = CELLS + 1 + 2 * APRON;
 

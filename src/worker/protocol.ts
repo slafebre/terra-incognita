@@ -8,8 +8,11 @@ export type TaskRequest =
   | { kind: 'dem'; cx: number; cy: number; patch: DemPatch; seeds: SeedPayload }
   | {
       kind: 'render';
+      cx: number;
+      cy: number;
       dem: Float32Array;
       water: Float32Array;
+      cover: Int8Array;
       streams: Float32Array;
       pxSize: number;
       dpr: number;

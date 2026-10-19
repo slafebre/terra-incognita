@@ -1,9 +1,15 @@
 import { APRON, CELL, CELLS, CHUNK, DEM_W } from '../lib/constants';
 import { marchingSquares } from '../lib/contours';
+import { COVER } from '../gen/landcover';
+import { cellCoverage, drawCoverSymbols, FILLS } from './landcover';
 import { CONTOURS, STYLE } from './style';
 
 export interface RenderInput {
+  cx: number;
+  cy: number;
   dem: Float32Array;
+  /** Land cover fields from `computeCover`. */
+  cover: Int8Array;
   /** Lake depth per vertex (> 0 under water). */
   water: Float32Array;
   /** Stream polylines from `extractStreams`. */
@@ -42,13 +48,13 @@ function shadeAndSlope(dem: Float32Array): { shade: Float32Array; slope: Float32
 /** River width in metres for drainage area A (km²). */
 export const riverWidth = (A: number) => 1.1 * Math.pow(A, 0.55);
 
-export function renderChunk({ dem, water, streams, pxSize, dpr }: RenderInput): OffscreenCanvas {
+export function renderChunk({ cx, cy, dem, cover, water, streams, pxSize, dpr }: RenderInput): OffscreenCanvas {
   const canvas = new OffscreenCanvas(pxSize, pxSize);
   const ctx = canvas.getContext('2d')!;
   const pxPerM = pxSize / CHUNK;
   const { shade, slope } = shadeAndSlope(dem);
 
-  // --- Hillshade over paper ---------------------------------------------
+  // --- Land cover fills, hillshade, lakes ---------------------------------
   const img = ctx.createImageData(pxSize, pxSize);
   const data = img.data;
   const [pr, pg, pb] = STYLE.paper;
@@ -57,6 +63,7 @@ export function renderChunk({ dem, water, streams, pxSize, dpr }: RenderInput): 
   const sg = 1 - STYLE.shadow[1] / 255;
   const sb = 1 - STYLE.shadow[2] / 255;
   const [wr, wg, wb2] = STYLE.waterFill;
+  const pxPerVertex = CELL * pxPerM;
   const col0 = new Int32Array(pxSize);
   const colF = new Float32Array(pxSize);
   for (let p = 0; p < pxSize; p++) {
@@ -76,9 +83,23 @@ export function renderChunk({ dem, water, streams, pxSize, dpr }: RenderInput): 
       const top = shade[r0 + i] + (shade[r0 + i + 1] - shade[r0 + i]) * fx;
       const bot = shade[r1 + i] + (shade[r1 + i + 1] - shade[r1 + i]) * fx;
       const s = (top + (bot - top) * fy) * k;
-      let r = pr * (1 - s * sr);
-      let g = pg * (1 - s * sg);
-      let b = pb * (1 - s * sb);
+      // Base colour: paper, or the first land cover fill present (anti-aliased edges).
+      let br = pr;
+      let bg = pg;
+      let bb = pb;
+      let left = 1;
+      for (const f of FILLS) {
+        const a = cellCoverage(cover, f.field, r0, i, fx, fy, pxPerVertex) * left;
+        if (a <= 0) continue;
+        br += (f.rgb[0] - pr) * a;
+        bg += (f.rgb[1] - pg) * a;
+        bb += (f.rgb[2] - pb) * a;
+        left -= a;
+        if (left <= 0.001) break;
+      }
+      let r = br * (1 - s * sr);
+      let g = bg * (1 - s * sg);
+      let b = bb * (1 - s * sb);
       const wt = water[r0 + i] + (water[r0 + i + 1] - water[r0 + i]) * fx;
       const wb = water[r1 + i] + (water[r1 + i + 1] - water[r1 + i]) * fx;
       const wv = wt + (wb - wt) * fy;
@@ -121,9 +142,16 @@ export function renderChunk({ dem, water, streams, pxSize, dpr }: RenderInput): 
   const scale = CELL * pxPerM;
   const normal = new Path2D();
   const index = new Path2D();
+  const ice = new Path2D();
+  const onIce = (x: number, y: number) => {
+    const i = Math.min(DEM_W - 1, Math.max(0, Math.round(x)));
+    const j = Math.min(DEM_W - 1, Math.max(0, Math.round(y)));
+    return cover[COVER.glacier * DEM_W * DEM_W + j * DEM_W + i] > 0;
+  };
   for (const [L, segs] of byLevel) {
-    const path = L % 25 === 0 ? index : normal;
     for (let n = 0; n < segs.length; n += 4) {
+      // On glaciers contours are blue (IGN); index lines are not emphasised there.
+      const path = onIce((segs[n] + segs[n + 2]) / 2, (segs[n + 1] + segs[n + 3]) / 2) ? ice : L % 25 === 0 ? index : normal;
       path.moveTo((segs[n] - APRON) * scale, (segs[n + 1] - APRON) * scale);
       path.lineTo((segs[n + 2] - APRON) * scale, (segs[n + 3] - APRON) * scale);
     }
@@ -136,6 +164,11 @@ export function renderChunk({ dem, water, streams, pxSize, dpr }: RenderInput): 
   ctx.strokeStyle = STYLE.contourIndex;
   ctx.lineWidth = STYLE.contourIndexWidth * dpr;
   ctx.stroke(index);
+  ctx.strokeStyle = STYLE.cover.glacierContour;
+  ctx.lineWidth = STYLE.contourWidth * dpr;
+  ctx.stroke(ice);
+
+  drawCoverSymbols(ctx, { cx, cy, dem, water, cover, pxPerM, dpr });
 
   // --- Lake shorelines --------------------------------------------------
   const shore = marchingSquares(water, DEM_W, APRON - 1, APRON - 1, APRON + CELLS + 1, APRON + CELLS + 1, 1000, (L) => L === 0);

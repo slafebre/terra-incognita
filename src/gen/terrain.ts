@@ -52,7 +52,7 @@ export function baseField(R: number, baseLevel: number): number {
 
 /** Erosion parameters by region: channel steepness k (in S = k·A^-0.5, A in km²) and max hillslope. */
 const ERODE_K = [0.012, 0.035, 0.08, 0.12, 0.15];
-const ERODE_SMAX = [0.18, 0.4, 0.7, 0.95, 1.1];
+const ERODE_SMAX = [0.18, 0.36, 0.55, 0.65, 0.75];
 export const erodeK = (R: number) => table(ERODE_K, R);
 export const erodeSmax = (R: number) => table(ERODE_SMAX, R);
 /**
@@ -194,7 +194,7 @@ export function terrainGrid(cx: number, cy: number, view: SeedView): TerrainGrid
   // Slow fields on a world-aligned grid (nodes at multiples of FIELD_STEP * CELL), so
   // neighbouring chunks interpolate identical node values and stay seamless.
   const k0 = Math.floor(-APRON / FIELD_STEP);
-  const k1 = Math.ceil((DEM_W - 1 - APRON) / FIELD_STEP);
+  const k1 = Math.floor((DEM_W - 1 - APRON) / FIELD_STEP) + 1;
   const fw = k1 - k0 + 1;
   const f = new Float64Array(fw * fw * 4);
   for (let kj = 0; kj < fw; kj++)

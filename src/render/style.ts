@@ -22,6 +22,22 @@ export const STYLE = {
   streamMinWidth: 0.85,
   streamCasedFrom: 2.4,
 
+  /** Land cover (IGN-like): fills under the hillshade, then symbols. */
+  cover: {
+    glacier: [236, 245, 251] as const,
+    rock: [229, 227, 223] as const,
+    scree: [240, 238, 233] as const,
+    forest: [205, 229, 176] as const,
+    vineyard: [234, 236, 206] as const,
+    rockLine: 'rgba(70, 68, 66, 0.45)',
+    screeDot: 'rgba(105, 102, 98, 0.65)',
+    vineDot: 'rgba(96, 120, 64, 0.75)',
+    tree: 'rgba(72, 122, 52, 0.55)',
+    heath: 'rgba(80, 130, 60, 0.6)',
+    marsh: 'rgba(28, 130, 210, 0.75)',
+    glacierContour: 'rgba(70, 145, 205, 0.55)',
+  },
+
   grid: 'rgba(30, 110, 210, 0.55)',
   gridLabel: 'rgb(30, 100, 200)',
   gridWidth: 0.8,

@@ -28,6 +28,7 @@ export interface Chunk {
   hydro?: HydroCore;
   dem?: Float32Array;
   water?: Float32Array;
+  cover?: Int8Array;
   streams?: Float32Array;
   region?: number;
   bitmap?: ImageBitmap;
@@ -157,7 +158,7 @@ export class ChunkManager {
   }
 
   private dropSurface(c: Chunk): void {
-    c.dem = c.water = c.streams = undefined;
+    c.dem = c.water = c.cover = c.streams = undefined;
     c.bitmap?.close();
     c.bitmap = undefined;
   }
@@ -275,9 +276,10 @@ export class ChunkManager {
       case 'render': {
         const dem = c.dem!.slice();
         const water = c.water!.slice();
+        const cover = c.cover!.slice();
         const streams = c.streams!.slice();
-        task = { kind, dem, water, streams, pxSize: this.pxSize, dpr: Math.min(this.dpr, DPR_MAX) };
-        transfer = [dem.buffer, water.buffer, streams.buffer];
+        task = { kind, cx: c.cx, cy: c.cy, dem, water, cover, streams, pxSize: this.pxSize, dpr: Math.min(this.dpr, DPR_MAX) };
+        transfer = [dem.buffer, water.buffer, cover.buffer, streams.buffer];
         break;
       }
     }
@@ -320,6 +322,7 @@ export class ChunkManager {
         if (!this.alive(c)) return;
         c.dem = res.result.dem;
         c.water = res.result.water;
+        c.cover = res.result.cover;
         c.streams = res.result.streams;
         c.region = res.result.region;
         break;

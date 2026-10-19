@@ -29,7 +29,7 @@ export function runTask(t: TaskRequest): { result: TaskResult; transfer: Transfe
       const result = generateDem(t.cx, t.cy, new SeedView(t.seeds), t.patch);
       return {
         result: { kind: 'dem', result, ms: ms() },
-        transfer: [result.dem.buffer, result.water.buffer, result.streams.buffer],
+        transfer: [result.dem.buffer, result.water.buffer, result.cover.buffer, result.streams.buffer],
       };
     }
     case 'render': {
