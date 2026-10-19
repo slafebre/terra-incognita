@@ -18,6 +18,11 @@ import { freshSeed, hash3 } from '../lib/hash';
 export const COARSE_SPACINGS = [16384, 8192, 4096, 2048, 1024] as const;
 /** Upper bound on domain-warp displacement applied to coarse lookups (m). */
 export const MAX_WARP = 600;
+/**
+ * Coarse seeds are kept this far beyond the retention rectangle (m), because the
+ * hydrology solve estimates base levels from coarse tiles reaching ~21 km away.
+ */
+export const COARSE_KEEP_EXTRA = 24000;
 
 export interface Rect {
   x0: number;
@@ -77,7 +82,8 @@ export class SeedStore {
     return s;
   }
 
-  payloadFor(r: Rect): SeedPayload {
+  /** Seeds for fine terrain inside `r` and coarse terrain inside `coarse` (default: `r`). */
+  payloadFor(r: Rect, coarseRect: Rect = r): SeedPayload {
     const [cx0, cx1] = fineRange(r.x0, r.x1);
     const [cy0, cy1] = fineRange(r.y0, r.y1);
     const cw = cx1 - cx0 + 1;
@@ -86,11 +92,17 @@ export class SeedStore {
     for (let j = 0; j < ch; j++)
       for (let i = 0; i < cw; i++) chunks[j * cw + i] = this.chunkSeed(cx0 + i, cy0 + j);
 
+    const cr = {
+      x0: Math.min(r.x0, coarseRect.x0),
+      y0: Math.min(r.y0, coarseRect.y0),
+      x1: Math.max(r.x1, coarseRect.x1),
+      y1: Math.max(r.y1, coarseRect.y1),
+    };
     const coarse: CoarseBlock[] = COARSE_SPACINGS.map((S) => {
-      const ix0 = Math.floor((r.x0 - MAX_WARP) / S);
-      const iy0 = Math.floor((r.y0 - MAX_WARP) / S);
-      const w = Math.floor((r.x1 + MAX_WARP) / S) + 2 - ix0;
-      const h = Math.floor((r.y1 + MAX_WARP) / S) + 2 - iy0;
+      const ix0 = Math.floor((cr.x0 - MAX_WARP) / S);
+      const iy0 = Math.floor((cr.y0 - MAX_WARP) / S);
+      const w = Math.floor((cr.x1 + MAX_WARP) / S) + 2 - ix0;
+      const h = Math.floor((cr.y1 + MAX_WARP) / S) + 2 - iy0;
       const seeds = new Uint32Array(w * h);
       for (let j = 0; j < h; j++)
         for (let i = 0; i < w; i++) seeds[j * w + i] = this.coarseSeed(S, ix0 + i, iy0 + j);
@@ -111,7 +123,7 @@ export class SeedStore {
       const [sPart, rest] = k.split(':');
       const S = Number(sPart);
       const [ix, iy] = rest.split(',').map(Number);
-      const m = S + MAX_WARP + CHUNK * 1.5;
+      const m = S + MAX_WARP + CHUNK * 1.5 + COARSE_KEEP_EXTRA;
       const x = ix * S;
       const y = iy * S;
       if (x < keep.x0 - m || x > keep.x1 + m || y < keep.y0 - m || y > keep.y1 + m) this.coarse.delete(k);

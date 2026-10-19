@@ -1,22 +1,34 @@
-import type { TaskRequest, TaskResult, WorkerRequest, WorkerResponse } from './protocol';
+import type { TaskRequest, TaskResult, WorkerConfig, WorkerRequest, WorkerResponse } from './protocol';
 
 interface Slot {
   worker: Worker;
   busy: boolean;
 }
 
+/** What the chunk manager needs from a pool (a fake implements it in tests). */
+export interface TaskRunner {
+  readonly size: number;
+  readonly idle: number;
+  run(task: TaskRequest, transfer?: Transferable[]): Promise<TaskResult>;
+}
+
 /** Fixed-size pool; one task per worker at a time. The caller decides what to run next. */
-export class WorkerPool {
+export class WorkerPool implements TaskRunner {
   private readonly slots: Slot[] = [];
   private readonly pending = new Map<number, { resolve: (r: TaskResult) => void; reject: (e: Error) => void; slot: Slot }>();
   private nextId = 1;
 
-  constructor(size: number, private readonly onIdle: () => void) {
+  constructor(
+    size: number,
+    private readonly onIdle: () => void,
+    config: WorkerConfig['config'] = { regionOverride: NaN },
+  ) {
     for (let i = 0; i < size; i++) {
       const worker = new Worker(new URL('./worker.ts', import.meta.url), { type: 'module' });
       const slot: Slot = { worker, busy: false };
       worker.onmessage = (e: MessageEvent<WorkerResponse>) => this.receive(e.data);
       worker.onerror = (e) => console.error('worker error', e.message);
+      worker.postMessage({ config } satisfies WorkerConfig);
       this.slots.push(slot);
     }
   }

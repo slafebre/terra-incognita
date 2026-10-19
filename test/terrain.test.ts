@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { APRON, CHUNK, CELLS, DEM_W } from '../src/lib/constants';
 import { SeedStore, SeedView, type Rect } from '../src/gen/seeds';
-import { generateDem, regionKind } from '../src/gen/terrain';
+import { terrainGrid, regionKind } from '../src/gen/terrain';
 
 const chunkRect = (cx: number, cy: number, pad = 16): Rect => ({
   x0: cx * CHUNK - pad,
@@ -11,7 +11,7 @@ const chunkRect = (cx: number, cy: number, pad = 16): Rect => ({
 });
 
 const dem = (store: SeedStore, cx: number, cy: number) =>
-  generateDem(cx, cy, new SeedView(store.payloadFor(chunkRect(cx, cy)))).dem;
+  terrainGrid(cx, cy, new SeedView(store.payloadFor(chunkRect(cx, cy)))).dem;
 
 describe('terrain', () => {
   it('neighbouring chunks agree exactly on their shared edge and apron', () => {
@@ -62,7 +62,7 @@ describe('terrain', () => {
       const store = new SeedStore();
       const cx = Math.floor(Math.random() * 64) - 32;
       const cy = Math.floor(Math.random() * 64) - 32;
-      const r = generateDem(cx, cy, new SeedView(store.payloadFor(chunkRect(cx, cy))));
+      const r = terrainGrid(cx, cy, new SeedView(store.payloadFor(chunkRect(cx, cy))));
       counts[regionKind(r.region)]++;
       lo = Math.min(lo, r.min);
       hi = Math.max(hi, r.max);

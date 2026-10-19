@@ -4,6 +4,10 @@ import { CONTOURS, STYLE } from './style';
 
 export interface RenderInput {
   dem: Float32Array;
+  /** Lake depth per vertex (> 0 under water). */
+  water: Float32Array;
+  /** Stream polylines from `extractStreams`. */
+  streams: Float32Array;
   /** Raster edge length in device pixels. */
   pxSize: number;
   /** Device pixels per CSS pixel (line widths are specified in CSS px). */
@@ -35,7 +39,10 @@ function shadeAndSlope(dem: Float32Array): { shade: Float32Array; slope: Float32
   return { shade, slope };
 }
 
-export function renderChunk({ dem, pxSize, dpr }: RenderInput): OffscreenCanvas {
+/** River width in metres for drainage area A (km²). */
+export const riverWidth = (A: number) => 1.1 * Math.pow(A, 0.55);
+
+export function renderChunk({ dem, water, streams, pxSize, dpr }: RenderInput): OffscreenCanvas {
   const canvas = new OffscreenCanvas(pxSize, pxSize);
   const ctx = canvas.getContext('2d')!;
   const pxPerM = pxSize / CHUNK;
@@ -49,6 +56,7 @@ export function renderChunk({ dem, pxSize, dpr }: RenderInput): OffscreenCanvas 
   const sr = 1 - STYLE.shadow[0] / 255;
   const sg = 1 - STYLE.shadow[1] / 255;
   const sb = 1 - STYLE.shadow[2] / 255;
+  const [wr, wg, wb2] = STYLE.waterFill;
   const col0 = new Int32Array(pxSize);
   const colF = new Float32Array(pxSize);
   for (let p = 0; p < pxSize; p++) {
@@ -68,9 +76,21 @@ export function renderChunk({ dem, pxSize, dpr }: RenderInput): OffscreenCanvas 
       const top = shade[r0 + i] + (shade[r0 + i + 1] - shade[r0 + i]) * fx;
       const bot = shade[r1 + i] + (shade[r1 + i + 1] - shade[r1 + i]) * fx;
       const s = (top + (bot - top) * fy) * k;
-      data[o++] = pr * (1 - s * sr);
-      data[o++] = pg * (1 - s * sg);
-      data[o++] = pb * (1 - s * sb);
+      let r = pr * (1 - s * sr);
+      let g = pg * (1 - s * sg);
+      let b = pb * (1 - s * sb);
+      const wt = water[r0 + i] + (water[r0 + i + 1] - water[r0 + i]) * fx;
+      const wb = water[r1 + i] + (water[r1 + i + 1] - water[r1 + i]) * fx;
+      const wv = wt + (wb - wt) * fy;
+      if (wv > -0.2) {
+        const a = wv >= 0.2 ? 1 : (wv + 0.2) / 0.4;
+        r += (wr - r) * a;
+        g += (wg - g) * a;
+        b += (wb2 - b) * a;
+      }
+      data[o++] = r;
+      data[o++] = g;
+      data[o++] = b;
       data[o++] = 255;
     }
   }
@@ -91,8 +111,9 @@ export function renderChunk({ dem, pxSize, dpr }: RenderInput): OffscreenCanvas 
     APRON + CELLS + 1,
     CONTOURS.interval,
     (L, i, j) => {
-      if (L % 50 === 0) return true;
       const s = cellSlope(i, j);
+      if (s > CONTOURS.slopeDropAll) return false;
+      if (L % 50 === 0) return true;
       return L % 10 === 0 ? s <= CONTOURS.slopeDrop10 : s <= CONTOURS.slopeDrop5;
     },
   );
@@ -116,5 +137,101 @@ export function renderChunk({ dem, pxSize, dpr }: RenderInput): OffscreenCanvas 
   ctx.lineWidth = STYLE.contourIndexWidth * dpr;
   ctx.stroke(index);
 
+  // --- Lake shorelines --------------------------------------------------
+  const shore = marchingSquares(water, DEM_W, APRON - 1, APRON - 1, APRON + CELLS + 1, APRON + CELLS + 1, 1000, (L) => L === 0);
+  const shorePath = new Path2D();
+  for (const segs of shore.byLevel.values())
+    for (let n = 0; n < segs.length; n += 4) {
+      shorePath.moveTo((segs[n] - APRON) * scale, (segs[n + 1] - APRON) * scale);
+      shorePath.lineTo((segs[n + 2] - APRON) * scale, (segs[n + 3] - APRON) * scale);
+    }
+  ctx.strokeStyle = STYLE.waterLine;
+  ctx.lineWidth = STYLE.shoreWidth * dpr;
+  ctx.stroke(shorePath);
+
+  drawStreams(ctx, streams, pxPerM, dpr);
   return canvas;
+}
+
+const SMOOTH_W = [0.06, 0.12, 0.2, 0.24, 0.2, 0.12, 0.06];
+
+/**
+ * Gaussian smoothing over ±3 vertices, endpoints fixed (they're confluences or
+ * patch edges). Removes the 16 m D8 zig-zag. Local, so neighbouring chunks agree.
+ */
+function smoothPolyline(xs: number[], ys: number[]): void {
+  const n = xs.length;
+  if (n < 3) return;
+  const x0 = xs.slice();
+  const y0 = ys.slice();
+  for (let v = 1; v < n - 1; v++) {
+    let sx = 0;
+    let sy = 0;
+    let sw = 0;
+    for (let d = -3; d <= 3; d++) {
+      const u = v + d;
+      if (u < 0 || u >= n) continue;
+      const wgt = SMOOTH_W[d + 3];
+      sx += x0[u] * wgt;
+      sy += y0[u] * wgt;
+      sw += wgt;
+    }
+    xs[v] = sx / sw;
+    ys[v] = sy / sw;
+  }
+}
+
+/**
+ * Streams as smoothed polylines (quadratic curves through segment midpoints).
+ * Each piece is stroked with the width at its control vertex, bucketed into a
+ * few Path2Ds; casings for wide rivers are drawn first so confluences merge.
+ */
+function drawStreams(ctx: OffscreenCanvasRenderingContext2D, s: Float32Array, pxPerM: number, dpr: number): void {
+  const buckets = new Map<number, Path2D>();
+  const bucket = (w: number) => {
+    const key = Math.round(w * 4) / 4;
+    let p = buckets.get(key);
+    if (!p) buckets.set(key, (p = new Path2D()));
+    return p;
+  };
+  const minW = STYLE.streamMinWidth * dpr;
+  for (let o = 0; o < s.length; ) {
+    const n = s[o++];
+    const xs: number[] = [];
+    const ys: number[] = [];
+    const as: number[] = [];
+    for (let v = 0; v < n; v++) {
+      xs.push(s[o++] * pxPerM);
+      ys.push(s[o++] * pxPerM);
+      as.push(s[o++]);
+    }
+    smoothPolyline(xs, ys);
+    for (let v = 0; v < n - 1; v++) {
+      // Piece from the midpoint before vertex v (or v itself at the start) to the midpoint after it.
+      const w = Math.max(minW, riverWidth(as[v]) * pxPerM);
+      const p = bucket(w);
+      const sx = v === 0 ? xs[0] : (xs[v - 1] + xs[v]) / 2;
+      const sy = v === 0 ? ys[0] : (ys[v - 1] + ys[v]) / 2;
+      const ex = v === n - 2 ? xs[v + 1] : (xs[v] + xs[v + 1]) / 2;
+      const ey = v === n - 2 ? ys[v + 1] : (ys[v] + ys[v + 1]) / 2;
+      p.moveTo(sx, sy);
+      if (v === 0) p.lineTo(ex, ey);
+      else p.quadraticCurveTo(xs[v], ys[v], ex, ey);
+    }
+  }
+  ctx.lineCap = 'round';
+  ctx.lineJoin = 'round';
+  const cased = STYLE.streamCasedFrom * dpr;
+  const sorted = [...buckets.entries()].sort((a, b) => a[0] - b[0]);
+  ctx.strokeStyle = STYLE.waterLine;
+  for (const [w, p] of sorted) {
+    ctx.lineWidth = w < cased ? w : w + 1.1 * dpr;
+    ctx.stroke(p);
+  }
+  ctx.strokeStyle = STYLE.waterFillCss;
+  for (const [w, p] of sorted) {
+    if (w < cased) continue;
+    ctx.lineWidth = w - 0.2 * dpr;
+    ctx.stroke(p);
+  }
 }

@@ -45,6 +45,30 @@ function table(t: number[], r: number): number {
   );
 }
 
+/** Regional valley-floor level (m): where big rivers end up after erosion. */
+export function baseField(R: number, baseLevel: number): number {
+  return table(BASE, R) + baseLevel;
+}
+
+/** Erosion parameters by region: channel steepness k (in S = k·A^-0.5, A in km²) and max hillslope. */
+const ERODE_K = [0.012, 0.035, 0.08, 0.12, 0.15];
+const ERODE_SMAX = [0.18, 0.4, 0.7, 0.95, 1.1];
+export const erodeK = (R: number) => table(ERODE_K, R);
+export const erodeSmax = (R: number) => table(ERODE_SMAX, R);
+/**
+ * Tectonic uplift added to the surface before erosion (m). With enough uplift the
+ * landscape approaches the steady state of its drainage network: ridges form
+ * where valley sides meet instead of flat remnants of the noise surface.
+ */
+const UPLIFT = [0, 120, 450, 900, 1600];
+export const upliftOf = (R: number) => table(UPLIFT, R);
+/**
+ * How far below the local (uplifted) surface a window-edge outlet may sit (m):
+ * lowland rivers stay near grade; mountain valleys may be cut through the uplift.
+ */
+const MAX_INCISION = [6, 40, 120, 250, 400];
+export const maxIncisionOf = (R: number) => table(UPLIFT, R) + table(MAX_INCISION, R);
+
 export type RegionKind = 'lowland' | 'hills' | 'lowmountain' | 'alpine';
 
 export function regionKind(r: number): RegionKind {
@@ -52,6 +76,12 @@ export function regionKind(r: number): RegionKind {
   if (r < 0.52) return 'hills';
   if (r < 0.8) return 'lowmountain';
   return 'alpine';
+}
+
+/** Debug: force the region field to a constant (NaN = off). */
+let regionOverride = NaN;
+export function setRegionOverride(r: number): void {
+  regionOverride = r;
 }
 
 export class Terrain {
@@ -70,6 +100,7 @@ export class Terrain {
   }
 
   region(x: number, y: number): number {
+    if (!Number.isNaN(regionOverride)) return regionOverride;
     const r = 0.65 * gnoise(this.l16k, SALT_REGION_A, x, y) + 0.35 * gnoise(this.l8k, SALT_REGION_B, x, y);
     // Logistic rather than clamp: a hard clamp creases the terrain along the R = 0/1 isolines.
     return 1 / (1 + Math.exp(-6.4 * r));
@@ -85,13 +116,17 @@ export class Terrain {
 
   private readonly tmp = new Float64Array(4);
 
-  elevation(x: number, y: number): number {
+  elevation(x: number, y: number, minS = 0): number {
     this.fields(x, y, this.tmp);
-    return this.elevationWith(x, y, this.tmp[0], this.tmp[1], this.tmp[2], this.tmp[3]);
+    return this.elevationWith(x, y, this.tmp[0], this.tmp[1], this.tmp[2], this.tmp[3], minS);
   }
 
-  /** Elevation given precomputed slow fields (see `fields`). */
-  elevationWith(x: number, y: number, R: number, baseLevel: number, wx: number, wy: number): number {
+  /**
+   * Elevation given precomputed slow fields (see `fields`). Octaves with spacing
+   * below `minS` are skipped; normalisation is unchanged, so a truncated sample
+   * equals the full one minus fine detail.
+   */
+  elevationWith(x: number, y: number, R: number, baseLevel: number, wx: number, wy: number, minS = 0): number {
     const base = table(BASE, R) + baseLevel;
     const amp = table(AMP, R);
     const gain = table(GAIN, R);
@@ -106,6 +141,7 @@ export class Terrain {
     let dy = 0;
     for (let k = 0; k < SHAPE_OCTAVES.length; k++) {
       const L = this.shape[k];
+      if (L.S < minS) break;
       const warped = L.S >= WARP_COARSE_FROM;
       const n = gnoise(L, SALT_SHAPE + k * 0x9e3779b9, warped ? wx : x, warped ? wy : y);
       dx += a * ND[0];
@@ -122,6 +158,12 @@ export class Terrain {
       // Octaves below 64 m read as hummocks at 1:10k; keep them subtle.
       a *= L.S <= 128 ? gain * 0.75 : gain;
     }
+    // Normalise as if every octave had been evaluated.
+    for (let k = 0; k < SHAPE_OCTAVES.length; k++) {
+      if (this.shape[k].S >= minS) continue;
+      norm += a;
+      a *= this.shape[k].S <= 128 ? gain * 0.75 : gain;
+    }
     const f = 0.5 + fbm / norm;
     const rg = (rid / norm) * 1.5;
     const h = base + amp * lerp(f, rg, mount);
@@ -131,20 +173,19 @@ export class Terrain {
   }
 }
 
-export interface DemResult {
+/** Spacing (in DEM vertices) of the grid on which slow fields are evaluated and interpolated. */
+const FIELD_STEP = 4;
+
+export interface TerrainGrid {
   dem: Float32Array;
-  /** Region value at the chunk centre (debug / later stages). */
+  /** Region value at the chunk centre. */
   region: number;
   min: number;
   max: number;
 }
 
-/** Elevation grid for chunk (cx, cy): DEM_W × DEM_W vertices at CELL spacing, with apron. */
-/** Spacing (in DEM vertices) of the grid on which slow fields are evaluated and interpolated. */
-const FIELD_STEP = 4;
-
-/** Elevation grid for chunk (cx, cy): DEM_W × DEM_W vertices at CELL spacing, with apron. */
-export function generateDem(cx: number, cy: number, view: SeedView): DemResult {
+/** Un-eroded terrain for chunk (cx, cy): DEM_W × DEM_W vertices at CELL spacing, with apron. */
+export function terrainGrid(cx: number, cy: number, view: SeedView): TerrainGrid {
   const t = new Terrain(view);
   const dem = new Float32Array(DEM_W * DEM_W);
   const x0 = cx * CHUNK;

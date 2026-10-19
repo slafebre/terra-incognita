@@ -13,6 +13,15 @@ export const STYLE = {
   contourWidth: 0.55,
   contourIndexWidth: 1.15,
 
+  /** Water: IGN blue line work and pale blue fill. */
+  waterLine: 'rgb(28, 130, 210)',
+  waterFill: [190, 225, 247] as const,
+  waterFillCss: 'rgb(190, 225, 247)',
+  shoreWidth: 0.8,
+  /** Narrow streams: min width (CSS px); wider rivers get casings. */
+  streamMinWidth: 0.85,
+  streamCasedFrom: 2.4,
+
   grid: 'rgba(30, 110, 210, 0.55)',
   gridLabel: 'rgb(30, 100, 200)',
   gridWidth: 0.8,
@@ -26,4 +35,6 @@ export const CONTOURS = {
   slopeDrop5: 0.5,
   /** Above this slope, 10 m lines are dropped too (only 50 m index lines remain). */
   slopeDrop10: 1.25,
+  /** Above this slope (cliffs) no contours are drawn; rock symbols take over (milestone 3). */
+  slopeDropAll: 2.5,
 };

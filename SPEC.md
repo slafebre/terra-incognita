@@ -1,6 +1,6 @@
 # Topo — infinite generated topographic map
 
-Status: draft spec, 2026-10-19. Nothing implemented yet.
+Status: milestones 1 (terrain & viewer) and 2 (hydrology & erosion) implemented, 2026-10-19.
 
 ## 1. Product requirements (agreed)
 
@@ -38,23 +38,18 @@ Grid overlay
 
 ### 3.1 Staged generation
 
-Each chunk moves through stages. A stage can only run on a chunk once every chunk within its **dependency radius** has finished the previous stage (the same approach Minecraft's world generator uses). This is what makes features consistent across chunk borders.
+*(Revised in milestone 2. These are the stages as implemented; later milestones add their own.)*
 
-| # | Stage | Output | Needs neighbours at previous stage within |
-|---|---|---|---|
-| 0 | Region | region-type weights on a 2 km lattice | 2 cells |
-| 1 | Macro terrain | 64 m elevation grid | 3 chunks |
-| 2 | Macro hydrology | flow direction and accumulation, river and lake skeleton | 3 chunks |
-| 3 | Detail terrain | 4 m DEM with river valleys carved in | 1 chunk |
-| 4 | Land use | land-cover polygons, rock and scree masks | 1 chunk |
-| 5 | Settlements | site points with hierarchy and footprint extent | 2 chunks |
-| 6 | Networks | roads, railways, bridges and tunnels as polylines | 2 chunks |
-| 7 | Built-up | town streets, buildings, parcels, hedges, symbols | 1 chunk |
-| 8 | Render | chunk raster(s) | 1 chunk (to draw features crossing the border) |
+| Stage | Output | Runs when |
+|---|---|---|
+| `pre` | Uplift surface `zPre` and region R on a 16 m node grid. Batched 8 chunks per task. | Chunk is within generation rectangle + 1 chunk + 3 chunks. |
+| `hydro` | Window solve centred on the chunk (§3.3). Keeps the chunk ± 16 nodes. | Every chunk within ±3 chunks has `pre`. Solves are independent, so they run fully in parallel. |
+| `dem` | 4 m DEM, lake depth field, stream polylines, built from a blend of the 3×3 surrounding solves. | The chunk and its 8 neighbours have `hydro`. |
+| `render` | Raster (hillshade, lakes, contours, shorelines, streams). | DEM exists. Re-run when the zoom bucket changes. |
 
-- The **finished set** contains chunks at stage 8. The viewport must always lie inside it.
-- The **retention set** contains chunks within viewport + 4 km. Chunks outside it are forgotten at every stage, with hysteresis (forget at 4.5 km) so they don't thrash.
-- The scheduler ranks work by distance from the viewport centre, weighted by the pan direction. Lower stages are pre-generated further ahead.
+- Every stage is a **pure function of the seeds**; nothing depends on the order in which chunks are generated.
+- The **finished set** contains chunks with a bitmap. The viewport must always lie inside it.
+- Chunks outside viewport + 4.5 km + 1 chunk are forgotten. When a chunk is forgotten, its neighbours drop their DEM and bitmap, because those blended its solve.
 
 ### 3.2 Emergent generation (no global seed)
 
@@ -74,14 +69,57 @@ Each chunk moves through stages. A stage can only run on a chunk once every chun
 - **Performance.** Slow fields (region, base level, warp) are evaluated on a world-aligned 16 m grid and interpolated. Noise reuses each lattice cell's corner gradients between samples. Terrain takes about 14 ms per chunk in node.
 - Unknown terrain beyond the generation frontier needs no special handling: it's just lattice points that don't exist yet.
 
-### 3.3 Hydrology with partial knowledge
+### 3.3 Hydrology and erosion
 
-- Priority-flood depression handling runs on the macro grid over the retained area. **Unknown space counts as an outlet**, so water can always drain toward unexplored land.
-- Lakes are depressions that are deliberately kept (likely in alpine and glacial regions, rare in lowland), plus occasional reservoirs behind dams. Each one gets a spill point and an outflow.
-- Rivers carry an `upstreamArea` attribute. Rivers flowing in from forgotten or unknown space are given a synthetic upstream area, which drives their width and class.
-- Rule: **water never flows uphill**. River long-profiles are made monotonic by carving valleys into the detail DEM (V-shaped in mountains, floodplain in lowland).
-- Streams appear at the detail level where flow accumulation exceeds about 0.3 km². Big rivers become double-line polygons at 1:10k when wider than about 8 m.
-- **Open question:** seas and coastlines are not included yet. See §8.
+*(Revised twice in milestone 2. This is the design as implemented, in `src/gen/hydro.ts`. An earlier design froze each solve's result and made later solves respect it. It produced rectangular seams wherever overlapping solves disagreed, and was replaced by blending.)*
+
+**Grid and uplift**
+- Nodes are 16 m apart. `zPre` is the terrain without octaves < 64 m, plus regional **uplift**: 0 m in lowland, 120 m in hills, 450 m in low mountains, up to 1,600 m in alpine areas.
+- The eroded landscape therefore approaches the steady state of its drainage network.
+
+**Coarse base level**
+- Coarse solves (256 m nodes, same erosion law) run on a **fixed lattice of overlapping 20 km tiles** at a 10 km stride, blended bilinearly.
+- This makes the base level a pure function of the coarse seeds (kept within viewport + 4.5 km + 24 km).
+- Each worker caches tiles, keyed by tile and a hash of the seeds they depend on.
+
+**Window solve (one per chunk, ±3 chunks, 224² nodes)**
+1. **Outlets.**
+   - Window-edge nodes drain at `max(min(zPre, coarse base), zPre − maxIncision(R))`.
+   - Big coarse rivers entering the window are injected as inflows.
+2. **Routing.**
+   - Priority-flood filling, then stochastic routing: a lower neighbour weighted by slope².
+   - The randomness is **tied to place**: a hash of the node and its chunk's seed. Overlapping solves therefore agree on routing.
+3. **Four erosion passes** of route → accumulate → carve:
+   - Later passes use steepest descent on the carved surface, keeping the current receiver unless another neighbour is more than 1.5× steeper.
+   - Carving: `zE = max(zE(rec) + ε·d, min(zPre, zE(rec) + S·d))`, with `S = clamp(k(R)·A^-½, 3e-4, Smax(R))`.
+   - `k` ranges from 0.012 (lowland) to 0.15 (alpine). `Smax` ranges from 0.18 to 1.1.
+4. **Lakes.**
+   - *Dammed lakes:* every chunk has a seeded 5–12% chance of a dam (1.5–25 m by region) at a place-bound site. The lake floods upstream unless it would leak.
+   - *Natural lakes:* filled depressions of at least 25 nodes and 1.5 m deep.
+5. **Valley floors** around channels with A ≥ 0.5 km² (floodplains, glacial U-floors). Half-width is `k·√A`, capped at 180 m.
+6. **Hillslope limiter.** Lower envelope: no hillslope node sits more than 1.15·Smax·d above any neighbour, which removes cliffs.
+7. **Final drainage guarantee.** A priority-flood from the outlets fills any remaining pit by a hair and routes it on. Every receiver points at an earlier-settled node, so there are no dead ends and no cycles. Accumulation is then recomputed.
+8. **Output.** Only the core is kept: the chunk ± 16 nodes, i.e. the support of its blend weight.
+
+**Blending**
+- A node's elevation is the blend of the four solves whose centres surround it.
+- Weights are `cos²(π/2 · distance / chunk)` per axis. They sum to 1 and have zero slope at both ends, so the blend has no creases. A weight is zero one chunk from its centre, far from any window edge.
+- Lakes blend by majority (weight ≥ 0.5), with a weighted level.
+- Receivers and drainage area come from the solve of the node's own chunk. A stream crossing into a chunk whose solve has a smaller catchment there is carried on downstream by the renderer.
+
+**DEM (4 m)**
+- Cubic B-spline of the blended eroded nodes.
+- Plus fine terrain detail where the land wasn't carved, and up to 60% of it on steep eroded slopes.
+- Lakes are flat at their level. Shorelines come from `min(level − ground, splined lake mask)`.
+
+**Streams**
+- Channels with A ≥ 0.07–0.3 km² become polylines split at heads and confluences. The threshold is continuous in R, and everything downstream of a stream head stays a stream until it reaches a lake.
+- They're Gaussian-smoothed over ±3 vertices and stroked per segment with width `1.1·A^0.55` m. Wider rivers get a casing.
+
+**Invariants (tested)**
+- DEM edges and aprons are identical between neighbouring chunks.
+- DEM curvature at chunk borders and through chunk middles is within 1.3× of elsewhere (no seams).
+- No stream node without a receiver (no dead ends).
 
 ### 3.4 Settlements
 

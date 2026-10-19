@@ -3,7 +3,7 @@ import { ChunkManager, forChunksIn } from './chunks/manager';
 import { STYLE } from './render/style';
 import { drawGrid } from './view/grid';
 import { Input } from './view/input';
-import { Viewport, zoomBucket, type ViewState } from './view/viewport';
+import { clampZoom, Viewport, zoomBucket, type ViewState } from './view/viewport';
 import { WorkerPool } from './worker/pool';
 import './style.css';
 
@@ -14,18 +14,20 @@ const debug = new URLSearchParams(location.search).has('debug');
 
 const vp = new Viewport();
 // Start somewhere arbitrary: lattice points (like the origin) are where noise is flattest.
-// `?at=x,y` (world metres) is handy for debugging.
+// `?at=x,y` (world metres) and `?z=zoom` are handy for debugging.
 const at = new URLSearchParams(location.search).get('at')?.split(',').map(Number);
 const actual: ViewState = {
   x: at?.[0] ?? Math.round((Math.random() - 0.5) * 2e6),
   y: at?.[1] ?? Math.round((Math.random() - 0.5) * 2e6),
-  zoom: 1,
+  zoom: clampZoom(Number(new URLSearchParams(location.search).get('z') ?? 1) || 1),
 };
 const desired: ViewState = { ...actual };
 
 let dirty = true;
 const workers = Math.max(1, Math.min(4, (navigator.hardwareConcurrency || 2) - 1));
-const pool = new WorkerPool(workers, () => manager.schedule());
+// Debug: `?R=0.1` forces the region (0 lowland … 1 alpine) everywhere.
+const regionOverride = Number(new URLSearchParams(location.search).get('R') ?? NaN);
+const pool = new WorkerPool(workers, () => manager.schedule(), { regionOverride });
 const manager = new ChunkManager(pool, () => (dirty = true));
 const input = new Input(canvas, vp, actual, desired);
 
@@ -127,7 +129,17 @@ function drawDebug(r: { x0: number; y0: number }, k: number): void {
     const y = (c.cy * CHUNK - r.y0) * k;
     const s = CHUNK * k;
     if (x > canvas.width || y > canvas.height || x + s < 0 || y + s < 0) continue;
-    ctx.strokeStyle = c.failed ? 'red' : c.bitmap ? 'rgba(0,150,0,0.4)' : c.dem ? 'orange' : 'rgba(0,0,0,0.25)';
+    ctx.strokeStyle = c.failed
+      ? 'red'
+      : c.bitmap
+        ? 'rgba(0,150,0,0.4)'
+        : c.dem
+          ? 'orange'
+          : c.hydro
+            ? 'purple'
+            : c.pre
+              ? 'rgba(0,0,255,0.3)'
+              : 'rgba(0,0,0,0.2)';
     ctx.strokeRect(x + 0.5, y + 0.5, s - 1, s - 1);
     if (c.busy) {
       ctx.fillStyle = 'rgba(255,0,0,0.12)';
@@ -135,16 +147,17 @@ function drawDebug(r: { x0: number; y0: number }, k: number): void {
     }
   }
   const st = manager.stats;
+  const avg = (k: 'pre' | 'hydro' | 'dem' | 'render') => `${k} ${(st[k].ms / Math.max(1, st[k].n)).toFixed(1)}ms×${st[k].n}`;
   const lines = [
-    `chunks ${manager.chunks.size}  seeds ${manager.seeds.chunk.size}+${manager.seeds.coarse.size}`,
-    `terrain ${(st.terrainMs / Math.max(1, st.terrainN)).toFixed(1)} ms (${st.terrainN})`,
-    `render ${(st.renderMs / Math.max(1, st.renderN)).toFixed(1)} ms (${st.renderN})  px ${manager.pxSize}`,
-    `zoom ${actual.zoom.toFixed(2)} bucket ${manager.renderBucket}  workers ${pool.size}  errors ${st.errors}`,
+    `chunks ${manager.chunks.size}  seeds ${manager.seeds.chunk.size}+${manager.seeds.coarse.size}  errors ${st.errors}`,
+    `${avg('pre')}  ${avg('hydro')}`,
+    `${avg('dem')}  ${avg('render')}`,
+    `zoom ${actual.zoom.toFixed(2)} bucket ${manager.renderBucket} px ${manager.pxSize} workers ${pool.size}`,
   ];
   ctx.setTransform(vp.dpr, 0, 0, vp.dpr, 0, 0);
   ctx.font = '12px ui-monospace, monospace';
   ctx.fillStyle = 'rgba(255,255,255,0.85)';
-  ctx.fillRect(8, 24, 330, lines.length * 16 + 8);
+  ctx.fillRect(8, 24, 380, lines.length * 16 + 8);
   ctx.fillStyle = '#000';
   lines.forEach((l, i) => ctx.fillText(l, 14, 40 + i * 16));
 }
