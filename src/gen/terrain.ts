@@ -1,0 +1,196 @@
+import { APRON, CELL, CHUNK, DEM_W } from '../lib/constants';
+import { clamp, gnoise, lerp, ND, smoothstep } from '../lib/noise';
+import type { Lattice, SeedView } from './seeds';
+
+/**
+ * Terrain: elevation as a pure function of the retained seeds.
+ *
+ * - Region field R in [0, 1] (0 lowland, ~0.35 bocage/hills, ~0.6 low mountains,
+ *   >0.82 alpine) varies on a 8–20 km scale.
+ * - Shape: derivative-damped fBm (smooth slopes, detail on flats) blended into a
+ *   ridged multifractal (sharp crests, broad valleys) as R grows.
+ * - Coarse octaves are domain-warped so ridges and valleys meander.
+ */
+
+const SHAPE_OCTAVES = [4096, 2048, 1024, 512, 256, 128, 64, 32, 16, 8];
+const WARP_COARSE_FROM = 1024;
+
+const SALT_REGION_A = 0x5a17c3d1;
+const SALT_REGION_B = 0x13e0b4a9;
+const SALT_WARP = [0x7b2f1e03, 0x2c9d4a61, 0x61f0a2b7, 0x4ad3e91c];
+const SALT_SHAPE = 0x3b1d77c5;
+
+/** Region parameters sampled at R = 0, 0.25, 0.5, 0.75, 1. */
+const BASE = [60, 160, 320, 600, 1000];
+const AMP = [22, 110, 340, 850, 2100];
+const GAIN = [0.38, 0.45, 0.48, 0.48, 0.47];
+/** Independent regional base-level field (m), so lowlands tilt instead of forming bowls. */
+const BASE_LEVEL_AMP = 220;
+const SALT_BASE_A = 0x0f1e2d3c;
+const SALT_BASE_B = 0x4b5a6978;
+
+/** C1 Catmull-Rom interpolation through evenly spaced samples (piecewise-linear would crease the terrain). */
+function table(t: number[], r: number): number {
+  const n = t.length - 1;
+  const f = clamp(r, 0, 1) * n;
+  const i = Math.min(n - 1, Math.floor(f));
+  const u = f - i;
+  const p0 = t[Math.max(0, i - 1)];
+  const p1 = t[i];
+  const p2 = t[i + 1];
+  const p3 = t[Math.min(n, i + 2)];
+  return (
+    p1 +
+    0.5 * u * (p2 - p0 + u * (2 * p0 - 5 * p1 + 4 * p2 - p3 + u * (3 * (p1 - p2) + p3 - p0)))
+  );
+}
+
+export type RegionKind = 'lowland' | 'hills' | 'lowmountain' | 'alpine';
+
+export function regionKind(r: number): RegionKind {
+  if (r < 0.25) return 'lowland';
+  if (r < 0.52) return 'hills';
+  if (r < 0.8) return 'lowmountain';
+  return 'alpine';
+}
+
+export class Terrain {
+  private readonly l16k: Lattice;
+  private readonly l8k: Lattice;
+  private readonly l4k: Lattice;
+  private readonly l2k: Lattice;
+  private readonly shape: Lattice[];
+
+  constructor(view: SeedView) {
+    this.l16k = view.lattice(16384);
+    this.l8k = view.lattice(8192);
+    this.l4k = view.lattice(4096);
+    this.l2k = view.lattice(2048);
+    this.shape = SHAPE_OCTAVES.map((S) => view.lattice(S));
+  }
+
+  region(x: number, y: number): number {
+    const r = 0.65 * gnoise(this.l16k, SALT_REGION_A, x, y) + 0.35 * gnoise(this.l8k, SALT_REGION_B, x, y);
+    // Logistic rather than clamp: a hard clamp creases the terrain along the R = 0/1 isolines.
+    return 1 / (1 + Math.exp(-6.4 * r));
+  }
+
+  /** Slowly varying fields at (x, y): [region, base level offset, warped x, warped y]. */
+  fields(x: number, y: number, out: Float64Array, o = 0): void {
+    out[o] = this.region(x, y);
+    out[o + 1] = BASE_LEVEL_AMP * (0.7 * gnoise(this.l16k, SALT_BASE_A, x, y) + 0.3 * gnoise(this.l8k, SALT_BASE_B, x, y));
+    out[o + 2] = x + 380 * gnoise(this.l4k, SALT_WARP[0], x, y) + 160 * gnoise(this.l2k, SALT_WARP[1], x, y);
+    out[o + 3] = y + 380 * gnoise(this.l4k, SALT_WARP[2], x, y) + 160 * gnoise(this.l2k, SALT_WARP[3], x, y);
+  }
+
+  private readonly tmp = new Float64Array(4);
+
+  elevation(x: number, y: number): number {
+    this.fields(x, y, this.tmp);
+    return this.elevationWith(x, y, this.tmp[0], this.tmp[1], this.tmp[2], this.tmp[3]);
+  }
+
+  /** Elevation given precomputed slow fields (see `fields`). */
+  elevationWith(x: number, y: number, R: number, baseLevel: number, wx: number, wy: number): number {
+    const base = table(BASE, R) + baseLevel;
+    const amp = table(AMP, R);
+    const gain = table(GAIN, R);
+    const mount = smoothstep(0.5, 0.92, R);
+
+    let a = 1;
+    let norm = 0;
+    let fbm = 0;
+    let rid = 0;
+    let w = 1;
+    let dx = 0;
+    let dy = 0;
+    for (let k = 0; k < SHAPE_OCTAVES.length; k++) {
+      const L = this.shape[k];
+      const warped = L.S >= WARP_COARSE_FROM;
+      const n = gnoise(L, SALT_SHAPE + k * 0x9e3779b9, warped ? wx : x, warped ? wy : y);
+      dx += a * ND[0];
+      dy += a * ND[1];
+      const slope = amp * Math.sqrt(dx * dx + dy * dy) * 0.5;
+      fbm += (a * n) / (1 + 1.5 * slope * slope);
+      const damp = 1 / (1 + 1.5 * slope * slope);
+      let r = 1 - Math.abs(n);
+      r *= r;
+      r *= w;
+      w = clamp(r * 2, 0, 1);
+      rid += a * r * (k < 3 ? 1 : damp);
+      norm += a;
+      // Octaves below 64 m read as hummocks at 1:10k; keep them subtle.
+      a *= L.S <= 128 ? gain * 0.75 : gain;
+    }
+    const f = 0.5 + fbm / norm;
+    const rg = (rid / norm) * 1.5;
+    const h = base + amp * lerp(f, rg, mount);
+    // Soft floor: inland map, keep everything comfortably above sea level.
+    const u = (h - 20) / 25;
+    return u > 20 ? h : 20 + 25 * Math.log1p(Math.exp(u));
+  }
+}
+
+export interface DemResult {
+  dem: Float32Array;
+  /** Region value at the chunk centre (debug / later stages). */
+  region: number;
+  min: number;
+  max: number;
+}
+
+/** Elevation grid for chunk (cx, cy): DEM_W × DEM_W vertices at CELL spacing, with apron. */
+/** Spacing (in DEM vertices) of the grid on which slow fields are evaluated and interpolated. */
+const FIELD_STEP = 4;
+
+/** Elevation grid for chunk (cx, cy): DEM_W × DEM_W vertices at CELL spacing, with apron. */
+export function generateDem(cx: number, cy: number, view: SeedView): DemResult {
+  const t = new Terrain(view);
+  const dem = new Float32Array(DEM_W * DEM_W);
+  const x0 = cx * CHUNK;
+  const y0 = cy * CHUNK;
+
+  // Slow fields on a world-aligned grid (nodes at multiples of FIELD_STEP * CELL), so
+  // neighbouring chunks interpolate identical node values and stay seamless.
+  const k0 = Math.floor(-APRON / FIELD_STEP);
+  const k1 = Math.ceil((DEM_W - 1 - APRON) / FIELD_STEP);
+  const fw = k1 - k0 + 1;
+  const f = new Float64Array(fw * fw * 4);
+  for (let kj = 0; kj < fw; kj++)
+    for (let ki = 0; ki < fw; ki++)
+      t.fields(x0 + (k0 + ki) * FIELD_STEP * CELL, y0 + (k0 + kj) * FIELD_STEP * CELL, f, (kj * fw + ki) * 4);
+
+  const lerpField = (c: number, ki: number, kj: number, u: number, v: number) => {
+    const a = (kj * fw + ki) * 4 + c;
+    const b = a + 4;
+    const d = a + fw * 4;
+    const e = d + 4;
+    return (f[a] * (1 - u) + f[b] * u) * (1 - v) + (f[d] * (1 - u) + f[e] * u) * v;
+  };
+
+  let min = Infinity;
+  let max = -Infinity;
+  for (let j = 0; j < DEM_W; j++) {
+    const gj = j - APRON;
+    const kj = Math.floor(gj / FIELD_STEP) - k0;
+    const v = (gj - (kj + k0) * FIELD_STEP) / FIELD_STEP;
+    const y = y0 + gj * CELL;
+    for (let i = 0; i < DEM_W; i++) {
+      const gi = i - APRON;
+      const ki = Math.floor(gi / FIELD_STEP) - k0;
+      const u = (gi - (ki + k0) * FIELD_STEP) / FIELD_STEP;
+      const h = t.elevationWith(
+        x0 + gi * CELL,
+        y,
+        lerpField(0, ki, kj, u, v),
+        lerpField(1, ki, kj, u, v),
+        lerpField(2, ki, kj, u, v),
+        lerpField(3, ki, kj, u, v),
+      );
+      dem[j * DEM_W + i] = h;
+      if (h < min) min = h;
+      if (h > max) max = h;
+    }
+  }
+  return { dem, region: t.region(x0 + CHUNK / 2, y0 + CHUNK / 2), min, max };
+}

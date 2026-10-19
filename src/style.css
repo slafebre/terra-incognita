@@ -1,0 +1,34 @@
+html,
+body {
+  margin: 0;
+  height: 100%;
+  overflow: hidden;
+  background: #fcfaf3;
+  overscroll-behavior: none;
+}
+#map {
+  display: block;
+  touch-action: none;
+  cursor: grab;
+  user-select: none;
+  -webkit-user-select: none;
+}
+#map:active {
+  cursor: grabbing;
+}
+#loading {
+  position: fixed;
+  left: 50%;
+  bottom: 28px;
+  transform: translateX(-50%);
+  padding: 6px 14px;
+  border-radius: 999px;
+  background: rgba(252, 250, 243, 0.92);
+  color: #6b5a44;
+  font: 500 13px ui-sans-serif, system-ui, sans-serif;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.15);
+  pointer-events: none;
+}
+#loading[hidden] {
+  display: none;
+}
