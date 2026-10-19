@@ -1,6 +1,6 @@
 # Topo — infinite generated topographic map
 
-Status: milestones 1 (terrain & viewer) and 2 (hydrology & erosion) implemented, 2026-10-19.
+Status: milestones 1 (terrain & viewer), 2 (hydrology & erosion) and 3 (land cover) implemented, 2026-10-19.
 
 ## 1. Product requirements (agreed)
 
@@ -153,9 +153,29 @@ Grid overlay
 - **Buildings** are footprint polygons aligned to the street, with setbacks. Farmyards in villages are L- or U-shaped. Industrial halls are larger. Building density and size depend on settlement rank and distance from the centre.
 - **Parcels** subdivide farmland bounded by roads and tracks. Shapes depend on the region: strip fields in lowland, small irregular fields with **hedges** in bocage, terraces on steep slopes. Vineyards go on south-facing slopes at roughly 150–500 m, orchards around villages.
 
-### 3.7 Land use
+### 3.7 Land cover
 
-Rules use slope, aspect, elevation, region, distance to settlement and wetness: forest (deciduous, conifer, mixed), meadow, cropland, vineyard, orchard, heath, wetland, rock, scree, alpine grass, and glaciers above about 2,800 m (see §8).
+*(Milestone 3, as implemented in `src/gen/landcover.ts` and `src/render/landcover.ts`.)*
+
+**Fields**
+- Land cover is a set of continuous fields on the 4 m DEM grid; a class is present where its field is above 0. Values are stored as Int8.
+- The inputs are all chunk-consistent: the blended eroded surface (slope, aspect and topographic position from nodes, splined), the region, and seeded noise. The noise is evaluated on a world-aligned 8 m grid and interpolated.
+- Class boundaries therefore match exactly across chunk borders.
+
+**Classes, in drawing priority order**
+
+| Class | Rule (summary) |
+|---|---|
+| Glacier | Above an equilibrium line of about 2,850 m, ±150 m by aspect (lower on north faces). Not on slopes over about 0.85. |
+| Rock | Slope over 1.0, falling to 0.75 above 2,100–2,900 m. |
+| Scree | Slope 0.5–0.95, above the treeline, on concave foot-slopes (negative topographic position). |
+| Forest | Regional bias, plus noise for natural blocks, plus steepness *relative to the region's typical maximum slope*, plus topographic position. Capped by an aspect-dependent treeline (about 1,950 m ± 130 m). Conifer share rises with altitude and region. |
+| Vineyard | South-facing slopes of 0.08–0.45, at 100–750 m, in hill country. |
+| Wetland | Flat (slope under 0.025), concave valley bottoms and hollows, more common in lowland. |
+| Heath / dwarf pine | A band from just below the treeline to about 300 m above it. |
+
+- **Calibrated forest cover** (from `dev/coverstats.ts`): about 16% in lowland, 35–45% in hills, 55–60% in low mountains. Alpine terrain has rock about 11%, scree about 9% and heath about 24%.
+- Settlement-driven land use (orchards, gardens, clearings around villages) belongs to milestones 4–5.
 
 ### 3.8 Point symbols
 
@@ -163,11 +183,21 @@ Church (one per village, cathedral-sized in towns), chapel, wayside cross at jun
 
 ## 4. Rendering (IGN Top25 adapted to 1:10k)
 
-- Chunks are rendered **inside workers** with `OffscreenCanvas` and transferred as `ImageBitmap`. The main thread only composites and draws the grid.
-- Rasters are drawn at DPR, capped at 2. During a zoom gesture the bitmaps are scaled. When the gesture ends, chunks are re-rendered for the new zoom bucket.
-- Layer order: paper → hillshade (NW light, warm grey multiply) → land use fills → parcels and hedges → contours → rock hatching and scree → water → tracks and paths → road casings → road fills → railways → buildings → symbols. The km grid is drawn on the main thread.
-- Adaptive contours come from marching squares on the 4 m DEM, per chunk with a one-cell overlap so lines join at borders. The interval switches per chunk-region by local slope percentile, blended so index lines stay continuous.
-- The palette (contour brown, water blue, forest green, road red/yellow/white, black buildings, blue km grid) goes into a single `style.ts` token file.
+- **Where it runs.** Chunks are rendered **inside workers** with `OffscreenCanvas` and transferred as `ImageBitmap`. The main thread only composites and draws the kilometre grid.
+- **Resolution.** Rasters are drawn at DPR, capped at 2. During a zoom gesture the bitmaps are scaled; when the gesture ends, chunks are re-rendered for the new zoom bucket.
+- **Pixel pass.** Paper or land-cover fill (with anti-aliased edges), multiplied by the hillshade (light from the NW), then lake fill.
+- **Contours.**
+  - Adaptive interval: 5 m, dropping to 10 m where slopes are over 0.5, then index lines only, and none on cliffs (slope over 2.5).
+  - Drawn at 40% opacity. On glaciers they're blue.
+- **Symbols** sit on a world-aligned jittered grid, so neighbouring chunks place and classify them identically:
+  - rock hachures along the fall line
+  - scree stipple
+  - vine dots
+  - broadleaf (circle) and conifer (fir) symbols every ~40 m
+  - heath circles
+  - marsh tufts
+- **Water.** Lake shorelines, then streams. Streams are Gaussian-smoothed polylines; wide rivers get a blue casing with a pale fill.
+- **Style.** The palette lives in `src/render/style.ts`.
 
 ## 5. Performance budgets
 

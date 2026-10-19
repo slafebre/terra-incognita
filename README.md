@@ -16,5 +16,6 @@ npm test
 Dev tools:
 - `/dev/overview.html?size=24000` renders a 24 km overview of the un-eroded terrain, tinted by region type.
 - `npx vite-node dev/probe.ts` drives the whole pipeline in-process (no workers) and prints per-task timings.
+- `npx vite-node dev/coverstats.ts [areas] [R,R,…]` reports land cover percentages per region type (for calibration).
 
 Controls: drag or arrow keys/WASD to pan, pinch, ctrl/⌘+wheel, trackpad pinch or +/- to zoom (0.5×–2×).
