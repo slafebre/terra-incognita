@@ -6,6 +6,7 @@
 import { ChunkManager } from '../src/chunks/manager';
 import { mergeApproaches, type RoadEdge, type SegmentPath } from '../src/gen/roads';
 import type { Site } from '../src/gen/settle';
+import { nearestVertex, vertexPos } from '../src/gen/lattice';
 import { setRegionOverride } from '../src/gen/terrain';
 import { APRON, CELL, CHUNK, DEM_W } from '../src/lib/constants';
 import type { TaskRequest, TaskResult } from '../src/worker/protocol';
@@ -77,7 +78,7 @@ let waterAt: (x: number, y: number) => number = () => NaN;
 
 /** Base seed: areas are reproducible (Math.random drives every fresh seed), so code versions compare on the same terrain. */
 const SEED = Number(process.env.SEED ?? 1);
-setNetworkMode(process.env.NET ?? 'mesh');
+setNetworkMode(process.env.NET ?? 'lattice');
 let areaNo = 0;
 
 async function segments(R: number): Promise<SegmentPath[]> {
@@ -286,6 +287,8 @@ const detour = [[0, 0], [0, 0], [0, 0]];
 const flat: string[] = [];
 const loops = [[0, 0], [0, 0], [0, 0]];
 let loopsN = 0, areaKm2 = 0, inKm = 0, loopsRaw = 0, deadFine = 0, deadCoarse = 0;
+const siteCount = [0, 0, 0, 0];
+const unreached = [0, 0, 0, 0];
 for (const R of REGIONS) {
   let km = 0, crossings = 0, alongside = 0;
   for (let a = 0; a < AREAS; a++) {
@@ -295,6 +298,29 @@ for (const R of REGIONS) {
     const s = stats(segs);
     const lp = smallLoops(segs);
     const de = deadEnds(segs);
+    // Settlements in the area that no road reaches (within 120 m of a drawn road point).
+    {
+      const pts = new Set<string>();
+      for (const g of segs) for (let i = 0; i < g.xy.length; i += 2) pts.add(`${Math.floor(g.xy[i] / 100)},${Math.floor(g.xy[i + 1] / 100)}`);
+      const reached = (s: Site) => {
+        for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) if (pts.has(`${Math.floor(s.x / 100) + dx},${Math.floor(s.y / 100) + dy}`)) return true;
+        return false;
+      };
+      for (const st of lastSites) {
+        if (st.x < area.x0 || st.x >= area.x1 || st.y < area.y0 || st.y >= area.y1) continue;
+        siteCount[st.rank]++;
+        if (!reached(st)) {
+          unreached[st.rank]++;
+          if (process.env.UNLOG) {
+            const v = nearestVertex(st.x, st.y);
+            const [vx, vy] = vertexPos(v);
+            const edgesAt = lastEdges.filter((e) => (e.route[0] === vx && e.route[1] === vy) || (e.route[2] === vx && e.route[3] === vy)).length;
+            const near = lastEdges.filter((e) => Math.hypot(e.route[0] - st.x, e.route[1] - st.y) < 400).length;
+            console.log(`  unreached rank ${st.rank} at ${Math.round(st.x)},${Math.round(st.y)}: vertex ${Math.round(Math.hypot(vx - st.x, vy - st.y))} m away, edges there ${edgesAt}, edges within 400 m ${near}`);
+          }
+        }
+      }
+    }
     for (const g of raw) {
       const n = g.xy.length;
       const chord = Math.hypot(g.xy[n - 2] - g.xy[0], g.xy[n - 1] - g.xy[1]);
@@ -361,6 +387,9 @@ for (const R of REGIONS) {
   detour.forEach((d) => d.fill(0));
   console.log(`SMALL LOOPS R=${R}: ${loopsN} in ${areaKm2} km² with ${inKm.toFixed(0)} km road → ${((100 * loopsN) / inKm).toFixed(1)} per 100 km (unmerged ${((100 * loopsRaw) / inKm).toFixed(1)})`);
   console.log(`DEAD ENDS R=${R}: drawn ${deadFine}, in the network ${deadCoarse}`);
+  console.log(`UNREACHED R=${R} town/village/hamlet/farm: ${unreached.map((u, i) => `${u}/${siteCount[i]}`).join('  ')}`);
+  siteCount.fill(0);
+  unreached.fill(0);
   deadFine = 0;
   deadCoarse = 0;
   loopsRaw = 0;

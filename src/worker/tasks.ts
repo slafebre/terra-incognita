@@ -1,5 +1,6 @@
 import { generateDem } from '../gen/dem';
 import { CoarseField, generatePre, solveHydro } from '../gen/hydro';
+import { latticeCell, routeCurves } from '../gen/lattice';
 import { meshCell, networkMode } from '../gen/network';
 import { netCell, routeSegments } from '../gen/roads';
 import { Settlements } from '../gen/settle';
@@ -33,12 +34,12 @@ export function runTask(t: TaskRequest): { result: TaskResult; transfer: Transfe
       const view = new SeedView(t.seeds);
       const terrain = new Terrain(view);
       const field = new CoarseField(terrain, view);
-      const build = networkMode() === 'tree' ? netCell : meshCell;
+      const build = { tree: netCell, mesh: meshCell, lattice: latticeCell }[networkMode()];
       const result = build(t.gx, t.gy, field, new Settlements(field, terrain, view));
       return { result: { kind: 'net', result, ms: ms() }, transfer: [] };
     }
     case 'roads': {
-      const result = routeSegments(t.segments, t.patch);
+      const result = t.segments.some((s) => s.curve) ? routeCurves(t.segments, t.patch) : routeSegments(t.segments, t.patch);
       return { result: { kind: 'roads', result, ms: ms() }, transfer: result.map((r) => r.xy.buffer) };
     }
     case 'dem': {

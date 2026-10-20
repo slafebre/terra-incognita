@@ -11,6 +11,8 @@ import {
   type HydroWindow,
   type PreResult,
 } from '../gen/hydro';
+import { latticeSegments } from '../gen/lattice';
+import { networkMode } from '../gen/network';
 import { NET_CELL, NET_REACH, ownedSegments, ROAD_PAD, type NetCell, type RoadEdge, type RoadPatch, type SegmentPath } from '../gen/roads';
 import { expand, intersects, SeedStore, type Rect } from '../gen/seeds';
 import type { Site } from '../gen/settle';
@@ -396,7 +398,10 @@ export class ChunkManager {
           kind,
           cx: c.cx,
           cy: c.cy,
-          segments: ownedSegments(this.edgesNear(chunkRect(c.cx, c.cy)), c.cx, c.cy),
+          segments:
+            networkMode() === 'lattice'
+              ? latticeSegments(this.edgesNear(chunkRect(c.cx, c.cy)), c.cx, c.cy)
+              : ownedSegments(this.edgesNear(chunkRect(c.cx, c.cy)), c.cx, c.cy),
           patch: this.roadPatch(c),
         };
         break;

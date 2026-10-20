@@ -1,3 +1,4 @@
+import { setNetworkMode } from './gen/network';
 import { CHUNK, DPR_MAX } from './lib/constants';
 import { ChunkManager, forChunksIn } from './chunks/manager';
 import { STYLE } from './render/style';
@@ -27,7 +28,8 @@ let dirty = true;
 const workers = Math.max(1, Math.min(4, (navigator.hardwareConcurrency || 2) - 1));
 // Debug: `?R=0.1` forces the region (0 lowland … 1 alpine) everywhere.
 const regionOverride = Number(new URLSearchParams(location.search).get('R') ?? NaN);
-const network = new URLSearchParams(location.search).get('net') ?? 'mesh';
+const network = new URLSearchParams(location.search).get('net') ?? 'lattice';
+setNetworkMode(network); // the main thread cuts segments per network kind
 const pool = new WorkerPool(workers, () => manager.schedule(), { regionOverride, network });
 const manager = new ChunkManager(pool, () => (dirty = true));
 const input = new Input(canvas, vp, actual, desired);

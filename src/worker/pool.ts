@@ -21,7 +21,7 @@ export class WorkerPool implements TaskRunner {
   constructor(
     size: number,
     private readonly onIdle: () => void,
-    config: WorkerConfig['config'] = { regionOverride: NaN, network: 'mesh' },
+    config: WorkerConfig['config'] = { regionOverride: NaN, network: 'lattice' },
   ) {
     for (let i = 0; i < size; i++) {
       const worker = new Worker(new URL('./worker.ts', import.meta.url), { type: 'module' });

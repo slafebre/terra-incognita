@@ -1,6 +1,7 @@
 // Dev tool: road network statistics per net cell (no fine routing).
 //   npx vite-node dev/netstats.ts [cells per region] [R,R,...]
 import { CoarseField } from '../src/gen/hydro';
+import { latticeCell } from '../src/gen/lattice';
 import { meshCell } from '../src/gen/network';
 import { NET_CELL, NET_REACH, netCell, ROAD_C, ROAD_D, ROAD_N } from '../src/gen/roads';
 import { SeedStore, SeedView } from '../src/gen/seeds';
@@ -8,7 +9,7 @@ import { Settlements } from '../src/gen/settle';
 import { setRegionOverride, Terrain } from '../src/gen/terrain';
 
 declare const process: { argv: string[]; env: Record<string, string | undefined> };
-const build = process.env.NET === 'tree' ? netCell : meshCell;
+const build = { tree: netCell, mesh: meshCell, lattice: latticeCell }[(process.env.NET ?? 'lattice') as 'tree' | 'mesh' | 'lattice'];
 
 const CELLS = Number(process.argv[2] ?? 3);
 const REGIONS = (process.argv[3] ?? '0.2,0.35,0.5').split(',').map(Number);

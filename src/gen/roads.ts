@@ -659,6 +659,10 @@ export interface SegmentTask {
   ay: number;
   bx: number;
   by: number;
+  /** Lattice edges: drawn as a curve, continuing smoothly into these neighbours (if any). */
+  curve?: boolean;
+  pa?: [number, number];
+  pb?: [number, number];
 }
 
 export interface SegmentPath {
@@ -666,6 +670,8 @@ export interface SegmentPath {
   cls: RoadClass;
   /** Chunk-independent world coordinates [x0, y0, …]. */
   xy: Float32Array;
+  /** Already joins its neighbours smoothly (lattice curves): no junction merging. */
+  curve?: boolean;
 }
 
 /** Fine node data around a chunk (row-major w × h, origin at global node gx, gy). */

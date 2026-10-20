@@ -19,10 +19,10 @@ import {
 } from './roads';
 import { FARM, HAMLET, type Site, type Settlements, TOWN, VILLAGE } from './settle';
 
-/** 'mesh' (dense first, then classified) or 'tree' (the older network, for comparison). */
-let mode: 'mesh' | 'tree' = 'mesh';
+/** 'lattice' (all roads on one shared lattice), 'mesh' or 'tree' (earlier networks, for comparison). */
+let mode: 'lattice' | 'mesh' | 'tree' = 'lattice';
 export function setNetworkMode(m: string): void {
-  mode = m === 'tree' ? 'tree' : 'mesh';
+  mode = m === 'tree' || m === 'mesh' ? m : 'lattice';
 }
 export const networkMode = () => mode;
 

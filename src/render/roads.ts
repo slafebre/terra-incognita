@@ -57,7 +57,8 @@ export function drawRoads(ctx: Ctx, roads: SegmentPath[], cx: number, cy: number
   const paths = [new Path2D(), new Path2D(), new Path2D()];
   const ox = cx * CHUNK;
   const oy = cy * CHUNK;
-  for (const seg of mergeApproaches(roads)) {
+  const merged = [...mergeApproaches(roads.filter((r) => !r.curve)), ...roads.filter((r) => r.curve)];
+  for (const seg of merged) {
     const n = seg.xy.length / 2;
     if (n < 2) continue;
     const xs: number[] = [];
