@@ -73,6 +73,8 @@ function deadEnds(segs: SegmentPath[]): { fine: { x: number; y: number }[]; coar
 
 /** Terrain slope (m/m) at world (x, y), from the last area's DEMs. */
 let slopeAt: (x: number, y: number) => number = () => NaN;
+/** Fine elevation (m) at world (x, y), from the last area's DEMs. */
+let elevAt: (x: number, y: number) => number = () => NaN;
 /** Water depth (m, ≤ 0 = dry) at world (x, y). */
 let waterAt: (x: number, y: number) => number = () => NaN;
 
@@ -123,6 +125,19 @@ async function segments(R: number): Promise<SegmentPath[]> {
     const d = c.dem;
     // 16 m baseline: road-scale terrain, not 4 m texture.
     return Math.hypot(d[k + 4] - d[k - 4], d[k + 4 * DEM_W] - d[k - 4 * DEM_W]) / (8 * CELL);
+  };
+  elevAt = (x, y) => {
+    const c = m.chunks.get(`${Math.floor(x / CHUNK)},${Math.floor(y / CHUNK)}`);
+    if (!c?.dem) return NaN;
+    const u = APRON + (x - c.cx * CHUNK) / CELL;
+    const v = APRON + (y - c.cy * CHUNK) / CELL;
+    const i = Math.floor(u);
+    const j = Math.floor(v);
+    const fu = u - i;
+    const fv = v - j;
+    const k = j * DEM_W + i;
+    const d = c.dem;
+    return (d[k] * (1 - fu) + d[k + 1] * fu) * (1 - fv) + (d[k + DEM_W] * (1 - fu) + d[k + DEM_W + 1] * fu) * fv;
   };
   waterAt = (x, y) => {
     const c = m.chunks.get(`${Math.floor(x / CHUNK)},${Math.floor(y / CHUNK)}`);
@@ -245,6 +260,11 @@ function stats(segs: SegmentPath[]): { km: number; crossings: number; alongside:
             if (seen.has(key)) continue;
             seen.add(key);
             crossings++;
+            {
+              const e = (q: SegmentPath) => [`${q.xy[0]},${q.xy[1]}`, `${q.xy[q.xy.length - 2]},${q.xy[q.xy.length - 1]}`];
+              const kind = sj === si ? 'self' : e(s).some((k) => e(t).includes(k)) ? 'adjacent' : 'other';
+              crossKinds.set(kind, (crossKinds.get(kind) ?? 0) + 1);
+            }
             marks.push({ x: p[0], y: p[1], kind: 'cross' });
           }
     }
@@ -288,6 +308,8 @@ const flat: string[] = [];
 const loops = [[0, 0], [0, 0], [0, 0]];
 let loopsN = 0, areaKm2 = 0, inKm = 0, loopsRaw = 0, deadFine = 0, deadCoarse = 0;
 const siteCount = [0, 0, 0, 0];
+const gradeLen = [[0, 0, 0], [0, 0, 0], [0, 0, 0], [0, 0, 0], [0, 0, 0]];
+const crossKinds = new Map<string, number>();
 const unreached = [0, 0, 0, 0];
 for (const R of REGIONS) {
   let km = 0, crossings = 0, alongside = 0;
@@ -298,6 +320,28 @@ for (const R of REGIONS) {
     const s = stats(segs);
     const lp = smallLoops(segs);
     const de = deadEnds(segs);
+    // Grades along drawn roads on the fine DEM, over 48 m windows.
+    for (const g of segs) {
+      const pts: [number, number][] = [];
+      let acc = 0;
+      for (let i = 0; i < g.xy.length; i += 2) {
+        if (i > 0) acc += Math.hypot(g.xy[i] - g.xy[i - 2], g.xy[i + 1] - g.xy[i - 1]);
+        pts.push([acc, elevAt(g.xy[i], g.xy[i + 1])]);
+      }
+      let j = 0;
+      for (let i = 0; i < pts.length; i++) {
+        while (j < pts.length && pts[j][0] - pts[i][0] < 48) j++;
+        if (j >= pts.length) break;
+        const ds = pts[j][0] - pts[i][0];
+        const gr = Math.abs(pts[j][1] - pts[i][1]) / ds;
+        if (Number.isNaN(gr)) continue;
+        const step = i + 1 < pts.length ? pts[i + 1][0] - pts[i][0] : 0;
+        const lim = [0.07, 0.1, 0.15, 0.22, 0.45][g.cls];
+        gradeLen[g.cls][0] += step;
+        if (gr > lim) gradeLen[g.cls][1] += step;
+        if (gr > 1.5 * lim) gradeLen[g.cls][2] += step;
+      }
+    }
     // Settlements in the area that no road reaches (within 120 m of a drawn road point).
     {
       const pts = new Set<string>();
@@ -388,6 +432,10 @@ for (const R of REGIONS) {
   console.log(`SMALL LOOPS R=${R}: ${loopsN} in ${areaKm2} km² with ${inKm.toFixed(0)} km road → ${((100 * loopsN) / inKm).toFixed(1)} per 100 km (unmerged ${((100 * loopsRaw) / inKm).toFixed(1)})`);
   console.log(`DEAD ENDS R=${R}: drawn ${deadFine}, in the network ${deadCoarse}`);
   console.log(`UNREACHED R=${R} town/village/hamlet/farm: ${unreached.map((u, i) => `${u}/${siteCount[i]}`).join('  ')}`);
+  console.log(`GRADE R=${R} share of road over its limit / over 1.5× limit: ` + ['N', 'D', 'C', 'T', 'P'].map((n, i) => `${n} ${((100 * gradeLen[i][1]) / (gradeLen[i][0] || 1)).toFixed(0)}% / ${((100 * gradeLen[i][2]) / (gradeLen[i][0] || 1)).toFixed(0)}% of ${(gradeLen[i][0] / 1000).toFixed(0)} km`).join('  '));
+  for (const gl of gradeLen) gl.fill(0);
+  console.log(`CROSS KINDS R=${R}: ${JSON.stringify(Object.fromEntries(crossKinds))}`);
+  crossKinds.clear();
   siteCount.fill(0);
   unreached.fill(0);
   deadFine = 0;
@@ -409,7 +457,7 @@ function svg(segs: SegmentPath[], file: string): void {
   const k = Number(process.env.SCALE ?? 0.25); // px per m
   const X = (x: number) => ((x - x0) * k).toFixed(1);
   const Y = (y: number) => ((y - y0) * k).toFixed(1);
-  const col = ['#d0302a', '#e0a020', '#555'];
+  const col = ['#d0302a', '#e0a020', '#555', '#999', '#bbb'];
   const out = [`<svg xmlns="http://www.w3.org/2000/svg" width="${((x1 - x0) * k).toFixed(0)}" height="${((y1 - y0) * k).toFixed(0)}" style="background:#fbfaf5">`];
   for (const m of marks)
     out.push(m.kind === 'cross' ? `<circle cx="${X(m.x)}" cy="${Y(m.y)}" r="8" fill="none" stroke="#c0f" stroke-width="2"/>` : `<circle cx="${X(m.x)}" cy="${Y(m.y)}" r="3" fill="${m.kind === 'along' ? '#f88' : '#8cf'}"/>`);
@@ -417,7 +465,7 @@ function svg(segs: SegmentPath[], file: string): void {
     const pts: string[] = [];
     for (let i = 0; i < s.xy.length; i += 2) pts.push(`${X(s.xy[i])},${Y(s.xy[i + 1])}`);
     const hue = [...s.key].reduce((h, c) => (h * 31 + c.charCodeAt(0)) >>> 0, 7) % 360;
-    out.push(`<polyline points="${pts.join(' ')}" fill="none" stroke="${process.env.HUE ? `hsl(${hue},70%,40%)` : col[s.cls]}" stroke-width="${[3, 2, 1.2][s.cls]}"/>`);
+    out.push(`<polyline points="${pts.join(' ')}" fill="none" stroke="${process.env.HUE ? `hsl(${hue},70%,40%)` : col[s.cls]}" stroke-width="${[3, 2, 1.2, 0.8, 0.6][s.cls]}"/>`);
     const n = s.xy.length;
     out.push(`<circle cx="${X(s.xy[0])}" cy="${Y(s.xy[1])}" r="3" fill="#06c"/><circle cx="${X(s.xy[n - 2])}" cy="${Y(s.xy[n - 1])}" r="3" fill="#06c"/>`);
   }
@@ -442,7 +490,7 @@ function sheet(segs: SegmentPath[], lp: { x: number; y: number; a: number }[], f
       const hue = [...g.key].reduce((h, c) => (h * 31 + c.charCodeAt(0)) >>> 0, 7) % 360;
       const pts: string[] = [];
       for (let i = 0; i < g.xy.length; i += 2) pts.push(`${g.xy[i].toFixed(1)},${g.xy[i + 1].toFixed(1)}`);
-      out.push(`<polyline points="${pts.join(' ')}" fill="none" stroke="hsl(${hue},75%,42%)" stroke-width="${[7, 5, 3][g.cls]}" stroke-opacity="0.75"/>`);
+      out.push(`<polyline points="${pts.join(' ')}" fill="none" stroke="hsl(${hue},75%,42%)" stroke-width="${[7, 5, 3, 2, 1.5][g.cls]}" stroke-opacity="0.75"/>`);
       const n2 = g.xy.length;
       out.push(`<circle cx="${g.xy[0]}" cy="${g.xy[1]}" r="6" fill="none" stroke="#000"/><circle cx="${g.xy[n2 - 2]}" cy="${g.xy[n2 - 1]}" r="6" fill="none" stroke="#000"/>`);
     }

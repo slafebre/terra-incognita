@@ -17,7 +17,7 @@ const REGIONS = (process.argv[3] ?? '0.2,0.35,0.5').split(',').map(Number);
 for (const R of REGIONS) {
   setRegionOverride(R);
   let ms = 0, sites = 0, short = 0;
-  const km = [0, 0, 0];
+  const km = [0, 0, 0, 0, 0];
   for (let n = 0; n < CELLS; n++) {
     const gx = Math.round((Math.random() - 0.5) * 200);
     const gy = Math.round((Math.random() - 0.5) * 200);
@@ -42,6 +42,6 @@ for (const R of REGIONS) {
   const area = CELLS * (NET_CELL / 1000) ** 2;
   console.log(
     `R=${R}  ${(ms / CELLS).toFixed(0)} ms/cell  sites ${(sites / area).toFixed(2)}/km²  ` +
-      `road km/km²: N ${(km[ROAD_N] / area).toFixed(2)} D ${(km[ROAD_D] / area).toFixed(2)} C ${(km[ROAD_C] / area).toFixed(2)}  shortcuts/farm links ${(short / area).toFixed(2)}/km²`,
+      `road km/km²: N ${(km[ROAD_N] / area).toFixed(2)} D ${(km[ROAD_D] / area).toFixed(2)} C ${(km[ROAD_C] / area).toFixed(2)} track ${(km[3] / area).toFixed(2)} path ${(km[4] / area).toFixed(2)}`,
   );
 }

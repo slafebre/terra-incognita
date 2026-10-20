@@ -32,10 +32,13 @@ const D_ZONE = 9300;
 export const ROAD_N = 0;
 export const ROAD_D = 1;
 export const ROAD_C = 2;
-export type RoadClass = typeof ROAD_N | typeof ROAD_D | typeof ROAD_C;
+/** Tracks (unpaved farm and forest ways) and footpaths. */
+export const ROAD_T = 3;
+export const ROAD_P = 4;
+export type RoadClass = typeof ROAD_N | typeof ROAD_D | typeof ROAD_C | typeof ROAD_T | typeof ROAD_P;
 
 /** Maximum sustained gradient per class. */
-export const MAX_GRADE = [0.07, 0.1, 0.15];
+export const MAX_GRADE = [0.07, 0.1, 0.15, 0.22, 0.45];
 /** Longest edge per class (m). */
 export const MAX_LEN = [9000, 4500, 1600];
 

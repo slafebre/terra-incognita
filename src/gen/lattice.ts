@@ -11,6 +11,8 @@ import {
   ROAD_C,
   ROAD_D,
   ROAD_N,
+  ROAD_P,
+  ROAD_T,
   type RoadClass,
   type RoadEdge,
   type RoadPatch,
@@ -34,7 +36,11 @@ import { FARM, HAMLET, type Site, type Settlements, TOWN, VILLAGE } from './sett
  *     pair, turns costing a little. The corridor makes it the same in every cell.
  *  3. Hamlet roads: the cheapest-path forest grown out from the main network; each
  *     hamlet's road follows it back, so nearby hamlets' roads merge like streams.
- *  4. Farm roads: the same, grown from main and hamlet roads.
+ *  4. Shortcuts: neighbouring settlements that the roads so far join only by a long
+ *     way round get a direct minor road, or a footpath where a road would be too steep.
+ *  5. Farm roads: grown like hamlet roads, from all roads so far.
+ *  6. Tracks: scattered points far from any road get a track back to the network,
+ *     grown as one forest so nearby tracks merge.
  *
  * Output: every used lattice edge, owned by the cell holding its midpoint. Geometry
  * comes later (routeCurves): one smooth curve per edge, through the two vertices,
@@ -59,6 +65,46 @@ const CORRIDOR_EXTRA = 1000;
 const HAMLET_REACH = 3500;
 const FARM_REACH = 1800;
 const COST_CAP = 25;
+
+/** Shortcuts: settlement pairs this far apart (m) whose way round by road is longer than
+ * SHORT_RATIO × the distance; their path may be SHORT_DETOUR × it, edges up to
+ * SHORT_STEEP × the class limit (else a footpath is tried). */
+const SHORT_MIN = 400;
+const SHORT_MAX = 2000;
+const SHORT_RATIO = 2;
+const SHORT_DETOUR = 1.6;
+const SHORT_STEEP = 1.3;
+const SHORT_EXTRA = 400;
+/** Tracks: share of vertices that want one, if no road within TRACK_GAP (m); not above
+ * TRACK_ALT (m), nor where every way out is steeper than TRACK_STEEP; reach (m). */
+const TRACK_DENSITY = 0.14;
+const TRACK_GAP = 200;
+const TRACK_ALT = 2300;
+const TRACK_STEEP = 0.5;
+const TRACK_REACH = 1200;
+
+/** Spatial hash of points for radius queries. */
+class Grid<T extends { x: number; y: number }> {
+  private readonly cells = new Map<string, T[]>();
+  constructor(
+    items: T[],
+    private readonly G: number,
+  ) {
+    for (const t of items) {
+      const k = `${Math.floor(t.x / G)},${Math.floor(t.y / G)}`;
+      if (!this.cells.has(k)) this.cells.set(k, []);
+      this.cells.get(k)!.push(t);
+    }
+  }
+  near(x: number, y: number, r: number): T[] {
+    const out: T[] = [];
+    const G = this.G;
+    for (let j = Math.floor((y - r) / G); j <= Math.floor((y + r) / G); j++)
+      for (let i = Math.floor((x - r) / G); i <= Math.floor((x + r) / G); i++)
+        for (const t of this.cells.get(`${i},${j}`) ?? []) if (Math.hypot(t.x - x, t.y - y) <= r) out.push(t);
+    return out;
+  }
+}
 
 const OFF = 1 << 20;
 const SPAN = 1 << 21;
@@ -105,6 +151,18 @@ export function nearestVertex(x: number, y: number): number {
   return best;
 }
 
+/** Vertices whose positions fall in a rectangle. */
+function verticesIn(r: { x0: number; y0: number; x1: number; y1: number }): number[] {
+  const out: number[] = [];
+  for (let j = Math.floor((r.y0 - JITTER) / ROW); j <= Math.ceil((r.y1 + JITTER) / ROW); j++)
+    for (let i = Math.floor((r.x0 - JITTER) / LATTICE) - 1; i <= Math.ceil((r.x1 + JITTER) / LATTICE); i++) {
+      const v = pack(i, j);
+      const [x, y] = vertexPos(v);
+      if (x >= r.x0 && x < r.x1 && y >= r.y0 && y < r.y1) out.push(v);
+    }
+  return out;
+}
+
 const edgeKey = (u: number, v: number) => (u < v ? `${u}_${v}` : `${v}_${u}`);
 
 /** Terrain at vertices, cached per field. */
@@ -122,12 +180,43 @@ function vdata(field: CoarseField, v: number) {
 }
 
 /** Cost of edge u–v for a road class (symmetric). */
+const costCache = new WeakMap<CoarseField, Map<number, number>>();
+/** Paths between site pairs, per field (see corridorPath). */
+const pathCache = new WeakMap<CoarseField, Map<string, [number, number][] | null>>();
+/** Direction from vertex v to its neighbour w, 0..8 (4 is v itself). */
+const dirCode = (v: number, w: number) => (vj(w) - vj(v) + 1) * 3 + (vi(w) - vi(v) + 1);
 function edgeCost(field: CoarseField, u: number, v: number, cls: RoadClass): number {
+  let m = costCache.get(field);
+  if (!m) costCache.set(field, (m = new Map()));
+  const lo = Math.min(u, v);
+  const ck = (lo * 9 + dirCode(lo, Math.max(u, v))) * 5 + cls;
+  const hit = m.get(ck);
+  if (hit !== undefined) return hit;
+  const c = edgeCostRaw(field, u, v, cls);
+  m.set(ck, c);
+  return c;
+}
+/** Coarse gradient along edge u–v (climb sampled along it, over its length). */
+function edgeGrade(field: CoarseField, u: number, v: number): number {
+  const a = vdata(field, u);
+  const b = vdata(field, v);
+  let climb = 0;
+  let zp = a.z;
+  for (const t of [0.25, 0.5, 0.75]) {
+    const z = field.z(a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t);
+    climb += Math.abs(z - zp);
+    zp = z;
+  }
+  climb += Math.abs(b.z - zp);
+  return climb / Math.hypot(b.x - a.x, b.y - a.y);
+}
+function edgeCostRaw(field: CoarseField, u: number, v: number, cls: RoadClass): number {
   const a = vdata(field, u);
   const b = vdata(field, v);
   const len = Math.hypot(b.x - a.x, b.y - a.y);
   const gmax = MAX_GRADE[cls];
-  const g = Math.abs(b.z - a.z) / len;
+  // Climb sampled along the edge, so a bump or dip between the vertices counts.
+  const g = edgeGrade(field, u, v);
   let c = len * (1 + 3 * (g / gmax) ** 2);
   if (g > gmax) c *= 1 + 15 * (g / gmax - 1); // only where there's no way round
   c *= 1 - (VALLEY_BONUS * (a.valley + b.valley)) / 2;
@@ -151,9 +240,14 @@ export function latticeCell(gx: number, gy: number, field: CoarseField, set: Set
 
   // Regions (margins around the cell): farm roads that may pass through the cell,
   // the hamlet roads they grow from, the main roads those grow from.
-  const farmM = FARM_REACH;
+  // Each stage grows from the previous one, so each needs the previous known a bit
+  // further out: tracks that may cross the cell, the roads they grow from, farm
+  // roads, the shortcuts and hamlet roads those grow from, the main roads below.
+  const trackM = TRACK_REACH;
+  const farmM = trackM + TRACK_REACH;
   const farmForestM = farmM + FARM_REACH;
-  const hamletM = farmForestM + HAMLET_REACH;
+  const shortM = farmForestM + SHORT_MAX / 2;
+  const hamletM = shortM + (SHORT_RATIO * SHORT_MAX) / 2;
   const hamletForestM = hamletM + HAMLET_REACH;
   const mainM = hamletForestM;
 
@@ -169,9 +263,16 @@ export function latticeCell(gx: number, gy: number, field: CoarseField, set: Set
   const corridorR = CORRIDOR * MAX_LEN[ROAD_N] + CORRIDOR_EXTRA;
   const towns = sitesIn(TOWN, mainM + corridorR);
   const villages = sitesIn(VILLAGE, mainM + corridorR);
-  const mainPath = (k: RoadClass, a: Site, b: Site) => {
+  /** Cheapest path a → b for class k inside the pair's corridor, turns included; its edges, or null. */
+  /** Cheapest path a → b for class k inside the pair's corridor, turns included; its edges, or null. */
+  const corridorPath = (k: RoadClass, a: { x: number; y: number }, b: { x: number; y: number }, extra = CORRIDOR_EXTRA): [number, number][] | null => {
+    // A pure function of the pair: cached per worker, neighbouring cells reuse it.
+    const ck = `${k}|${a.x},${a.y}|${b.x},${b.y}|${extra}`;
+    let paths = pathCache.get(field);
+    if (!paths) pathCache.set(field, (paths = new Map()));
+    if (paths.has(ck)) return paths.get(ck)!;
     const d = dist(a, b);
-    const reach = CORRIDOR * d + CORRIDOR_EXTRA;
+    const reach = CORRIDOR * d + extra;
     const inside = (v: number) => {
       const p = pos(v);
       return dist(p, a) + dist(p, b) <= reach;
@@ -179,23 +280,29 @@ export function latticeCell(gx: number, gy: number, field: CoarseField, set: Set
     const va = nearestVertex(a.x, a.y);
     const vb = nearestVertex(b.x, b.y);
     const pb = pos(vb);
-    // States: (vertex, previous vertex), for turn costs.
-    const key = (v: number, from: number) => `${v}:${from}`;
-    const cost = new Map<string, number>();
-    const prev = new Map<string, string>();
+    // States: (vertex, the neighbour it was entered from), for turn costs; packed as
+    // vertex × 9 + direction code (4 = the start, entered from nowhere).
+    const key = (v: number, from: number) => v * 9 + (from < 0 ? 4 : dirCode(v, from));
+    const cost = new Map<number, number>();
+    const prev = new Map<number, number>();
     const states: [number, number][] = [[va, -1]];
     const heap = new MinHeap(256);
     cost.set(key(va, -1), 0);
     heap.push(0, MIN_FACTOR * dist(pos(va), pb));
-    const done = new Set<string>();
-    let goal: string | undefined;
+    const done = new Set<number>();
+    let goal = -1;
+    let goalState: [number, number] = [va, -1];
+    const stateOf = new Map<number, [number, number]>();
     while (heap.size) {
-      const [v, from] = states[heap.pop()];
+      const st = states[heap.pop()];
+      const [v, from] = st;
       const sk = key(v, from);
       if (done.has(sk)) continue;
       done.add(sk);
+      stateOf.set(sk, st);
       if (v === vb) {
         goal = sk;
+        goalState = st;
         break;
       }
       const pv = pos(v);
@@ -221,11 +328,21 @@ export function latticeCell(gx: number, gy: number, field: CoarseField, set: Set
         heap.push(states.length - 1, c + MIN_FACTOR * dist(pw, pb));
       }
     }
-    if (!goal) return;
-    for (let s = goal; prev.has(s); s = prev.get(s)!) {
-      const [v, from] = s.split(':').map(Number);
-      use(from, v, k);
+    let out: [number, number][] | null = null;
+    if (goal >= 0) {
+      out = [];
+      let [v, from] = goalState;
+      for (let s = goal; prev.has(s); s = prev.get(s)!) {
+        out.push([from, v]);
+        [v, from] = stateOf.get(prev.get(s)!)!;
+      }
     }
+    if (paths.size > 20000) paths.delete(paths.keys().next().value!);
+    paths.set(ck, out);
+    return out;
+  };
+  const mainPath = (k: RoadClass, a: Site, b: Site) => {
+    for (const [u, v] of corridorPath(k, a, b) ?? []) use(u, v, k);
   };
   /** Does the pair's corridor reach the main-road region? */
   const relevant = (a: Site, b: Site) => {
@@ -248,7 +365,7 @@ export function latticeCell(gx: number, gy: number, field: CoarseField, set: Set
    * Cheapest-path forest grown from `sources` over the vertices within margin m;
    * returns each reached vertex's next vertex towards the network.
    */
-  const forest = (sources: Set<number>, m: number, reach: number): Map<number, number> => {
+  const forest = (sources: Set<number>, m: number, reach: number, k: RoadClass = ROAD_C): Map<number, number> => {
     const parent = new Map<number, number>();
     const cost = new Map<number, number>();
     const heap = new MinHeap(1024);
@@ -266,7 +383,7 @@ export function latticeCell(gx: number, gy: number, field: CoarseField, set: Set
       const c0 = cost.get(v)!;
       for (const w of neighbours(v)) {
         if (!inBox(pos(w), m)) continue;
-        const c = c0 + edgeCost(field, v, w, ROAD_C);
+        const c = c0 + edgeCost(field, v, w, k);
         if (c > reach || c >= (cost.get(w) ?? Infinity)) continue;
         cost.set(w, c);
         parent.set(w, v);
@@ -276,9 +393,10 @@ export function latticeCell(gx: number, gy: number, field: CoarseField, set: Set
     }
     return parent;
   };
-  const networkVertices = (extra: Site[]) => {
+  /** Vertices on roads (not tracks or paths), plus the given sites'. */
+  const roadVertices = (extra: Site[]) => {
     const s = new Set<number>();
-    for (const e of cls.values()) s.add(e.u).add(e.v);
+    for (const e of cls.values()) if (e.c <= ROAD_C) s.add(e.u).add(e.v);
     for (const t of extra) s.add(nearestVertex(t.x, t.y));
     return s;
   };
@@ -288,14 +406,94 @@ export function latticeCell(gx: number, gy: number, field: CoarseField, set: Set
 
   // 3. Hamlet roads.
   const tvNear = tv.filter((s) => inBox(s, hamletForestM));
-  const pA = forest(networkVertices(tvNear), hamletForestM, HAMLET_REACH * COST_CAP);
+  const pA = forest(roadVertices(tvNear), hamletForestM, HAMLET_REACH * COST_CAP);
   const hamlets = sitesIn(HAMLET, hamletM);
   for (const h of hamlets) follow(pA, nearestVertex(h.x, h.y), ROAD_C);
 
-  // 4. Farm roads.
-  const pB = forest(networkVertices([...tvNear, ...hamlets]), farmForestM, FARM_REACH * COST_CAP);
+  // 4. Shortcuts: neighbouring settlements (Gabriel pairs) that the roads so far
+  // join only by a long way round get a direct minor road — or, where that would
+  // be too steep, a footpath. Decided on main and hamlet roads only, never on other
+  // shortcuts, so every cell decides each pair alike.
+  {
+    const adj = new Map<number, [number, number][]>();
+    for (const e of cls.values()) {
+      const L = dist(pos(e.u), pos(e.v));
+      for (const [p, q] of [
+        [e.u, e.v],
+        [e.v, e.u],
+      ]) {
+        if (!adj.has(p)) adj.set(p, []);
+        adj.get(p)!.push([q, L]);
+      }
+    }
+    const netDist = (s: number, t: number, limit: number) => {
+      const d = new Map<number, number>([[s, 0]]);
+      const ids: number[] = [s];
+      const heap = new MinHeap(64);
+      heap.push(0, 0);
+      while (heap.size) {
+        const u = ids[heap.pop()];
+        const du = d.get(u)!;
+        if (u === t) return du;
+        for (const [w, L] of adj.get(u) ?? []) {
+          const dw = du + L;
+          if (dw > limit || dw >= (d.get(w) ?? Infinity)) continue;
+          d.set(w, dw);
+          ids.push(w);
+          heap.push(ids.length - 1, dw);
+        }
+      }
+      return Infinity;
+    };
+    const settled = [...tv.filter((s) => inBox(s, shortM + SHORT_MAX / 2)), ...hamlets.filter((s) => inBox(s, shortM + SHORT_MAX / 2))];
+    const grid = new Grid(settled, 1024);
+    const added: [number, number, RoadClass][] = [];
+    for (const a of settled)
+      for (const b of grid.near(a.x, a.y, SHORT_MAX)) {
+        if (a.id >= b.id) continue;
+        const d = dist(a, b);
+        if (d < SHORT_MIN || !inBox({ x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 }, shortM)) continue;
+        const mx = (a.x + b.x) / 2;
+        const my = (a.y + b.y) / 2;
+        if (grid.near(mx, my, d / 2 - 1e-6).some((c) => c !== a && c !== b)) continue; // Gabriel
+        const va = nearestVertex(a.x, a.y);
+        const vb = nearestVertex(b.x, b.y);
+        if (netDist(va, vb, SHORT_RATIO * d) <= SHORT_RATIO * d) continue;
+        for (const k of [ROAD_C, ROAD_P] as RoadClass[]) {
+          const p = corridorPath(k, a, b, SHORT_EXTRA);
+          if (!p) continue;
+          const len = p.reduce((s, [u, v]) => s + dist(pos(u), pos(v)), 0);
+          const steep = p.some(([u, v]) => edgeGrade(field, u, v) > SHORT_STEEP * MAX_GRADE[k]);
+          if (len > SHORT_DETOUR * d || steep) continue;
+          for (const [u, v] of p) added.push([u, v, k]);
+          break;
+        }
+      }
+    for (const [u, v, k] of added) use(u, v, k);
+  }
+
+  // 5. Farm roads.
+  const pB = forest(roadVertices([...tvNear, ...hamlets]), farmForestM, FARM_REACH * COST_CAP);
   const farms = sitesIn(FARM, farmM);
   for (const f of farms) follow(pB, nearestVertex(f.x, f.y), ROAD_C);
+
+  // 6. Tracks: scattered points of open land and forest far from any road get a
+  // track back to the network, grown as one forest so nearby tracks merge.
+  {
+    const roadPts = new Grid(
+      [...roadVertices([])].map((v) => pos(v)),
+      512,
+    );
+    const pT = forest(roadVertices([]), farmM, TRACK_REACH * COST_CAP, ROAD_T);
+    const box = { x0: x0 - trackM, y0: y0 - trackM, x1: x1 + trackM, y1: y1 + trackM };
+    for (const v of verticesIn(box)) {
+      if (hash3(0x7ac4, vi(v), vj(v)) / 4294967296 >= TRACK_DENSITY) continue;
+      const p = pos(v);
+      if (p.z > TRACK_ALT || roadPts.near(p.x, p.y, TRACK_GAP).length) continue;
+      if (neighbours(v).some((w) => edgeGrade(field, v, w) > TRACK_STEEP)) continue;
+      follow(pT, v, ROAD_T);
+    }
+  }
 
   // Owned edges: midpoint in the cell.
   const edges: RoadEdge[] = [];

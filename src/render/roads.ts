@@ -1,16 +1,16 @@
 import { CHUNK } from '../lib/constants';
 import { smoothPolyline } from '../lib/polyline';
-import { mergeApproaches, ROAD_C, ROAD_D, ROAD_N, type SegmentPath } from '../gen/roads';
+import { mergeApproaches, ROAD_C, ROAD_D, ROAD_N, ROAD_P, ROAD_T, type SegmentPath } from '../gen/roads';
 import { HAMLET, SITE_RADIUS, type Site } from '../gen/settle';
 import { STYLE } from './style';
 
 type Ctx = OffscreenCanvasRenderingContext2D;
 
 /** Road width per class: true map width (m) with a minimum on screen (CSS px). */
-const WIDTH_M = [9, 7, 5];
-const MIN_PX = [3.2, 2.6, 1.9];
+const WIDTH_M = [9, 7, 5, 0, 0];
+const MIN_PX = [3.2, 2.6, 1.9, 1.0, 0.9];
 /** Few passes: heavy smoothing pulls the legs of a hairpin onto each other. */
-const SMOOTH_PASSES = [2, 1, 1];
+const SMOOTH_PASSES = [2, 1, 1, 1, 1];
 
 /** Built-up placeholders (until streets and buildings exist). */
 export function drawSites(ctx: Ctx, sites: Site[], cx: number, cy: number, pxPerM: number): void {
@@ -54,7 +54,7 @@ export function drawChurches(ctx: Ctx, sites: Site[], cx: number, cy: number, px
  * go first, then fills from minor to major, so junctions merge cleanly.
  */
 export function drawRoads(ctx: Ctx, roads: SegmentPath[], cx: number, cy: number, pxPerM: number, dpr: number): void {
-  const paths = [new Path2D(), new Path2D(), new Path2D()];
+  const paths = [new Path2D(), new Path2D(), new Path2D(), new Path2D(), new Path2D()];
   const ox = cx * CHUNK;
   const oy = cy * CHUNK;
   const merged = [...mergeApproaches(roads.filter((r) => !r.curve)), ...roads.filter((r) => r.curve)];
@@ -77,6 +77,15 @@ export function drawRoads(ctx: Ctx, roads: SegmentPath[], cx: number, cy: number
   const width = (cls: number) => Math.max(WIDTH_M[cls] * pxPerM, MIN_PX[cls] * dpr);
   ctx.lineCap = 'round';
   ctx.lineJoin = 'round';
+  // Footpaths (dashed) and tracks (thin solid) first, uncased, under the roads.
+  ctx.strokeStyle = STYLE.roads.path;
+  ctx.lineWidth = width(ROAD_P);
+  ctx.setLineDash([4 * dpr, 3 * dpr]);
+  ctx.stroke(paths[ROAD_P]);
+  ctx.setLineDash([]);
+  ctx.strokeStyle = STYLE.roads.track;
+  ctx.lineWidth = width(ROAD_T);
+  ctx.stroke(paths[ROAD_T]);
   ctx.strokeStyle = STYLE.roads.casing;
   for (const cls of [ROAD_C, ROAD_D, ROAD_N]) {
     ctx.lineWidth = width(cls) + 2 * STYLE.roads.casingWidth * dpr;
