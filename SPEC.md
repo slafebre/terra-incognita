@@ -161,6 +161,14 @@ Grid overlay
 
 - Every road ends at a site or exactly on the network. A C road stops at its first contact with a D road (or with the road of the hamlet it heads for): on one of its waypoints, or one coarse node beside it, joining across. There are no dead ends, and C roads form trees draining into the network instead of running alongside other roads.
 - Each cell routes all D roads near it, not only those it owns, so cells agree on where the junction waypoints are.
+- **Shortcuts** (C class) densify the network. Any two points of it — waypoints or sites — 0.5–2 km apart become a candidate when the network joins them only by a long way round: more than 2× their distance, and closing a loop of at least 1.8 km. A candidate is dropped if:
+  - its mean gradient is over 8 %;
+  - the straight line or the routed road crosses a road (that would be a crossing without a junction);
+  - its route is more than 1.5× the distance;
+  - more than half of it (away from its ends) runs on or beside the network.
+
+  Candidates are taken in order of the way round they save; one that crosses an accepted shortcut, or starts and ends within 500 m of one, is dropped. Each shortcut is owned by the cell holding its first endpoint, and decided on the network computed above (never on other cells' shortcuts).
+- A route that starts or ends on a grid node starts or ends exactly there; only sites may use any of the 4 nodes around them.
 
 **Coarse routing.** A* on 256 m nodes, 16 directions:
 - Cost is distance × (1 + 4·(g/0.1)²), the same for every class so roads heading the same way pick the same corridor. Steep coarse slopes cost 8× more.
@@ -178,7 +186,7 @@ Grid overlay
 
 **Rendering.** Segments sharing a waypoint that stay within 24 m of each other leaving it are drawn on one line until they part, for up to 240 m and 40 % of the segment's length. This uses only the segments at that waypoint, so every chunk draws a junction the same way. Each segment is then Gaussian-smoothed with endpoints fixed (more passes for N and D roads). All casings are drawn first, then fills from C up to N.
 
-**Open.** Bridges and tunnels as symbols, sharing corridors between N and D roads, and farm and field tracks (milestones 5–6).
+**Open.** Bridges and tunnels as symbols, sharing corridors between N and D roads, and farm and field tracks for land away from settlements (milestones 5–6).
 
 ### 3.6 Built-up areas
 

@@ -21,7 +21,7 @@ describe('settlements and road network', () => {
     const byCls = [0, 0, 0];
     for (const e of cell.edges) byCls[e.cls]++;
     const len = cell.edges.reduce((a, e) => a + e.route.length / 2, 0);
-    console.log(`sites town/village/hamlet ${byRank.join('/')}, edges N/D/C ${byCls.join('/')}, waypoints ${len}, ${ms.toFixed(0)} ms`);
+    console.log(`sites town/village/hamlet ${byRank.join('/')}, edges N/D/C ${byCls.join('/')} (shortcuts ${cell.edges.filter((e) => e.id.includes('~')).length}), waypoints ${len}, ${ms.toFixed(0)} ms`);
     // A second cell reuses cached tiles.
     const t1 = performance.now();
     netCell(1, 0, field, set);

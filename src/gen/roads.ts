@@ -116,7 +116,7 @@ export function netCell(gx: number, gy: number, field: CoarseField, set: Settlem
     }
   const trunkJoins = joinMap(trunkNodes);
   for (const s of tv) points.push({ x: s.x, y: s.y, key: s.id });
-  const hamlets = sites(HAMLET, 2 * MAX_LEN[ROAD_C]);
+  const hamlets = sites(HAMLET, SHORT_ROUTED + 2 * MAX_LEN[ROAD_C]);
   const netDist = new Map<Site, number>();
   for (const h of hamlets) netDist.set(h, Math.min(...points.map((p) => dist(h, p)), Infinity));
   const target = new Map<Site, { x: number; y: number; key: string; hamlet?: Site }>();
@@ -140,27 +140,224 @@ export function netCell(gx: number, gy: number, field: CoarseField, set: Settlem
     if (best && td <= 2 * MAX_LEN[ROAD_C]) target.set(h, best);
   }
   const asSite = (t: { x: number; y: number; key: string }, R: number): Site => ({ id: t.key, rank: HAMLET, x: t.x, y: t.y, z: 0, R });
-  // Depth-1 roads, for every hamlet near the cell (every cell computes the same ones).
-  const depth1 = new Map<Site, number[]>();
-  for (const [h, t] of target) {
-    if (t.hamlet) continue;
-    depth1.set(h, coarseRoute(h, asSite(t, h.R), field, trunkJoins));
-  }
+  // Depth-1 roads (every cell computes the same ones), on demand.
+  const depth1 = new Map<Site, number[] | undefined>();
+  const depth1Of = (h: Site) => {
+    if (!depth1.has(h)) {
+      const t = target.get(h);
+      depth1.set(h, t && !t.hamlet ? coarseRoute(h, asSite(t, h.R), field, trunkJoins) : undefined);
+    }
+    return depth1.get(h);
+  };
+  // Every hamlet road near the cell: the shortcuts below need the network around.
+  const hamletRoads = new Map<Site, number[]>();
   for (const h of hamlets) {
-    if (!inCell(h)) continue;
     const t = target.get(h);
-    if (!t) continue;
-    let route = depth1.get(h);
+    if (!t || !inBox(h, SHORT_ROUTED)) continue;
+    let route = depth1Of(h);
     if (!route) {
-      const r1 = t.hamlet ? depth1.get(t.hamlet) : undefined;
+      const r1 = t.hamlet ? depth1Of(t.hamlet) : undefined;
       route = coarseRoute(h, asSite(t, h.R), field, r1 ? joinMap([...trunkNodes, ...r1.slice(2)]) : trunkJoins);
     }
-    edges.push({ id: `${h.id}>${t.key}`, cls: ROAD_C, a: h, b: asSite(t, h.R), route });
+    hamletRoads.set(h, route);
+    if (inCell(h)) edges.push({ id: `${h.id}>${t.key}`, cls: ROAD_C, a: h, b: asSite(t, h.R), route });
+  }
+
+  // Shortcuts: two points of the network (waypoints or sites) close to each other
+  // that it joins only by a long way round get a direct minor road, if the ground
+  // allows one that is neither steep, nor a detour, nor running beside an existing
+  // road. Candidates are taken best first (biggest way round saved); one that
+  // duplicates or crosses an accepted shortcut is dropped. Decided on the network
+  // above only, so neighbouring cells see (nearly) the same candidates.
+  const graph = new RoadGraph();
+  const netNodes: number[] = [];
+  for (const r of [...trunk.map((e) => e.route), ...hamletRoads.values()]) {
+    graph.addRoute(r);
+    netNodes.push(...r);
+  }
+  const beside = joinMap(netNodes);
+  const siteAt = new Map<string, Site>();
+  for (const s of [...towns, ...tv, ...hamlets]) siteAt.set(`${s.x},${s.y}`, s);
+  const asPoint = (x: number, y: number, R: number): Site => siteAt.get(`${x},${y}`) ?? { id: `n:${x},${y}`, rank: HAMLET, x, y, z: 0, R };
+  const reach = SHORT_MAX + SHORT_CONFLICT;
+  const pts = graph.points().filter((p) => inBox(p, reach));
+  const G = 1024;
+  const bucket = new Map<string, typeof pts>();
+  for (const p of pts) {
+    const k = `${Math.floor(p.x / G)},${Math.floor(p.y / G)}`;
+    if (!bucket.has(k)) bucket.set(k, []);
+    bucket.get(k)!.push(p);
+  }
+  const nearPts = (x: number, y: number, r: number) => {
+    const out: typeof pts = [];
+    for (let j = Math.floor((y - r) / G); j <= Math.floor((y + r) / G); j++)
+      for (let i = Math.floor((x - r) / G); i <= Math.floor((x + r) / G); i++)
+        for (const q of bucket.get(`${i},${j}`) ?? []) if (Math.hypot(q.x - x, q.y - y) <= r) out.push(q);
+    return out;
+  };
+  const cands: { p: (typeof pts)[0]; q: (typeof pts)[0]; d: number; gain: number }[] = [];
+  for (const p of pts)
+    for (const q of nearPts(p.x, p.y, SHORT_MAX)) {
+      if (q.key <= p.key) continue;
+      const d = dist(p, q);
+      if (d < SHORT_MIN) continue;
+      if (Math.abs(field.z(p.x, p.y) - field.z(q.x, q.y)) > SHORT_GRADE * d) continue;
+      // It may not cross the network (that would be a crossing without a junction).
+      if (graph.crosses(p, q)) continue;
+      // The way round must be long, and the loop the shortcut closes big: small
+      // triangles at junctions read as knots, not as a road network.
+      const need = Math.max(SHORT_RATIO * d, SHORT_LOOP - d);
+      const nd = graph.distance(p, q, need);
+      if (nd <= need) continue;
+      cands.push({ p, q, d, gain: Math.min(nd, 3 * SHORT_MAX) - d });
+    }
+  cands.sort((a, b) => b.gain - a.gain || (a.p.key + a.q.key < b.p.key + b.q.key ? -1 : 1));
+  const accepted: (typeof cands)[0][] = [];
+  const crossIndex = new RoadGraph();
+  const conflicts = (a: (typeof cands)[0], b: (typeof cands)[0]) =>
+    (dist(a.p, b.p) < SHORT_CONFLICT && dist(a.q, b.q) < SHORT_CONFLICT) ||
+    (dist(a.p, b.q) < SHORT_CONFLICT && dist(a.q, b.p) < SHORT_CONFLICT) ||
+    segmentsCross(a.p, a.q, b.p, b.q);
+  for (const c of cands) {
+    if (accepted.some((o) => conflicts(c, o))) continue;
+    const a = asPoint(c.p.x, c.p.y, 0.5);
+    const b = asPoint(c.q.x, c.q.y, 0.5);
+    const route = coarseRoute(a, b, field);
+    if (routeLength(route) > SHORT_DETOUR * c.d) continue;
+    // Not a road shadowing another one: away from its ends, most of its way must be new ground.
+    let shared = 0;
+    let inner = 0;
+    for (let i = 2; i < route.length - 2; i += 2) {
+      const m = { x: route[i], y: route[i + 1] };
+      if (dist(m, a) < SHORT_END || dist(m, b) < SHORT_END) continue;
+      inner++;
+      if (beside.has(`${m.x},${m.y}`)) shared++;
+    }
+    if (shared > SHORT_SHARED * inner) continue;
+    // The road as routed may not cross the network or another shortcut either.
+    if (graph.routeCrosses(route) || crossIndex.routeCrosses(route)) continue;
+    crossIndex.addRoute(route);
+    accepted.push(c);
+    if (inBox(c.p, 0)) edges.push({ id: `${c.p.key}~${c.q.key}`, cls: ROAD_C, a, b, route });
   }
 
   const all = [...towns, ...tv, ...hamlets];
   const seen = new Set<string>();
   return { sites: all.filter((s) => inCell(s) && !seen.has(s.id) && seen.add(s.id)), edges };
+}
+
+/** Shortcut length range (m), between points of the network. */
+const SHORT_MIN = 500;
+const SHORT_MAX = 2000;
+/** A pair gets a shortcut when the network's way round is longer than this × the distance. */
+const SHORT_RATIO = 2;
+/** …and the shortcut itself is no longer than this × the distance. */
+const SHORT_DETOUR = 1.5;
+/** Smallest loop a shortcut may close (m, its length plus the way round). */
+const SHORT_LOOP = 1800;
+/** Shortcuts this close at both ends duplicate each other (m). */
+const SHORT_CONFLICT = 500;
+/** Shortcuts don't climb more than this mean gradient. */
+const SHORT_GRADE = 0.08;
+/** At most this share of a shortcut's waypoints (SHORT_END m clear of its ends) may lie on or beside the network. */
+const SHORT_SHARED = 0.5;
+const SHORT_END = 300;
+/** Hamlet roads within this of a cell are part of the network its shortcuts see (m). */
+const SHORT_ROUTED = SHORT_MAX + SHORT_CONFLICT + SHORT_RATIO * SHORT_MAX / 2 + MAX_LEN[ROAD_C];
+
+/** Do segments ab and cd cross (properly, not at a shared end)? */
+function segmentsCross(a: { x: number; y: number }, b: { x: number; y: number }, c: { x: number; y: number }, d: { x: number; y: number }): boolean {
+  const o = (p: typeof a, q: typeof a, r: typeof a) => Math.sign((q.x - p.x) * (r.y - p.y) - (q.y - p.y) * (r.x - p.x));
+  return o(a, b, c) * o(a, b, d) < 0 && o(c, d, a) * o(c, d, b) < 0;
+}
+
+function routeLength(r: number[]): number {
+  let L = 0;
+  for (let i = 2; i < r.length; i += 2) L += Math.hypot(r[i] - r[i - 2], r[i + 1] - r[i - 1]);
+  return L;
+}
+
+/** Coarse road network as a graph of waypoints, for distances along it. */
+class RoadGraph {
+  private readonly id = new Map<string, number>();
+  private readonly adj: [number, number][][] = [];
+  private static readonly G = 512;
+  private readonly edges = new Map<string, [{ x: number; y: number }, { x: number; y: number }][]>();
+
+  private node(x: number, y: number): number {
+    const k = `${x},${y}`;
+    let i = this.id.get(k);
+    if (i === undefined) {
+      i = this.adj.length;
+      this.id.set(k, i);
+      this.adj.push([]);
+    }
+    return i;
+  }
+
+  addRoute(r: number[]): void {
+    for (let i = 2; i < r.length; i += 2) {
+      const a = this.node(r[i - 2], r[i - 1]);
+      const b = this.node(r[i], r[i + 1]);
+      // Edges indexed by midpoint (they are at most ~600 m long).
+      const k = `${Math.floor((r[i] + r[i - 2]) / 2 / RoadGraph.G)},${Math.floor((r[i + 1] + r[i - 1]) / 2 / RoadGraph.G)}`;
+      if (!this.edges.has(k)) this.edges.set(k, []);
+      this.edges.get(k)!.push([{ x: r[i - 2], y: r[i - 1] }, { x: r[i], y: r[i + 1] }]);
+      const w = Math.hypot(r[i] - r[i - 2], r[i + 1] - r[i - 1]);
+      this.adj[a].push([b, w]);
+      this.adj[b].push([a, w]);
+    }
+  }
+
+  /** Does the straight line a–b cross any road of the network (other than at a or b)? */
+  crosses(a: { x: number; y: number }, b: { x: number; y: number }): boolean {
+    const G = RoadGraph.G;
+    const x0 = Math.floor((Math.min(a.x, b.x) - 300) / G);
+    const x1 = Math.floor((Math.max(a.x, b.x) + 300) / G);
+    const y0 = Math.floor((Math.min(a.y, b.y) - 300) / G);
+    const y1 = Math.floor((Math.max(a.y, b.y) + 300) / G);
+    for (let j = y0; j <= y1; j++)
+      for (let i = x0; i <= x1; i++)
+        for (const [p, q] of this.edges.get(`${i},${j}`) ?? []) if (segmentsCross(a, b, p, q)) return true;
+    return false;
+  }
+
+  /** Does any piece of route r cross a road of the network (not at a shared node)? */
+  routeCrosses(r: number[]): boolean {
+    for (let i = 2; i < r.length; i += 2)
+      if (this.crosses({ x: r[i - 2], y: r[i - 1] }, { x: r[i], y: r[i + 1] })) return true;
+    return false;
+  }
+
+  /** Every node: position and key. */
+  points(): { x: number; y: number; key: string }[] {
+    return [...this.id.keys()].map((key) => {
+      const [x, y] = key.split(',').map(Number);
+      return { x, y, key };
+    });
+  }
+
+  /** Network distance between two nodes, or Infinity if more than `limit`. */
+  distance(a: { x: number; y: number }, b: { x: number; y: number }, limit: number): number {
+    const s = this.id.get(`${a.x},${a.y}`);
+    const t = this.id.get(`${b.x},${b.y}`);
+    if (s === undefined || t === undefined) return Infinity;
+    const dist = new Map<number, number>([[s, 0]]);
+    const heap = new MinHeap(64);
+    heap.push(s, 0);
+    while (heap.size) {
+      const u = heap.pop();
+      const du = dist.get(u)!;
+      if (u === t) return du;
+      for (const [v, w] of this.adj[u]) {
+        const dv = du + w;
+        if (dv > limit || dv >= (dist.get(v) ?? Infinity)) continue;
+        dist.set(v, dv);
+        heap.push(v, dv);
+      }
+    }
+    return Infinity;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -267,9 +464,11 @@ function coarseRoute(a: Site, b: Site, field: CoarseField, joins?: Map<string, [
     }
   // Start from (and finish at) whichever of the 4 grid nodes around a site suits the
   // route: the nearest node can lie behind the site, making the road double back.
+  // A point on a grid node (a waypoint) is that node: no stepping off and back.
   const around = (x: number, y: number) => {
     const i = Math.floor(x / COARSE) - ox;
     const j = Math.floor(y / COARSE) - oy;
+    if (x % COARSE === 0 && y % COARSE === 0) return [j * w + i];
     return [j * w + i, j * w + i + 1, (j + 1) * w + i, (j + 1) * w + i + 1];
   };
   const pos = (k: number): [number, number] => [(ox + (k % w)) * COARSE, (oy + Math.floor(k / w)) * COARSE];
