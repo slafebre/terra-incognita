@@ -18,6 +18,7 @@ Dev tools:
 - `npx vite-node dev/probe.ts` drives the whole pipeline in-process (no workers) and prints per-task timings.
 - `npx vite-node dev/coverstats.ts [areas] [R,R,…]` reports land cover percentages per region type (for calibration).
 - `npx vite-node dev/netstats.ts [cells] [R,R,…]` reports road density per class and shortcuts per km² from net cells alone (fast, no fine routing).
+- `npx vite-node dev/seams.ts [firstSeed] [runs] [R]` runs the pipeline test's seam check with seeded `Math.random` (optionally with the region forced to R), so a bad run can be reproduced; prints the worst chunk border lines of runs above 1.3×.
 - `npx vite-node dev/roadstats.ts [areas] [R,R,…]` reports road defects per region type: small closed loops (before and after junction merging), crossings away from junctions, and length running alongside another road. `SHEET=<prefix>` writes an SVG contact sheet of the loops, `DUMP=<prefix>` an SVG of each whole area.
 
 Controls: drag or arrow keys/WASD to pan, pinch, ctrl/⌘+wheel, trackpad pinch or +/- to zoom (0.5×–2×).

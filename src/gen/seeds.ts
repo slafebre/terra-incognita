@@ -135,6 +135,9 @@ export class SeedStore {
 /** A lattice whose per-point random value is `seed(ix, iy)`. */
 export interface Lattice {
   readonly S: number;
+  /** Lattice point (ix, iy) sits at world (ix·S − ox, iy·S − oy). */
+  readonly ox: number;
+  readonly oy: number;
   seed(ix: number, iy: number): number;
   /** Scratch cache owned by `gnoise`: [ix, iy, salt, g00, g10, g01, g11] of the last cell. */
   readonly cell: number[];
@@ -142,21 +145,26 @@ export interface Lattice {
 
 const newCellCache = () => [NaN, NaN, 0, 0, 0, 0, 0];
 
+/**
+ * Fine lattice: each point takes its randomness from the chunk containing it. With an
+ * offset, a point still lies within S of every sample that uses it, so the seed
+ * dependency stays within ±1 chunk.
+ */
 class FineLattice implements Lattice {
   readonly cell = newCellCache();
-  private readonly ratio: number;
   private readonly salt: number;
   constructor(
     readonly S: number,
     private readonly p: SeedPayload,
+    readonly ox = 0,
+    readonly oy = 0,
   ) {
-    this.ratio = CHUNK / S;
     this.salt = Math.imul(S, 0x9e3779b1);
   }
   seed(ix: number, iy: number): number {
     const p = this.p;
-    const ci = Math.floor(ix / this.ratio) - p.cx0;
-    const cj = Math.floor(iy / this.ratio) - p.cy0;
+    const ci = Math.floor((ix * this.S - this.ox) / CHUNK) - p.cx0;
+    const cj = Math.floor((iy * this.S - this.oy) / CHUNK) - p.cy0;
     if (ci < 0 || cj < 0 || ci >= p.cw || cj >= p.ch) throw new Error(`fine seed out of payload (S=${this.S})`);
     return hash3(p.chunks[cj * p.cw + ci] ^ this.salt, ix, iy);
   }
@@ -165,6 +173,8 @@ class FineLattice implements Lattice {
 class CoarseLattice implements Lattice {
   readonly cell = newCellCache();
   readonly S: number;
+  readonly ox = 0;
+  readonly oy = 0;
   constructor(private readonly b: CoarseBlock) {
     this.S = b.S;
   }
@@ -180,13 +190,27 @@ class CoarseLattice implements Lattice {
 /** Worker-side read-only view on a payload. */
 export class SeedView {
   private readonly lattices = new Map<number, Lattice>();
-  constructor(p: SeedPayload) {
+  private readonly shiftedLattices = new Map<string, Lattice>();
+  constructor(private readonly p: SeedPayload) {
     for (const b of p.coarse) this.lattices.set(b.S, new CoarseLattice(b));
     for (let S = CHUNK; S >= 1; S /= 2) this.lattices.set(S, new FineLattice(S, p));
   }
   lattice(S: number): Lattice {
     const l = this.lattices.get(S);
     if (!l) throw new Error(`no lattice with spacing ${S}`);
+    return l;
+  }
+
+  /**
+   * Fine lattice (S <= CHUNK) shifted by (ox, oy) metres, 0 <= ox, oy < S. Noise on
+   * lattices aligned with the chunk grid has different curvature along lattice
+   * lines, which would show every chunk border as a faint seam.
+   */
+  shifted(S: number, ox: number, oy: number): Lattice {
+    if (S > CHUNK || ox < 0 || oy < 0 || ox >= S || oy >= S) throw new Error(`bad shifted lattice ${S} ${ox} ${oy}`);
+    const k = `${S}:${ox}:${oy}`;
+    let l = this.shiftedLattices.get(k);
+    if (!l) this.shiftedLattices.set(k, (l = new FineLattice(S, this.p, ox, oy)));
     return l;
   }
 }

@@ -14,6 +14,7 @@ import type { Lattice, SeedView } from './seeds';
 
 const SHAPE_OCTAVES = [4096, 2048, 1024, 512, 256, 128, 64, 32, 16, 8];
 const WARP_COARSE_FROM = 1024;
+const frac = (x: number) => x - Math.floor(x);
 
 const SALT_REGION_A = 0x5a17c3d1;
 const SALT_REGION_B = 0x13e0b4a9;
@@ -96,7 +97,11 @@ export class Terrain {
     this.l8k = view.lattice(8192);
     this.l4k = view.lattice(4096);
     this.l2k = view.lattice(2048);
-    this.shape = SHAPE_OCTAVES.map((S) => view.lattice(S));
+    // Unwarped octaves get their own lattice offsets (golden-ratio fractions of S), so
+    // no octave's lattice lines coincide with the chunk grid or with each other.
+    this.shape = SHAPE_OCTAVES.map((S, k) =>
+      S >= WARP_COARSE_FROM ? view.lattice(S) : view.shifted(S, frac(0.6180339887 * (k + 1)) * S, frac(0.7548776662 * (k + 1)) * S),
+    );
   }
 
   region(x: number, y: number): number {

@@ -22,8 +22,8 @@ export const ND = new Float64Array(2);
  */
 export function gnoise(L: Lattice, salt: number, x: number, y: number): number {
   const S = L.S;
-  const fx = x / S;
-  const fy = y / S;
+  const fx = (x + L.ox) / S;
+  const fy = (y + L.oy) / S;
   const ix = Math.floor(fx);
   const iy = Math.floor(fy);
   const tx = fx - ix;

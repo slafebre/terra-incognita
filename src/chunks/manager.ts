@@ -41,6 +41,9 @@ export interface Chunk {
 
 type Candidate = { chunk: Chunk; kind: TaskKind; priority: number };
 
+/** Blended ground may sit this far (m) below a lake's level and still hold it. */
+const LAKE_DEFICIT = 1;
+
 const chunkRect = (cx: number, cy: number): Rect => ({
   x0: cx * CHUNK,
   y0: cy * CHUNK,
@@ -603,7 +606,22 @@ export class ChunkManager {
             }
           }
         p.zE[o] = z;
-        p.lake[o] = lakeW >= 0.5 ? lakeL / lakeW : NaN;
+        p.lake[o] = NaN;
+        if (lakeW < 0.5) continue;
+        // Solves without the lake here may have carved the ground well below its level.
+        // The blended ground then can't hold the water: end the lake where it rises
+        // above the blend instead of walling it in at the majority line.
+        const level = lakeL / lakeW;
+        let deficit = 0;
+        for (let wy = ay; wy <= ay + 1; wy++)
+          for (let wx = ax; wx <= ax + 1; wx++) {
+            const wgt = blendWeight(wx, gx) * blendWeight(wy, gy);
+            if (wgt <= 0) continue;
+            const wc = this.get(wx, wy)!;
+            const k = coreIdx(wc, gx, gy);
+            if (Number.isNaN(wc.hydro!.lake[k])) deficit += wgt * Math.max(0, level - wc.hydro!.zE[k]);
+          }
+        if (deficit <= LAKE_DEFICIT) p.lake[o] = level;
       }
     return p;
   }

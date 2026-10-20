@@ -58,7 +58,8 @@ Grid overlay
 *(Revised during milestone 1. The first draft proposed conditional extrapolation plus membrane correction along borders. Forgettable lattice seeds turned out simpler and give exact continuity.)*
 
 - All terrain noise is gradient noise on lattices from 16 km down to 8 m. A lattice point's random gradient comes from a **seed created lazily the first time land needs it**, using `Math.random`. There is no world seed.
-  - Fine lattices (spacing ≤ 512 m) use one seed per chunk.
+  - Fine lattices (spacing ≤ 512 m) use one seed per chunk: a lattice point takes its randomness from the chunk it lies in.
+  - Each fine terrain octave's lattice is **offset** by its own fraction of its spacing (golden-ratio steps). Gradient noise has different curvature along its lattice lines, and ridged noise most of all. Lattices aligned with the chunk grid showed every chunk border at up to 2.4× the curvature of elsewhere (1.4× through chunk middles). A shifted lattice point still lies within one spacing of every sample that uses it, so the seed dependency stays within ±1 chunk.
   - Coarse lattices (1–16 km) store one seed per lattice point.
 - **Retention invariant:** a seed is dropped only once no retained chunk can depend on it (forget rectangle, plus the lattice spacing, the maximum domain warp, and a margin). Retained land is therefore always exactly consistent: neighbouring chunks agree bit-for-bit on shared edges.
 - Once every chunk that used a seed has been forgotten, the seed goes too. Revisiting the area creates new seeds, so the terrain comes back different. Large features (16 km lattice) survive longest: they are forgotten only about 4.5 km + 16 km away.
@@ -99,14 +100,15 @@ Grid overlay
    - *Dammed lakes:* every chunk has a seeded 5–12% chance of a dam (1.5–25 m by region) at a place-bound site. The lake floods upstream unless it would leak.
    - *Natural lakes:* filled depressions of at least 25 nodes and 1.5 m deep.
 5. **Valley floors** around channels with A ≥ 0.5 km² (floodplains, glacial U-floors). Half-width is `k·√A`, capped at 180 m.
-6. **Hillslope limiter.** Lower envelope: no hillslope node sits more than 1.15·Smax·d above any neighbour, which removes cliffs.
+6. **Hillslope limiter.** Lower envelope: no node sits more than 1.15·Smax·d above any neighbour, which removes cliffs. Channels are included and re-routed into the lower ground; otherwise a small side stream left above a freshly carved valley floor stands as a one-node wall up to ~190 m high. Only channels beside a lake keep their course, so its inflows and outflow stay intact.
+   - *Breached lakes:* floors and the limiter lower the land around lakes, never the lakes. A lake whose rim ends up more than 1 m below its level (the dam site excepted) is drained, and the limiter runs again to lower its bed towards the breach. Otherwise it hangs above its surroundings: in hills and mountains most natural lakes did, by 8–360 m.
 7. **Final drainage guarantee.** A priority-flood from the outlets fills any remaining pit by a hair and routes it on. Every receiver points at an earlier-settled node, so there are no dead ends and no cycles. Accumulation is then recomputed.
 8. **Output.** Only the core is kept: the chunk ± 16 nodes, i.e. the support of its blend weight.
 
 **Blending**
 - A node's elevation is the blend of the four solves whose centres surround it.
 - Weights are `cos²(π/2 · distance / chunk)` per axis. They sum to 1 and have zero slope at both ends, so the blend has no creases. A weight is zero one chunk from its centre, far from any window edge.
-- Lakes blend by majority (weight ≥ 0.5), with a weighted level.
+- Lakes blend by majority (weight ≥ 0.5), with a weighted level. A node stays lake only if the solves without the lake there have ground at most 1 m (weighted) below that level. Where a solve has carved the ground well below a lake that another solve keeps, the lake then ends where the blended ground can hold it. Without this rule it ended at the majority line, against a wall up to ~25 m high (from the DEM's raise of dry ground beside lakes).
 - Receivers and drainage area come from the solve of the node's own chunk. A stream crossing into a chunk whose solve has a smaller catchment there is carried on downstream by the renderer.
 
 **DEM (4 m)**

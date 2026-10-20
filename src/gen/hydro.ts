@@ -309,7 +309,8 @@ export interface HydroCore {
 
 export interface HydroResult {
   core: HydroCore;
-  stats: { lakes: number; inflows: number; cyclesBroken: number; fills: number };
+  /** `lakes` kept; `drained`: lakes whose rim was cut away (see below). */
+  stats: { lakes: number; drained: number; inflows: number; cyclesBroken: number; fills: number };
 }
 
 /** Lake requirements: filled depth and area (nodes). */
@@ -324,6 +325,8 @@ const LAKE_MIN_NODES = 25;
 const LAKE_EDGE_MARGIN = NODES;
 /** Chance that a chunk has one dammed lake, by region. */
 const LAKES_PER_CHUNK = (R: number) => (R > 0.8 ? 0.12 : R > 0.52 ? 0.05 : R > 0.25 ? 0.06 : 0.07);
+/** A lake whose rim ends up this far below its level (m) is drained. */
+const LAKE_BREACH = 1;
 /** Valley floors for channels with A above this (km²). */
 const FLOOR_MIN_A = 0.5;
 const FLOOR_MAX_HALF = 180;
@@ -583,6 +586,7 @@ export function solveHydro(win: HydroWindow, cx: number, cy: number, view: SeedV
   // riegels, moraines and landslides. Every chunk in the window gets the same
   // (seeded) chance and dam height in every solve that covers it.
   let lakes = 0;
+  const damSites = new Set<number>();
   for (let ccy = 0; ccy < h / NODES; ccy++)
     for (let ccx = 0; ccx < w / NODES; ccx++) {
       const qcx = gx / NODES + ccx;
@@ -645,6 +649,7 @@ export function solveHydro(win: HydroWindow, cx: number, cy: number, view: SeedV
         const pc = parent.get(c)!;
         for (let d = 0; d < 8; d++) if ((Math.floor(c / w) + DY[d]) * w + (c % w) + DX[d] === pc) rec[c] = d;
       }
+      damSites.add(site);
       lakes++;
     }
 
@@ -721,7 +726,21 @@ export function solveHydro(win: HydroWindow, cx: number, cy: number, view: SeedV
   // Carving bounds each node only against its own receiver, so ridges between a
   // deep valley and a hanging one can keep 100 m steps. Lower every hillslope node
   // to at most Smax·d above any neighbour (lower envelope from low points).
-  {
+  // Channels are lowered too (and re-routed into the lower ground): otherwise a side
+  // stream left perched above a newly carved valley stands as a one-node wall.
+  // Channels beside a lake keep their course, so inflows and outflows stay intact.
+  const limitHillslopes = () => {
+    const nearLake = new Uint8Array(N);
+    for (let c = 0; c < N; c++) {
+      if (Number.isNaN(lake[c])) continue;
+      const ci = c % w;
+      const cj = (c - ci) / w;
+      for (let d = 0; d < 8; d++) {
+        const i = ci + DX[d];
+        const j = cj + DY[d];
+        if (i >= 0 && j >= 0 && i < w && j < h) nearLake[j * w + i] = 1;
+      }
+    }
     const lim = new MinHeap(N);
     for (let k = 0; k < N; k++) lim.push(k, zE[k]);
     while (lim.size) {
@@ -735,7 +754,7 @@ export function solveHydro(win: HydroWindow, cx: number, cy: number, view: SeedV
         const j = cj + DY[d];
         if (i < 0 || j < 0 || i >= w || j >= h) continue;
         const q = j * w + i;
-        if (!Number.isNaN(lake[q]) || A[q] >= CHANNEL_A || rec[q] === REC_EXIT) continue;
+        if (!Number.isNaN(lake[q]) || rec[q] === REC_EXIT || (A[q] >= CHANNEL_A && nearLake[q])) continue;
         const cand = zE[c] + erodeSmax(R[q]) * HILL_LIMIT * DIST[d];
         if (cand < zE[q] - 1e-3) {
           zE[q] = cand;
@@ -745,6 +764,47 @@ export function solveHydro(win: HydroWindow, cx: number, cy: number, view: SeedV
         }
       }
     }
+  };
+  limitHillslopes();
+
+  // --- Breached lakes ------------------------------------------------------------
+  // Valley floors and the limiter lower the land around lakes, never the lakes. Where
+  // that cuts through a lake's rim, the lake would hang above its surroundings (and
+  // meet a neighbouring solve without it at a cliff). Drain such lakes, and let the
+  // limiter lower their beds towards the breach.
+  let drained = 0;
+  {
+    const done = new Uint8Array(N);
+    const members: number[] = [];
+    for (let s0 = 0; s0 < N; s0++) {
+      if (done[s0] || Number.isNaN(lake[s0])) continue;
+      const level = lake[s0];
+      members.length = 0;
+      members.push(s0);
+      done[s0] = 1;
+      let rim = Infinity;
+      for (let p = 0; p < members.length; p++) {
+        const c = members[p];
+        const ci = c % w;
+        const cj = (c - ci) / w;
+        for (let d = 0; d < 8; d++) {
+          const i = ci + DX[d];
+          const j = cj + DY[d];
+          if (i < 0 || j < 0 || i >= w || j >= h) continue;
+          const q = j * w + i;
+          if (lake[q] === level) {
+            if (!done[q]) {
+              done[q] = 1;
+              members.push(q);
+            }
+          } else if (Number.isNaN(lake[q]) && !damSites.has(q) && zE[q] < rim) rim = zE[q];
+        }
+      }
+      if (rim >= level - LAKE_BREACH) continue;
+      for (const c of members) lake[c] = NaN;
+      drained++;
+    }
+    if (drained) limitHillslopes();
   }
 
   // Land beside a lake can't sit below its level (except the outflowing river).
@@ -830,5 +890,5 @@ export function solveHydro(win: HydroWindow, cx: number, cy: number, view: SeedV
       core.rec[o] = rec[k];
       core.lake[o] = lake[k];
     }
-  return { core, stats: { lakes, inflows, cyclesBroken, fills } };
+  return { core, stats: { lakes: lakes - drained, drained, inflows, cyclesBroken, fills } };
 }
