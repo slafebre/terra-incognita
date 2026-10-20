@@ -41,7 +41,7 @@ export interface WorkerRequest {
 
 /** Sent once to each worker before any task. */
 export interface WorkerConfig {
-  config: { regionOverride: number };
+  config: { regionOverride: number; network: string };
 }
 
 export type WorkerResponse = { id: number; ok: true; result: TaskResult } | { id: number; ok: false; error: string };

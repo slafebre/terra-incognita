@@ -32,7 +32,7 @@ export function drawChurches(ctx: Ctx, sites: Site[], cx: number, cy: number, px
   ctx.fillStyle = STYLE.church;
   ctx.lineWidth = 0.9 * dpr;
   for (const s of sites) {
-    if (s.rank === HAMLET) continue;
+    if (s.rank >= HAMLET) continue;
     const x = (s.x - cx * CHUNK) * pxPerM;
     const y = (s.y - cy * CHUNK) * pxPerM;
     const r = 2.2 * dpr;

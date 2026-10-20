@@ -4,11 +4,14 @@
 // and length running alongside another road. Runs the real pipeline in-process.
 // SHEET=<prefix> writes a contact sheet of the loops, DUMP=<prefix> each area.
 import { ChunkManager } from '../src/chunks/manager';
-import { mergeApproaches, type SegmentPath } from '../src/gen/roads';
+import { mergeApproaches, type RoadEdge, type SegmentPath } from '../src/gen/roads';
+import type { Site } from '../src/gen/settle';
 import { setRegionOverride } from '../src/gen/terrain';
 import { APRON, CELL, CHUNK, DEM_W } from '../src/lib/constants';
 import type { TaskRequest, TaskResult } from '../src/worker/protocol';
 import { runTask } from '../src/worker/tasks';
+import { rng } from '../src/lib/hash';
+import { setNetworkMode } from '../src/gen/network';
 
 declare const process: { argv: string[]; env: Record<string, string | undefined> };
 const FS = 'node:fs';
@@ -18,20 +21,68 @@ const AREAS = Number(process.argv[2] ?? 3);
 const REGIONS = (process.argv[3] ?? '0.15,0.3,0.45,0.6').split(',').map(Number);
 const SIZE = 3000;
 /** Enclosed areas smaller than this (m²) are loops, not network meshes. */
-const LOOP_AREA = 60000;
+const LOOP_AREA = Number(process.env.LOOP_HA ?? 2) * 10000;
 let area = { x0: 0, y0: 0, x1: 0, y1: 0 };
 /** Crossings this close to a path end are junctions. */
 const JUNCTION = 40;
 /** Another road this close counts as running alongside. */
 const ALONGSIDE = 22;
 
+let lastSites: Site[] = [];
+let lastEdges: RoadEdge[] = [];
+
+/**
+ * Dead ends inside the area: drawn segment ends that no other segment shares and
+ * that aren't at a site; and coarse route ends that are neither a site nor on
+ * another route (the network's own fault, before fine routing).
+ */
+function deadEnds(segs: SegmentPath[]): { fine: { x: number; y: number }[]; coarse: { x: number; y: number; id: string }[] } {
+  const inside = (x: number, y: number) => x >= area.x0 && x < area.x1 && y >= area.y0 && y < area.y1;
+  const atSite = (x: number, y: number, r: number) => lastSites.some((t) => Math.hypot(t.x - x, t.y - y) < r);
+  const deg = new Map<string, number>();
+  for (const g of segs)
+    for (const i of [0, g.xy.length - 2]) {
+      const k = `${g.xy[i]},${g.xy[i + 1]}`;
+      deg.set(k, (deg.get(k) ?? 0) + 1);
+    }
+  const fine: { x: number; y: number }[] = [];
+  for (const [k, n] of deg) {
+    if (n !== 1) continue;
+    const [x, y] = k.split(',').map(Number);
+    if (inside(x, y) && !atSite(x, y, 60)) fine.push({ x, y });
+  }
+  const nodes = new Set<string>();
+  for (const e of lastEdges) for (let i = 0; i < e.route.length; i += 2) nodes.add(`${e.route[i]},${e.route[i + 1]}`);
+  const useCount = new Map<string, number>();
+  for (const e of lastEdges)
+    for (let i = 0; i < e.route.length; i += 2) {
+      const k = `${e.route[i]},${e.route[i + 1]}`;
+      useCount.set(k, (useCount.get(k) ?? 0) + 1);
+    }
+  const coarse: { x: number; y: number; id: string }[] = [];
+  for (const e of lastEdges)
+    for (const i of [0, e.route.length - 2]) {
+      const x = e.route[i];
+      const y = e.route[i + 1];
+      if (!inside(x, y) || atSite(x, y, 1)) continue;
+      if ((useCount.get(`${x},${y}`) ?? 0) < 2) coarse.push({ x, y, id: e.id });
+    }
+  return { fine, coarse };
+}
+
 /** Terrain slope (m/m) at world (x, y), from the last area's DEMs. */
 let slopeAt: (x: number, y: number) => number = () => NaN;
 /** Water depth (m, ≤ 0 = dry) at world (x, y). */
 let waterAt: (x: number, y: number) => number = () => NaN;
 
+/** Base seed: areas are reproducible (Math.random drives every fresh seed), so code versions compare on the same terrain. */
+const SEED = Number(process.env.SEED ?? 1);
+setNetworkMode(process.env.NET ?? 'mesh');
+let areaNo = 0;
+
 async function segments(R: number): Promise<SegmentPath[]> {
   setRegionOverride(R);
+  Math.random = rng(SEED * 7919 + areaNo++ * 104729 + Math.round(R * 1000));
   const pool = {
     size: 4,
     busy: 0,
@@ -79,6 +130,12 @@ async function segments(R: number): Promise<SegmentPath[]> {
     const j = APRON + Math.round((y - c.cy * CHUNK) / CELL);
     return c.water[j * DEM_W + i];
   };
+  lastSites = [];
+  lastEdges = [];
+  for (const n of m.nets.values()) {
+    lastSites.push(...(n.data?.sites ?? []));
+    lastEdges.push(...(n.data?.edges ?? []));
+  }
   const byKey = new Map<string, SegmentPath>();
   for (const c of m.chunks.values()) for (const s of c.roads ?? []) byKey.set(s.key, s);
   return [...byKey.values()];
@@ -228,7 +285,7 @@ function stats(segs: SegmentPath[]): { km: number; crossings: number; alongside:
 const detour = [[0, 0], [0, 0], [0, 0]];
 const flat: string[] = [];
 const loops = [[0, 0], [0, 0], [0, 0]];
-let loopsN = 0, areaKm2 = 0, inKm = 0, loopsRaw = 0;
+let loopsN = 0, areaKm2 = 0, inKm = 0, loopsRaw = 0, deadFine = 0, deadCoarse = 0;
 for (const R of REGIONS) {
   let km = 0, crossings = 0, alongside = 0;
   for (let a = 0; a < AREAS; a++) {
@@ -237,6 +294,29 @@ for (const R of REGIONS) {
     const segs = mergeApproaches(raw);
     const s = stats(segs);
     const lp = smallLoops(segs);
+    const de = deadEnds(segs);
+    for (const g of raw) {
+      const n = g.xy.length;
+      const chord = Math.hypot(g.xy[n - 2] - g.xy[0], g.xy[n - 1] - g.xy[1]);
+      if (chord > 700) console.log(`  LONG segment cls ${g.cls} chord ${chord.toFixed(0)} m ${g.key}`);
+    }
+    deadFine += de.fine.length;
+    deadCoarse += de.coarse.length;
+    if (process.env.DEADLOG) for (const c of de.coarse.slice(0, 5)) console.log('  coarse dead end', c.id, Math.round(c.x), Math.round(c.y));
+    if (process.env.DEADLOG)
+      for (const f of de.fine.slice(0, 6)) {
+        console.log(`  drawn dead end at ${f.x},${f.y}`);
+        for (const e of lastEdges)
+          for (let i = 0; i < e.route.length; i += 2)
+            if (Math.hypot(e.route[i] - f.x, e.route[i + 1] - f.y) < 80) {
+              const prev = i > 0 ? `${e.route[i - 2]},${e.route[i - 1]}` : '-';
+              const next = i < e.route.length - 2 ? `${e.route[i + 2]},${e.route[i + 3]}` : '-';
+              const here = `${e.route[i]},${e.route[i + 1]}`;
+              const has = (p: string) => p === '-' || segs.some((g) => g.key === (p < here ? `${p}|${here}` : `${here}|${p}`));
+              console.log(`    edge ${e.id} cls ${e.cls} node ${i / 2}/${e.route.length / 2} at ${here}  seg-prev ${has(prev)} seg-next ${has(next)}`);
+            }
+      }
+    if (process.env.DEAD) sheet(segs, de.fine.map((p) => ({ ...p, a: 0 })), `${process.env.DEAD}-R${R}-${a}.svg`);
     loopsN += lp.length;
     for (const l of lp) marks.push({ x: l.x, y: l.y, kind: 'cross' });
     areaKm2 += (SIZE / 1000) ** 2;
@@ -280,6 +360,9 @@ for (const R of REGIONS) {
   for (const f of flat.slice(0, 12)) console.log('  flat detour: ' + f);
   detour.forEach((d) => d.fill(0));
   console.log(`SMALL LOOPS R=${R}: ${loopsN} in ${areaKm2} km² with ${inKm.toFixed(0)} km road → ${((100 * loopsN) / inKm).toFixed(1)} per 100 km (unmerged ${((100 * loopsRaw) / inKm).toFixed(1)})`);
+  console.log(`DEAD ENDS R=${R}: drawn ${deadFine}, in the network ${deadCoarse}`);
+  deadFine = 0;
+  deadCoarse = 0;
   loopsRaw = 0;
   loopsN = 0; areaKm2 = 0; inKm = 0;
   flat.length = 0;

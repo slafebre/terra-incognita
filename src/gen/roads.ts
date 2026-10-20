@@ -26,7 +26,7 @@ export const NET_CELL = 8192;
  * How far around a net cell the coarse terrain is consulted (m): D roads in the
  * D_ZONE, their neighbourhood, the sites deciding those, and coarse tile reach.
  */
-export const NET_REACH = 44000;
+export const NET_REACH = 56000;
 /** D roads with an endpoint this far around a cell are routed by it (m). */
 const D_ZONE = 9300;
 export const ROAD_N = 0;
@@ -37,7 +37,7 @@ export type RoadClass = typeof ROAD_N | typeof ROAD_D | typeof ROAD_C;
 /** Maximum sustained gradient per class. */
 export const MAX_GRADE = [0.07, 0.1, 0.15];
 /** Longest edge per class (m). */
-const MAX_LEN = [9000, 4500, 1600];
+export const MAX_LEN = [9000, 4500, 1600];
 
 export interface RoadEdge {
   id: string;
@@ -56,7 +56,7 @@ export interface NetCell {
 const cellOf = (x: number) => Math.floor(x / NET_CELL);
 
 /** Relative neighbourhood graph test: no other site is closer to both a and b. */
-function rngEdge(a: Site, b: Site, others: Site[]): boolean {
+export function rngEdge(a: Site, b: Site, others: Site[]): boolean {
   const d = Math.hypot(a.x - b.x, a.y - b.y);
   for (const c of others) {
     if (c === a || c === b) continue;
@@ -266,19 +266,19 @@ const SHORT_END = 300;
 const SHORT_ROUTED = SHORT_MAX + SHORT_CONFLICT + SHORT_RATIO * SHORT_MAX / 2 + MAX_LEN[ROAD_C];
 
 /** Do segments ab and cd cross (properly, not at a shared end)? */
-function segmentsCross(a: { x: number; y: number }, b: { x: number; y: number }, c: { x: number; y: number }, d: { x: number; y: number }): boolean {
+export function segmentsCross(a: { x: number; y: number }, b: { x: number; y: number }, c: { x: number; y: number }, d: { x: number; y: number }): boolean {
   const o = (p: typeof a, q: typeof a, r: typeof a) => Math.sign((q.x - p.x) * (r.y - p.y) - (q.y - p.y) * (r.x - p.x));
   return o(a, b, c) * o(a, b, d) < 0 && o(c, d, a) * o(c, d, b) < 0;
 }
 
-function routeLength(r: number[]): number {
+export function routeLength(r: number[]): number {
   let L = 0;
   for (let i = 2; i < r.length; i += 2) L += Math.hypot(r[i] - r[i - 2], r[i + 1] - r[i - 1]);
   return L;
 }
 
 /** Coarse road network as a graph of waypoints, for distances along it. */
-class RoadGraph {
+export class RoadGraph {
   private readonly id = new Map<string, number>();
   private readonly adj: [number, number][][] = [];
   private static readonly G = 512;
@@ -369,7 +369,7 @@ class RoadGraph {
  * "x,y"; values are the network node to finish on. Depends only on the node set, not
  * on its order, so every cell builds the same map.
  */
-function joinMap(nodes: number[]): Map<string, [number, number]> {
+export function joinMap(nodes: number[]): Map<string, [number, number]> {
   const on = new Set<string>();
   for (let i = 0; i < nodes.length; i += 2)
     if (nodes[i] % COARSE === 0 && nodes[i + 1] % COARSE === 0) on.add(`${nodes[i]},${nodes[i + 1]}`);
@@ -409,6 +409,37 @@ const COARSE_GRADE = 0.1;
 /** Valley floors (drainage area ramp, km², around a node) cost up to this much less. */
 const VALLEY_AREA = [0.3, 4];
 const VALLEY_BONUS = 0.35;
+/** Following a road already there costs this share: later roads join it rather than run beside it. */
+const REUSE = 0.5;
+
+/** Key of the coarse edge between grid nodes (i0, j0) and (i1, j1), either way round. */
+export function edgeKey(i0: number, j0: number, i1: number, j1: number): string {
+  return j0 < j1 || (j0 === j1 && i0 < i1) ? `${i0},${j0},${i1},${j1}` : `${i1},${j1},${i0},${j0}`;
+}
+
+/** Adds the grid edges of route r (world metres) to a reuse set. */
+export function markReuse(set: Set<string>, r: number[]): void {
+  for (let i = 2; i < r.length; i += 2) {
+    const [x0, y0, x1, y1] = [r[i - 2], r[i - 1], r[i], r[i + 1]];
+    if (x0 % COARSE || y0 % COARSE || x1 % COARSE || y1 % COARSE) continue;
+    set.add(edgeKey(x0 / COARSE, y0 / COARSE, x1 / COARSE, y1 / COARSE));
+  }
+}
+
+/**
+ * Coarse elevation and drainage area at a (half-)grid point, cached per field:
+ * routes in a cell overlap heavily, and the blended lookup is not cheap.
+ */
+const nodeCache = new WeakMap<CoarseField, Map<number, [number, number]>>();
+function nodeData(field: CoarseField, x: number, y: number): [number, number] {
+  let m = nodeCache.get(field);
+  if (!m) nodeCache.set(field, (m = new Map()));
+  // Half-grid index pair packed into one number (|i|, |j| < 2^25).
+  const k = Math.round((2 * x) / COARSE) * 67108864 + Math.round((2 * y) / COARSE);
+  let v = m.get(k);
+  if (!v) m.set(k, (v = [field.z(x, y), field.area(x, y)]));
+  return v;
+}
 
 /**
  * Fixed tie-break per coarse edge, 0..1, symmetric in its ends. On flat ground many
@@ -430,8 +461,17 @@ function edgeJitter(i0: number, j0: number, i1: number, j1: number): number {
  * With `joins` ("x,y" of grid nodes on existing roads), the route ends at the
  * first such node it can reach most cheaply instead of running on beside it.
  */
-function coarseRoute(a: Site, b: Site, field: CoarseField, joins?: Map<string, [number, number]>): number[] {
-  const margin = 1536;
+export function coarseRoute(
+  a: Site,
+  b: Site,
+  field: CoarseField,
+  joins?: Map<string, [number, number]>,
+  margin = 1536,
+  out?: { cost: number },
+  reuse?: Set<string>,
+  /** Moves (grid indices) that would cross an existing road between nodes: forbidden. */
+  blocked?: (i0: number, j0: number, i1: number, j1: number) => boolean,
+): number[] {
   const ox = Math.floor((Math.min(a.x, b.x) - margin) / COARSE);
   const oy = Math.floor((Math.min(a.y, b.y) - margin) / COARSE);
   const w = Math.ceil((Math.max(a.x, b.x) + margin) / COARSE) - ox + 1;
@@ -444,8 +484,9 @@ function coarseRoute(a: Site, b: Site, field: CoarseField, joins?: Map<string, [
     for (let i = 0; i < w; i++) {
       const x = (ox + i) * COARSE;
       const y = (oy + j) * COARSE;
-      z[j * w + i] = field.z(x, y);
-      area[j * w + i] = field.area(x, y);
+      const [zz, aa] = nodeData(field, x, y);
+      z[j * w + i] = zz;
+      area[j * w + i] = aa;
       river[j * w + i] = area[j * w + i] > 15 ? 1 : 0;
     }
   // Valley floors: on or beside a stream. Roads run along them (gentle, and where
@@ -472,7 +513,15 @@ function coarseRoute(a: Site, b: Site, field: CoarseField, joins?: Map<string, [
     return [j * w + i, j * w + i + 1, (j + 1) * w + i, (j + 1) * w + i + 1];
   };
   const pos = (k: number): [number, number] => [(ox + (k % w)) * COARSE, (oy + Math.floor(k / w)) * COARSE];
-  const goals = new Set(around(b.x, b.y));
+  // Only corners on the side facing the other end: a corner behind the site makes
+  // the road leave backwards and curl round it.
+  const facing = (s: Site, o: Site) =>
+    around(s.x, s.y).filter((k, _n, all) => {
+      if (all.length === 1) return true;
+      const [x, y] = pos(k);
+      return (x - s.x) * (o.x - s.x) + (y - s.y) * (o.y - s.y) >= 0;
+    });
+  const goals = new Set(facing(b, a));
   const GOAL = N; // virtual node: "arrived at b"
   let join: [number, number] | undefined;
   const cost = new Float64Array(N + 1).fill(Infinity);
@@ -483,8 +532,10 @@ function coarseRoute(a: Site, b: Site, field: CoarseField, joins?: Map<string, [
     return Math.hypot(x - b.x, y - b.y);
   };
   // Heuristic: a step can cost as little as (1 - VALLEY_BONUS) × its length.
+  // (Not scaled for reuse: an optimistic estimate there would search nearly the whole
+  // window; slightly suboptimal joins are fine.)
   const hA = (k: number) => (1 - VALLEY_BONUS) * h0(k);
-  for (const k of around(a.x, a.y)) {
+  for (const k of facing(a, b)) {
     const [x, y] = pos(k);
     cost[k] = Math.hypot(x - a.x, y - a.y);
     from[k] = -2; // starts at a
@@ -510,15 +561,17 @@ function coarseRoute(a: Site, b: Site, field: CoarseField, joins?: Map<string, [
       const j = cj + dy;
       if (i < 0 || j < 0 || i >= w || j >= h) continue;
       const q = j * w + i;
+      if (blocked?.(ox + ci, oy + cj, ox + i, oy + j)) continue;
       const dist = Math.hypot(dx, dy) * COARSE;
       // Knight moves pass between nodes: check the middle too, or they'd hop ridges.
       const zm =
-        Math.abs(dx) + Math.abs(dy) === 3 ? field.z((ox + ci + dx / 2) * COARSE, (oy + cj + dy / 2) * COARSE) : (z[c] + z[q]) / 2;
+        Math.abs(dx) + Math.abs(dy) === 3 ? nodeData(field, (ox + ci + dx / 2) * COARSE, (oy + cj + dy / 2) * COARSE)[0] : (z[c] + z[q]) / 2;
       const g = (Math.abs(zm - z[c]) + Math.abs(z[q] - zm)) / dist;
       let step = dist * (1 + 4 * (g / COARSE_GRADE) ** 2);
       if (g > 2 * COARSE_GRADE) step *= 8; // coarse slopes are smoothed: discourage, don't forbid
       if (river[q] !== river[c]) step += 150; // a bridge (half on each bank: costs are symmetric)
       step *= 1 - (VALLEY_BONUS * (valley[c] + valley[q])) / 2;
+      if (reuse?.has(edgeKey(ox + ci, oy + cj, ox + i, oy + j))) step *= REUSE; // along an existing road
       step *= 1 + 0.01 * edgeJitter(ox + ci, oy + cj, ox + i, oy + j);
       const nc = cost[c] + step;
       if (nc < cost[q]) {
@@ -538,6 +591,7 @@ function coarseRoute(a: Site, b: Site, field: CoarseField, joins?: Map<string, [
   for (const c of nodes) add(...pos(c));
   if (join) add(...join);
   else add(b.x, b.y);
+  if (out) out.cost = cost[GOAL];
   return route;
 }
 

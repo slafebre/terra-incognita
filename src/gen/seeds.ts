@@ -23,7 +23,7 @@ export const MAX_WARP = 600;
  * hydrology reads coarse tiles ~21 km away, and settlements and roads (net cells)
  * decide far-away towns from coarse terrain up to ~37 km beyond a cell.
  */
-export const COARSE_KEEP_EXTRA = 52000;
+export const COARSE_KEEP_EXTRA = 64000;
 
 export interface Rect {
   x0: number;
