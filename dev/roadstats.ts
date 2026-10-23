@@ -9,6 +9,7 @@ import { DEBUG_PATHS, debugPaths, edgeGrade, nearestVertex, neighbours, vertexPo
 import { setRegionOverride, Terrain, upliftOf } from '../src/gen/terrain';
 import { SeedView } from '../src/gen/seeds';
 import { APRON, CELL, CHUNK, DEM_W } from '../src/lib/constants';
+import { CORE, CORE_PAD, NODE, NODES } from '../src/gen/hydro';
 import type { TaskRequest, TaskResult } from '../src/worker/protocol';
 import { runTask } from '../src/worker/tasks';
 import { rng } from '../src/lib/hash';
@@ -54,6 +55,8 @@ function deadEnds(segs: SegmentPath[]): { fine: { x: number; y: number }[] } {
 
 /** Terrain slope (m/m) at world (x, y), from the last area's DEMs. */
 let slopeAt: (x: number, y: number) => number = () => NaN;
+/** Hydro (16 m, what the fine routing sees) elevation at world (x, y), nearest node. */
+let zEAt: (x: number, y: number) => number = () => NaN;
 /** Fine elevation (m) at world (x, y), from the last area's DEMs. */
 let elevAt: (x: number, y: number) => number = () => NaN;
 
@@ -104,6 +107,13 @@ async function segments(R: number): Promise<SegmentPath[]> {
     const d = c.dem;
     // 16 m baseline: road-scale terrain, not 4 m texture.
     return Math.hypot(d[k + 4] - d[k - 4], d[k + 4 * DEM_W] - d[k - 4 * DEM_W]) / (8 * CELL);
+  };
+  zEAt = (x, y) => {
+    const gx = Math.round(x / NODE);
+    const gy = Math.round(y / NODE);
+    const c = m.chunks.get(`${Math.floor(gx / NODES)},${Math.floor(gy / NODES)}`);
+    if (!c?.hydro) return NaN;
+    return c.hydro.zE[(gy - (c.cy * NODES - CORE_PAD)) * CORE + (gx - (c.cx * NODES - CORE_PAD))];
   };
   elevAt = (x, y) => {
     const c = m.chunks.get(`${Math.floor(x / CHUNK)},${Math.floor(y / CHUNK)}`);
@@ -275,6 +285,7 @@ function stats(segs: SegmentPath[]): { km: number; crossings: number; alongside:
 
 let loopsN = 0, areaKm2 = 0, inKm = 0, deadFine = 0;
 const microStats = [0, 0, 0];
+const microGrade = [0, 0, 0];
 const siteCount = [0, 0, 0, 0];
 const gradeLen = [[0, 0, 0], [0, 0, 0], [0, 0, 0], [0, 0, 0], [0, 0, 0]];
 const crossKinds = new Map<string, number>();
@@ -300,6 +311,28 @@ for (const R of REGIONS) {
           pieceKm += len / 1000;
         }
         if (len > 1.5 * chord) longer++;
+      }
+      // Gradients of micro pieces: on the 16 m hydro surface and on the DEM, over 48 m.
+      for (const g of segs) {
+        if (!g.micro) continue;
+        const lim = [0.07, 0.1, 0.15, 0.22, 0.45][g.cls];
+        let acc = 0;
+        let la = 0;
+        const n = g.xy.length / 2;
+        for (let i = 1; i < n; i++) {
+          acc += Math.hypot(g.xy[2 * i] - g.xy[2 * la], g.xy[2 * i + 1] - g.xy[2 * la + 1]);
+          if (acc < 48 && i < n - 1) continue;
+          const d = Math.hypot(g.xy[2 * i] - g.xy[2 * la], g.xy[2 * i + 1] - g.xy[2 * la + 1]) || 1;
+          const a = Math.abs(zEAt(g.xy[2 * i], g.xy[2 * i + 1]) - zEAt(g.xy[2 * la], g.xy[2 * la + 1])) / d;
+          const b = Math.abs(elevAt(g.xy[2 * i], g.xy[2 * i + 1]) - elevAt(g.xy[2 * la], g.xy[2 * la + 1])) / d;
+          if (!Number.isNaN(a) && !Number.isNaN(b)) {
+            microGrade[0] += acc;
+            if (a > lim) microGrade[1] += acc;
+            if (b > lim) microGrade[2] += acc;
+          }
+          acc = 0;
+          la = i;
+        }
       }
       microStats[0] += pieces;
       microStats[1] += pieceKm;
@@ -482,6 +515,8 @@ for (const R of REGIONS) {
   }
   console.log(`SMALL LOOPS R=${R}: ${loopsN} in ${areaKm2} km² with ${inKm.toFixed(0)} km road → ${((100 * loopsN) / inKm).toFixed(1)} per 100 km`);
   console.log(`MICRO R=${R}: ${microStats[0]} multi-edge pieces drawn (${microStats[1].toFixed(1)} km), ${microStats[2]} paths over 1.5× their chord`);
+  console.log(`MICRO GRADE R=${R}: over the class limit on the 16 m surface ${((100 * microGrade[1]) / (microGrade[0] || 1)).toFixed(0)}%, on the DEM ${((100 * microGrade[2]) / (microGrade[0] || 1)).toFixed(0)}% of ${(microGrade[0] / 1000).toFixed(1)} km`);
+  microGrade.fill(0);
   microStats.fill(0);
   console.log(`DEAD ENDS R=${R}: ${deadFine} (road ends not at a settlement or farm)`);
   console.log(`UNREACHED R=${R} town/village/hamlet/farm: ${unreached.map((u, i) => `${u}/${siteCount[i]}`).join('  ')}`);
