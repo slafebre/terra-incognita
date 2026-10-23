@@ -1,5 +1,5 @@
-import { APRON, CELL, DEM_W } from '../lib/constants';
-import { smoothstep } from '../lib/noise';
+import { APRON, CELL, CHUNK, DEM_W } from '../lib/constants';
+import { gnoise, smoothstep } from '../lib/noise';
 import { DX, DY, NODE, NODES } from './hydro';
 import type { SeedView } from './seeds';
 import { computeCover, type CoverInputs } from './landcover';
@@ -8,6 +8,19 @@ import { terrainGrid, upliftOf } from './terrain';
 
 /** Share of fine terrain detail kept on steep eroded slopes. */
 const STEEP_DETAIL = 0.35;
+
+/** Spacing (m) of the noise lattice that makes meander phases drift. */
+const MEANDER_DRIFT_S = 256;
+const SALT_MEANDER = 0x2d4e1f7b;
+/** Shortest meander wavelength (m). */
+const MEANDER_MIN_WAVE = 70;
+/** Meanders fade out as the eroded surface's slope rises from MEANDER_FLAT to MEANDER_STEEP. */
+const MEANDER_FLAT = 0.01;
+const MEANDER_STEEP = 0.04;
+/** Nodes downstream over which the flow direction of a meander is taken. */
+const MEANDER_LOOKAHEAD = 4;
+/** Largest meander displacement (m). */
+const MEANDER_MAX = 60;
 
 /** Nodes of hydro data needed around a chunk by the DEM stage. */
 export const DEM_PAD = 6;
@@ -180,14 +193,37 @@ export function generateDem(cx: number, cy: number, view: SeedView, p: DemPatch,
   const cover = computeCover(cx, cy, view, inp, sites);
 
   const c = DEM_PAD + NODES / 2;
-  return { dem, water, cover, streams: extractStreams(p), region: p.R[c * W + c] };
+  // Meanders: on flat ground the node grid can only draw a river straight (D8 steps
+  // across a plane), so stream lines are bent there: sideways to the flow, by a sine
+  // of the distance along it (wavelength ~12 river widths) whose phase drifts with
+  // place, so reaches bend in alternating loops of varying size. Uses only the place,
+  // the flow direction and the (shared) patch, so a stream crossing into the next
+  // chunk is bent the same.
+  const drift = view.shifted(MEANDER_DRIFT_S, 0.27 * MEANDER_DRIFT_S, 0.64 * MEANDER_DRIFT_S);
+  const bend = (x: number, y: number, A: number, slope: number, ux: number, uy: number, out: number[]) => {
+    const width = 1.1 * Math.pow(A, 0.55);
+    const amp = (1 - smoothstep(MEANDER_FLAT, MEANDER_STEEP, slope)) * Math.min(MEANDER_MAX, 12 + 8 * width);
+    const lambda = Math.max(MEANDER_MIN_WAVE, 12 * width);
+    const phase = (2 * Math.PI * (x * ux + y * uy)) / lambda + 3 * Math.PI * gnoise(drift, SALT_MEANDER, x, y);
+    const d = amp * Math.sin(phase);
+    out[0] = -uy * d;
+    out[1] = ux * d;
+  };
+  return { dem, water, cover, streams: extractStreams(p, cx * CHUNK, cy * CHUNK, nodeSlope, bend), region: p.R[c * W + c] };
 }
 
 /**
  * Stream network inside the patch as polylines split at heads and confluences.
  * Format: [n, x0, y0, A0, x1, y1, A1, ...] repeated; x/y in chunk-local metres.
+ * `bend` (given the chunk's world origin and the per-node slope) displaces vertices.
  */
-export function extractStreams(p: DemPatch): Float32Array {
+export function extractStreams(
+  p: DemPatch,
+  x0 = 0,
+  y0 = 0,
+  slope?: Float32Array,
+  bend?: (x: number, y: number, A: number, slope: number, ux: number, uy: number, out: number[]) => void,
+): Float32Array {
   const W = DEM_PATCH;
   const N = W * W;
   const next = new Int32Array(N).fill(-1);
@@ -219,7 +255,22 @@ export function extractStreams(p: DemPatch): Float32Array {
   }
   const out: number[] = [];
   const ox = DEM_PAD * NODE;
-  const push = (k: number) => out.push((k % W) * NODE - ox, Math.floor(k / W) * NODE - ox, p.A[k]);
+  const d = [0, 0];
+  const push = (k: number) => {
+    const x = (k % W) * NODE - ox;
+    const y = Math.floor(k / W) * NODE - ox;
+    if (bend && slope) {
+      // Flow direction over the next few nodes downstream (D8 steps alone zigzag).
+      let q = k;
+      for (let s = 0; s < MEANDER_LOOKAHEAD && target(q) >= 0; s++) q = target(q);
+      const ux = (q % W) - (k % W);
+      const uy = Math.floor(q / W) - Math.floor(k / W);
+      const len = Math.hypot(ux, uy);
+      if (len > 0) bend(x0 + x, y0 + y, p.A[k], slope[k], ux / len, uy / len, d);
+      else d[0] = d[1] = 0;
+    }
+    out.push(x + d[0], y + d[1], p.A[k]);
+  };
   for (let k = 0; k < N; k++) {
     if (next[k] < 0 || indeg[k] === 1) continue;
     const start = out.length;
