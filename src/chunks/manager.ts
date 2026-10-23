@@ -7,6 +7,7 @@ import {
   NODES,
   WIN_CHUNKS,
   COARSE_REACH,
+  LAKE_REACH,
   type HydroCore,
   type HydroWindow,
   type PreResult,
@@ -78,7 +79,8 @@ interface NetState {
   failed?: boolean;
   data?: NetCell;
 }
-const COARSE_RADIUS_M = COARSE_REACH + (WIN_CHUNKS + 1) * CHUNK + 512;
+/** Coarse reach of a window solve: the coarse surface around the window and its lake grid. */
+const COARSE_RADIUS_M = COARSE_REACH + (WIN_CHUNKS + 1) * CHUNK + LAKE_REACH + 512;
 
 /**
  * Owns chunk state and schedules the generation pipeline:
