@@ -4,6 +4,7 @@ import {
   blendWeight,
   CORE,
   CORE_PAD,
+  NODE,
   NODES,
   WIN_CHUNKS,
   COARSE_REACH,
@@ -15,7 +16,8 @@ import {
 import { latticeSegments } from '../gen/lattice';
 import { NET_CELL, NET_REACH, ROAD_PAD, type NetCell, type RoadEdge, type RoadPatch, type SegmentPath } from '../gen/roads';
 import { expand, intersects, SeedStore, type Rect } from '../gen/seeds';
-import type { Site } from '../gen/settle';
+import { TOWN, VILLAGE, type Site } from '../gen/settle';
+import { PLAN_DRAW_PAD, PLAN_EXTENT, PLAN_MARGIN, type PlanInput, type TownPlan } from '../gen/town';
 import type { TaskRunner } from '../worker/pool';
 import type { TaskKind, TaskRequest, TaskResult } from '../worker/protocol';
 
@@ -79,6 +81,22 @@ interface NetState {
   failed?: boolean;
   data?: NetCell;
 }
+
+interface PlanState {
+  site: Site;
+  busy: boolean;
+  failed?: boolean;
+  data?: TownPlan;
+}
+
+const point = (s: Site): Rect => ({ x0: s.x, y0: s.y, x1: s.x, y1: s.y });
+/** Where a settlement's street plan may draw. */
+const planDrawRect = (s: Site) => expand(point(s), PLAN_EXTENT[s.rank] + PLAN_DRAW_PAD);
+/** Chunks whose roads a plan reads: its extent and margin, plus one lattice edge (edges are owned by their midpoint's chunk). */
+const planRoadsRect = (s: Site) => expand(point(s), PLAN_EXTENT[s.rank] + PLAN_MARGIN + PLAN_EDGE);
+const PLAN_EDGE = 200;
+/** Furthest a plan's drawing reaches from its site. */
+const PLAN_REACH = PLAN_EXTENT[TOWN] + PLAN_DRAW_PAD;
 /** Coarse reach of a window solve: the coarse surface around the window and its lake grid. */
 const COARSE_RADIUS_M = COARSE_REACH + (WIN_CHUNKS + 1) * CHUNK + LAKE_REACH + 512;
 
@@ -101,6 +119,7 @@ export class ChunkManager {
     hydro: { ms: 0, n: 0 },
     net: { ms: 0, n: 0 },
     roads: { ms: 0, n: 0 },
+    plan: { ms: 0, n: 0 },
     dem: { ms: 0, n: 0 },
     render: { ms: 0, n: 0 },
     errors: 0,
@@ -111,6 +130,8 @@ export class ChunkManager {
   private hydroRect: Rect = this.genRect;
   private netRect: Rect = this.genRect;
   readonly nets = new Map<string, NetState>();
+  /** Street plans of villages and towns, by site id. */
+  readonly plans = new Map<string, PlanState>();
   private lastPrune: Rect | undefined;
   private preRect: Rect = this.genRect;
   private keepBitmapRect: Rect = this.genRect;
@@ -179,6 +200,7 @@ export class ChunkManager {
       if (!intersects(r, tileKeep)) {
         c.bitmap?.close();
         this.chunks.delete(k);
+        this.dropPlans(r);
         // Neighbours' surfaces blended this chunk's solve: recompute them later.
         for (let dy = -1; dy <= 1; dy++)
           for (let dx = -1; dx <= 1; dx++) {
@@ -186,6 +208,7 @@ export class ChunkManager {
             if (n && !n.busy) {
               if (n.dem) this.dropSurface(n);
               n.roads = undefined; // its segment snaps used this chunk's nodes
+              this.dropPlans(chunkRect(n.cx, n.cy));
             }
           }
       } else if (c.bitmap && !c.busy && !intersects(r, this.keepBitmapRect)) {
@@ -193,6 +216,7 @@ export class ChunkManager {
         c.bitmap = undefined;
       }
     }
+    for (const [k, pl] of this.plans) if (!pl.busy && !intersects(planDrawRect(pl.site), this.forgetRect)) this.plans.delete(k);
     const netKeep = expand(this.forgetRect, 20000);
     for (const [k, n] of this.nets) {
       const [gx, gy] = k.split(',').map(Number);
@@ -207,6 +231,21 @@ export class ChunkManager {
     }
   }
 
+  /** Plans reading roads in `r` are out of date: drop them, and the bitmaps that drew them. */
+  private dropPlans(r: Rect): void {
+    for (const [k, pl] of this.plans) {
+      if (!intersects(planRoadsRect(pl.site), r)) continue;
+      this.plans.delete(k);
+      forChunksIn(planDrawRect(pl.site), (cx, cy) => {
+        const c = this.get(cx, cy);
+        if (c?.bitmap && !c.busy) {
+          c.bitmap.close();
+          c.bitmap = undefined;
+        }
+      });
+    }
+  }
+
   private dropSurface(c: Chunk): void {
     c.dem = c.water = c.cover = c.streams = undefined;
     c.bitmap?.close();
@@ -218,6 +257,7 @@ export class ChunkManager {
   schedule(): void {
     while (this.pool.idle > 0) {
       if (this.scheduleNet()) continue;
+      if (this.schedulePlan()) continue;
       const next = this.pick();
       if (!next.length) return;
       this.dispatch(next);
@@ -289,6 +329,57 @@ export class ChunkManager {
     return out;
   }
 
+  /** Villages and towns whose plans may draw into `r` (as far as the net cells are known). */
+  private planSites(r: Rect): Site[] {
+    return this.sitesNear(expand(r, PLAN_REACH)).filter((s) => s.rank <= VILLAGE && intersects(planDrawRect(s), r));
+  }
+
+  /** Plans that drawing the generation rectangle needs. */
+  private neededPlans(): Site[] {
+    return this.planSites(this.genRect);
+  }
+
+  /** Dispatches a needed plan whose inputs all exist, if any. */
+  private schedulePlan(): boolean {
+    for (const site of this.neededPlans()) {
+      const pl = this.plans.get(site.id);
+      if (pl) continue;
+      const input = this.planInput(site);
+      if (!input) continue;
+      const state: PlanState = { site, busy: true };
+      this.plans.set(site.id, state);
+      this.pool
+        .run({ kind: 'plan', input })
+        .then((res) => {
+          state.busy = false;
+          this.stats.plan.ms += res.ms;
+          this.stats.plan.n++;
+          if (res.kind === 'plan' && this.plans.get(site.id) === state) state.data = res.result;
+        })
+        .catch((err) => {
+          state.busy = false;
+          state.failed = true;
+          this.stats.errors++;
+          console.error(`plan ${site.id} failed`, err);
+        });
+      return true;
+    }
+    return false;
+  }
+
+  /** Plans drawn by a chunk: done (data) or given up on (failed); undefined while any is pending. */
+  private plansFor(c: Chunk): TownPlan[] | undefined {
+    const r = chunkRect(c.cx, c.cy);
+    if (!this.netsReady(expand(r, PLAN_REACH))) return undefined;
+    const out: TownPlan[] = [];
+    for (const s of this.planSites(r)) {
+      const pl = this.plans.get(s.id);
+      if (!pl || pl.busy) return undefined;
+      if (pl.data) out.push(pl.data);
+    }
+    return out;
+  }
+
   private sitesNear(r: Rect): Site[] {
     const out: Site[] = [];
     for (const [gx, gy] of this.netCells(r))
@@ -324,7 +415,7 @@ export class ChunkManager {
   }
 
   private renderReady(c: Chunk): boolean {
-    return this.ring(c, (n) => !!n?.roads);
+    return this.ring(c, (n) => !!n?.roads) && !!this.plansFor(c);
   }
 
   /** Best next task (a pre task may batch several chunks). */
@@ -336,7 +427,16 @@ export class ChunkManager {
       if (best && cand.priority >= best.priority) return;
       if (ready()) best = cand;
     };
-    forChunksIn(this.preRect, (cx, cy) => {
+    // Plans read roads around their settlements, a little beyond the roads rectangle:
+    // those roads, the solves under them and the pre data those need are made too.
+    const planRoads = this.neededPlans().map(planRoadsRect);
+    const planHydro = planRoads.map((r) => expand(r, CHUNK));
+    let preBox = this.preRect;
+    for (const r of planHydro) {
+      const q = expand(r, WIN_CHUNKS * CHUNK);
+      preBox = { x0: Math.min(preBox.x0, q.x0), y0: Math.min(preBox.y0, q.y0), x1: Math.max(preBox.x1, q.x1), y1: Math.max(preBox.y1, q.y1) };
+    }
+    forChunksIn(preBox, (cx, cy) => {
       const c = this.ensure(cx, cy);
       if (c.busy || c.failed) return;
       const r = chunkRect(cx, cy);
@@ -346,11 +446,13 @@ export class ChunkManager {
         return;
       }
       if (!c.hydro) {
-        if (intersects(r, this.hydroRect)) consider({ chunk: c, kind: 'hydro', priority: d }, () => this.hydroReady(c));
+        if (intersects(r, this.hydroRect) || planHydro.some((q) => intersects(r, q)))
+          consider({ chunk: c, kind: 'hydro', priority: d }, () => this.hydroReady(c));
         return;
       }
       if (!c.roads) {
-        if (intersects(r, this.roadsRect)) consider({ chunk: c, kind: 'roads', priority: d }, () => this.roadsReady(c));
+        if (intersects(r, this.roadsRect) || planRoads.some((q) => intersects(r, q)))
+          consider({ chunk: c, kind: 'roads', priority: d }, () => this.roadsReady(c));
         return;
       }
       if (!intersects(r, this.genRect)) return;
@@ -410,6 +512,8 @@ export class ChunkManager {
       }
       case 'net':
         throw new Error('net cells are scheduled by scheduleNet');
+      case 'plan':
+        throw new Error('plans are scheduled by schedulePlan');
       case 'roads':
         task = {
           kind,
@@ -446,6 +550,7 @@ export class ChunkManager {
           streams,
           roads,
           sites: this.sitesNear(expand(chunkRect(c.cx, c.cy), 400)),
+          plans: this.plansFor(c)!,
           pxSize: this.pxSize,
           dpr: Math.min(this.dpr, DPR_MAX),
         };
@@ -545,27 +650,53 @@ export class ChunkManager {
    */
   private roadPatch(c: Chunk): RoadPatch {
     const w = NODES + 2 * ROAD_PAD;
+    return this.nodePatch(c.cx * NODES - ROAD_PAD, c.cy * NODES - ROAD_PAD, w, w)!;
+  }
+
+  /** Fine node data (each node from its own chunk's solve) for a block of nodes, if every solve exists. */
+  private nodePatch(gx0: number, gy0: number, w: number, h: number): RoadPatch | undefined {
     const p: RoadPatch = {
-      gx: c.cx * NODES - ROAD_PAD,
-      gy: c.cy * NODES - ROAD_PAD,
+      gx: gx0,
+      gy: gy0,
       w,
-      h: w,
-      zE: new Float32Array(w * w),
-      A: new Float32Array(w * w),
-      lake: new Float32Array(w * w),
+      h,
+      zE: new Float32Array(w * h),
+      A: new Float32Array(w * h),
+      lake: new Float32Array(w * h),
     };
-    for (let j = 0; j < w; j++)
+    for (let j = 0; j < h; j++)
       for (let i = 0; i < w; i++) {
         const gx = p.gx + i;
         const gy = p.gy + j;
-        const own = this.get(Math.floor(gx / NODES), Math.floor(gy / NODES))!;
+        const own = this.get(Math.floor(gx / NODES), Math.floor(gy / NODES));
+        if (!own?.hydro) return undefined;
         const k = (gy - (own.cy * NODES - CORE_PAD)) * CORE + (gx - (own.cx * NODES - CORE_PAD));
         const o = j * w + i;
-        p.zE[o] = own.hydro!.zE[k];
-        p.A[o] = own.hydro!.A[k];
-        p.lake[o] = own.hydro!.lake[k];
+        p.zE[o] = own.hydro.zE[k];
+        p.A[o] = own.hydro.A[k];
+        p.lake[o] = own.hydro.lake[k];
       }
     return p;
+  }
+
+  /**
+   * What a settlement's street plan reads: the drawn roads and the fine nodes within
+   * its extent (plus margin). Undefined until all of it exists.
+   */
+  planInput(site: Site): PlanInput | undefined {
+    const r = expand({ x0: site.x, y0: site.y, x1: site.x, y1: site.y }, PLAN_EXTENT[site.rank] + PLAN_MARGIN);
+    const roads: SegmentPath[] = [];
+    let ok = true;
+    forChunksIn(planRoadsRect(site), (cx, cy) => {
+      const c = this.get(cx, cy);
+      if (!c?.roads) ok = false;
+      else roads.push(...c.roads);
+    });
+    if (!ok) return undefined;
+    const gx0 = Math.floor(r.x0 / NODE);
+    const gy0 = Math.floor(r.y0 / NODE);
+    const patch = this.nodePatch(gx0, gy0, Math.ceil(r.x1 / NODE) - gx0 + 1, Math.ceil(r.y1 / NODE) - gy0 + 1);
+    return patch && { site, roads, patch };
   }
 
   /**

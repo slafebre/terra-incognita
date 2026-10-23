@@ -48,6 +48,9 @@ export const STYLE = {
   },
   /** Settlement placeholders until buildings exist. */
   builtUp: 'rgba(196, 160, 150, 0.45)',
+  /** Built-up strips of villages and towns: drawn opaque in a layer, laid down at this alpha. */
+  builtUpLayer: 'rgb(196, 160, 150)',
+  builtUpAlpha: 0.45,
   church: 'rgb(45, 40, 38)',
 
   grid: 'rgba(30, 110, 210, 0.55)',

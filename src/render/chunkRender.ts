@@ -4,8 +4,9 @@ import { smoothPolyline } from '../lib/polyline';
 import { COVER } from '../gen/landcover';
 import type { SegmentPath } from '../gen/roads';
 import type { Site } from '../gen/settle';
+import type { TownPlan } from '../gen/town';
 import { cellCoverage, drawCoverSymbols, FILLS } from './landcover';
-import { drawChurches, drawRoads, drawSites } from './roads';
+import { drawBuiltUp, drawChurches, drawRoads, drawSites } from './roads';
 import { CONTOURS, STYLE } from './style';
 
 export interface RenderInput {
@@ -22,6 +23,8 @@ export interface RenderInput {
   roads: SegmentPath[];
   /** Settlement sites near this chunk. */
   sites: Site[];
+  /** Street plans of villages and towns that may draw into this chunk. */
+  plans: TownPlan[];
   /** Raster edge length in device pixels. */
   pxSize: number;
   /** Device pixels per CSS pixel (line widths are specified in CSS px). */
@@ -56,7 +59,7 @@ function shadeAndSlope(dem: Float32Array): { shade: Float32Array; slope: Float32
 /** River width in metres for drainage area A (km²). */
 export const riverWidth = (A: number) => 1.1 * Math.pow(A, 0.55);
 
-export function renderChunk({ cx, cy, dem, cover, water, streams, roads, sites, pxSize, dpr }: RenderInput): OffscreenCanvas {
+export function renderChunk({ cx, cy, dem, cover, water, streams, roads, sites, plans, pxSize, dpr }: RenderInput): OffscreenCanvas {
   const canvas = new OffscreenCanvas(pxSize, pxSize);
   const ctx = canvas.getContext('2d')!;
   const pxPerM = pxSize / CHUNK;
@@ -192,8 +195,12 @@ export function renderChunk({ cx, cy, dem, cover, water, streams, roads, sites, 
 
   drawStreams(ctx, streams, pxPerM, dpr);
   drawSites(ctx, sites, cx, cy, pxPerM);
-  drawRoads(ctx, roads, cx, cy, pxPerM, dpr);
-  drawChurches(ctx, sites, cx, cy, pxPerM, dpr);
+  drawBuiltUp(ctx, plans, cx, cy, pxPerM);
+  // Plans may redraw roads through their settlements: theirs replace the network's.
+  const redrawn = new Set(plans.flatMap((p) => p.roads.map((r) => r.key)));
+  const drawn = [...roads.filter((r) => !redrawn.has(r.key)), ...plans.flatMap((p) => p.roads)];
+  drawRoads(ctx, drawn, plans.flatMap((p) => p.streets), cx, cy, pxPerM, dpr);
+  drawChurches(ctx, plans, cx, cy, pxPerM, dpr);
   return canvas;
 }
 

@@ -3,6 +3,7 @@ import { CoarseField, generatePre, solveHydro } from '../gen/hydro';
 import { latticeCell, routeCurves } from '../gen/lattice';
 import { Settlements } from '../gen/settle';
 import { Terrain } from '../gen/terrain';
+import { planTown } from '../gen/town';
 import { SeedView } from '../gen/seeds';
 import { renderChunk } from '../render/chunkRender';
 import type { TaskRequest, TaskResult } from './protocol';
@@ -38,6 +39,13 @@ export function runTask(t: TaskRequest): { result: TaskResult; transfer: Transfe
     case 'roads': {
       const result = routeCurves(t.segments, t.patch);
       return { result: { kind: 'roads', result, ms: ms() }, transfer: result.map((r) => r.xy.buffer) };
+    }
+    case 'plan': {
+      const result = planTown(t.input);
+      return {
+        result: { kind: 'plan', result, ms: ms() },
+        transfer: [...result.streets.map((s) => s.xy.buffer), ...result.frontage.map((f) => f.xy.buffer), ...result.roads.map((r) => r.xy.buffer)],
+      };
     }
     case 'dem': {
       const result = generateDem(t.cx, t.cy, new SeedView(t.seeds), t.patch, t.sites);

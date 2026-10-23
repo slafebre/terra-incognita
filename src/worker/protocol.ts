@@ -3,12 +3,14 @@ import type { HydroResult, HydroWindow, PreResult } from '../gen/hydro';
 import type { NetCell, RoadPatch, SegmentPath, SegmentTask } from '../gen/roads';
 import type { SeedPayload } from '../gen/seeds';
 import type { Site } from '../gen/settle';
+import type { PlanInput, TownPlan } from '../gen/town';
 
 export type TaskRequest =
   | { kind: 'pre'; chunks: [number, number][]; seeds: SeedPayload }
   | { kind: 'hydro'; cx: number; cy: number; win: HydroWindow; seeds: SeedPayload }
   | { kind: 'net'; gx: number; gy: number; seeds: SeedPayload }
   | { kind: 'roads'; cx: number; cy: number; segments: SegmentTask[]; patch: RoadPatch }
+  | { kind: 'plan'; input: PlanInput }
   | { kind: 'dem'; cx: number; cy: number; patch: DemPatch; sites: Site[]; seeds: SeedPayload }
   | {
       kind: 'render';
@@ -19,6 +21,7 @@ export type TaskRequest =
       cover: Int8Array;
       roads: SegmentPath[];
       sites: Site[];
+      plans: TownPlan[];
       streams: Float32Array;
       pxSize: number;
       dpr: number;
@@ -29,6 +32,7 @@ export type TaskResult =
   | { kind: 'hydro'; result: HydroResult; ms: number }
   | { kind: 'net'; result: NetCell; ms: number }
   | { kind: 'roads'; result: SegmentPath[]; ms: number }
+  | { kind: 'plan'; result: TownPlan; ms: number }
   | { kind: 'dem'; result: DemResult; ms: number }
   | { kind: 'render'; bitmap: ImageBitmap; ms: number };
 

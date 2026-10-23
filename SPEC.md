@@ -46,12 +46,13 @@ Grid overlay
 | `hydro` | Window solve centred on the chunk (§3.3). Keeps the chunk ± 16 nodes. | Every chunk within ±3 chunks has `pre`. Solves are independent, so they run fully in parallel. |
 | `net` | Per 8.2 km net cell: settlement sites, and the lattice edges carrying roads, tracks and footpaths (§3.4–3.5). | Cell is within 1 km of the roads rectangle. |
 | `roads` | Drawn curves for the lattice edges whose midpoint lies in the chunk, fitted to the fine terrain. | The chunk and its 8 neighbours have `hydro`, and the net cells within 1 km exist. |
+| `plan` | Per village or town: its street plan (§3.6). | Every chunk within the plan's extent (+ one lattice edge) has `roads`. Plans whose drawing reaches the generation rectangle pull those roads (and their solves) in, beyond the roads rectangle where needed. |
 | `dem` | 4 m DEM, lake depth field, land cover, stream polylines, built from a blend of the 3×3 surrounding solves. | The chunk and its 8 neighbours have `hydro`, and the nearby net cells exist. |
-| `render` | Raster (land cover, hillshade, contours, water, settlements, roads). | DEM exists and the 3×3 chunks have `roads`. Re-run when the zoom bucket changes. |
+| `render` | Raster (land cover, hillshade, contours, water, settlements, roads). | DEM exists, the 3×3 chunks have `roads`, and every plan drawing into the chunk is done. Re-run when the zoom bucket changes. |
 
 - Every stage is a **pure function of the seeds**; nothing depends on the order in which chunks are generated.
 - The **finished set** contains chunks with a bitmap. The viewport must always lie inside it.
-- Chunks outside viewport + 4.5 km + 1 chunk are forgotten. When a chunk is forgotten, its neighbours drop their DEM and bitmap, because those blended its solve.
+- Chunks outside viewport + 4.5 km + 1 chunk are forgotten. When a chunk is forgotten, its neighbours drop their DEM and bitmap, because those blended its solve. A plan reading roads that are dropped goes too, with the bitmaps that drew it.
 
 ### 3.2 Emergent generation (no global seed)
 
@@ -156,7 +157,7 @@ Grid overlay
 - These rules are local, so every worker agrees.
 - Measured density: villages about 0.065 per km² (France averages about 1 commune per 16 km²), hamlets about 0.5 per km², farms about 2.5 per km² in the lowlands.
 - Land within 4× a site's built-up radius is cleared of forest.
-- Until milestone 5, sites render as a built-up tint (15 m for a farm) plus a church symbol for villages and towns.
+- Hamlets and farms render as a built-up disc (15 m for a farm) until milestone 5. Villages and towns get street plans (§3.6), with the church at their centre.
 
 ### 3.5 Road network
 
@@ -207,6 +208,17 @@ An edge used by several ways takes the highest class.
 
 ### 3.6 Built-up areas
 
+**Street plans** *(milestone 4, as implemented in `src/gen/town.ts`)*
+- One plan per village and town, made once from the drawn road curves within its extent (380 m for a village, 900 m for a town) and the fine nodes under it, and drawn by every chunk it reaches. A pure function of those and the site.
+- **Centre:** the crossroads the network's roads meet at (the site's lattice vertex, snapped), not the raw site point. The church stands there.
+- **Back lanes:** where neighbouring roads leave the centre, a lane from one to the next round the back of the plots between them, leaving and meeting each square on (a cubic curve bulging outward). In towns, a ring near the edge of the old core (the boulevard where the walls stood) and one inside it.
+- **Growth:** points along every street so far are candidate branch points, nearest the centre first. A branch leaves square on (not within 42 m of another junction on its side; opposite one makes a crossroads), steps 12 m at a time steering for gentle (≤ 14 %, refused above 22 %), dry ground with a slow wander, is drawn in by a street close ahead, and ends on meeting one (a junction, if not too shallow and not a short loop back to its parent), or alongside one, at the settlement's reach, at a river or a second stream, or at its length. Short ones are retried; dead ends are kept as lanes with some chance. Towns grow an organic core (blocks ~55 m, four generations) and straighter suburban streets beyond (~90 m); villages a looser outer ring of lanes.
+- **Size:** village core 140–200 m, reach 1.7× that, 0.9–2 km of streets; town core 260–340 m, reach 650–850 m; both shrink by up to 40 % in the mountains.
+- **Built-up land** is a strip 18–24 m each side of every street and of the road stretches near streets or the core, drawn opaque into a layer and laid down translucent once.
+- Plans may redraw the roads through their settlement (their segments replace the network's, by key); none do yet.
+- `dev/towns.ts` renders plans as SVG over the fine terrain.
+
+**Planned**
 - **Streets** grow from the roads entering the settlement. Old cores get an organic street pattern around a church square. Towns also get grid or cul-de-sac suburbs and an industrial zone near rail or the N road.
 - **Buildings** are footprint polygons aligned to the street, with setbacks. Farmyards in villages are L- or U-shaped. Industrial halls are larger. Building density and size depend on settlement rank and distance from the centre.
 - **Parcels** subdivide farmland bounded by roads and tracks. Shapes depend on the region: strip fields in lowland, small irregular fields with **hedges** in bocage, terraces on steep slopes. Vineyards go on south-facing slopes at roughly 150–500 m, orchards around villages.
