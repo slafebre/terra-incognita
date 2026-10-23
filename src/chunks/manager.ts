@@ -16,7 +16,7 @@ import {
 import { latticeSegments } from '../gen/lattice';
 import { NET_CELL, NET_REACH, ROAD_PAD, type NetCell, type RoadEdge, type RoadPatch, type SegmentPath } from '../gen/roads';
 import { expand, intersects, SeedStore, type Rect } from '../gen/seeds';
-import { TOWN, VILLAGE, type Site } from '../gen/settle';
+import { HAMLET, TOWN, type Site } from '../gen/settle';
 import { PLAN_DRAW_PAD, PLAN_EXTENT, PLAN_MARGIN, type PlanInput, type TownPlan } from '../gen/town';
 import type { TaskRunner } from '../worker/pool';
 import type { TaskKind, TaskRequest, TaskResult } from '../worker/protocol';
@@ -130,7 +130,7 @@ export class ChunkManager {
   private hydroRect: Rect = this.genRect;
   private netRect: Rect = this.genRect;
   readonly nets = new Map<string, NetState>();
-  /** Street plans of villages and towns, by site id. */
+  /** Street plans of hamlets, villages and towns, by site id. */
   readonly plans = new Map<string, PlanState>();
   private lastPrune: Rect | undefined;
   private preRect: Rect = this.genRect;
@@ -329,9 +329,9 @@ export class ChunkManager {
     return out;
   }
 
-  /** Villages and towns whose plans may draw into `r` (as far as the net cells are known). */
+  /** Hamlets, villages and towns whose plans may draw into `r` (as far as the net cells are known). */
   private planSites(r: Rect): Site[] {
-    return this.sitesNear(expand(r, PLAN_REACH)).filter((s) => s.rank <= VILLAGE && intersects(planDrawRect(s), r));
+    return this.sitesNear(expand(r, PLAN_REACH)).filter((s) => s.rank <= HAMLET && intersects(planDrawRect(s), r));
   }
 
   /** Plans that drawing the generation rectangle needs. */

@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { NODE } from '../src/gen/hydro';
 import { nearestVertex, vertexPos } from '../src/gen/lattice';
 import { ROAD_C, ROAD_D, ROAD_T, type RoadClass, type RoadPatch, type SegmentPath } from '../src/gen/roads';
-import { TOWN, VILLAGE, type Rank, type Site } from '../src/gen/settle';
+import { HAMLET, TOWN, VILLAGE, type Rank, type Site } from '../src/gen/settle';
 import { PLAN_EXTENT, PLAN_MARGIN, planTown, type PlanInput, type TownPlan } from '../src/gen/town';
 import { rng } from '../src/lib/hash';
 import { APRON, CELL, CHUNK, DEM_W } from '../src/lib/constants';
@@ -81,6 +81,7 @@ function distTo(xy: Float32Array, x: number, y: number): number {
 const cases = [
   ...[0, 1, 2, 3, 4, 5, 6, 7].map((i) => ({ name: `village ${i}`, inp: input(VILLAGE, i) })),
   ...[0, 1, 2].map((i) => ({ name: `town ${i}`, inp: input(TOWN, i) })),
+  ...[0, 1, 2, 3, 4, 5, 6, 7].map((i) => ({ name: `hamlet ${i}`, inp: input(HAMLET, i) })),
 ];
 const plans = cases.map((c) => ({ ...c, plan: planTown(c.inp) }));
 
@@ -90,7 +91,9 @@ describe('street plans', () => {
       let km = 0;
       for (const s of plan.streets) for (let i = 2; i < s.xy.length; i += 2) km += Math.hypot(s.xy[i] - s.xy[i - 2], s.xy[i + 1] - s.xy[i - 1]) / 1000;
       console.log(`${name}: ${plan.streets.length} streets, ${km.toFixed(2)} km, road pieces ${plan.roads.map((r) => r.key).join(' ')}`);
-      expect(plan.streets.length).toBeGreaterThan(name.startsWith('town') ? 20 : 3);
+      if (name.startsWith('hamlet')) expect(plan.streets.length).toBeLessThanOrEqual(2);
+      else expect(plan.streets.length).toBeGreaterThan(name.startsWith('town') ? 20 : 3);
+      expect(plan.frontage.length, name).toBeGreaterThan(0);
     }
   });
 
@@ -199,6 +202,7 @@ describe('street plans', () => {
 
   it('make tracks through built-up land streets', () => {
     for (const { name, inp, plan } of plans) {
+      if (name.startsWith('hamlet')) continue; // built up along their main road only
       // The track's first edge starts at the centre: built up, so redrawn.
       expect(plan.replaced, name).toContain('arm3_0');
       for (const r of plan.roads.filter((q) => q.cls === ROAD_T))
@@ -219,9 +223,9 @@ describe('street plans', () => {
         const j = Math.round((y - cy * CHUNK) / CELL) + APRON;
         return i < 0 || j < 0 || i >= DEM_W || j >= DEM_W ? undefined : cover[COVER.forest * N + j * DEM_W + i];
       };
-      // On every street point in the chunk: no forest. Rock is left alone.
+      // Along the middle of every built-up strip in the chunk: no forest. Rock is left alone.
       let on = 0;
-      for (const s of plan.streets)
+      for (const s of plan.frontage)
         for (let i = 0; i < s.xy.length; i += 2) {
           const f = forestAt(s.xy[i], s.xy[i + 1]);
           if (f === undefined) continue;
@@ -233,5 +237,30 @@ describe('street plans', () => {
       // Some of the chunk keeps its woods (away from the strips).
       expect(cover.subarray(COVER.forest * N, (COVER.forest + 1) * N).some((v) => v === COVER_SCALE), name).toBe(true);
     }
+  });
+
+  it('build hamlets up along their main road and streets only', () => {
+    let lanes = 0;
+    let bare = 0;
+    for (const { name, inp, plan } of plans) {
+      if (!name.startsWith('hamlet')) continue;
+      if (plan.streets.length) lanes++;
+      else bare++;
+      for (const st of plan.streets) {
+        let len = 0;
+        for (let i = 2; i < st.xy.length; i += 2) len += Math.hypot(st.xy[i] - st.xy[i - 2], st.xy[i + 1] - st.xy[i - 1]);
+        expect(len, name).toBeLessThan(140);
+      }
+      const main = inp.roads.filter((r) => r.cls <= ROAD_C).map((r) => r.xy);
+      const own = plan.streets.map((st) => st.xy);
+      for (const f of plan.frontage)
+        for (let i = 0; i < f.xy.length; i += 2) {
+          const d = Math.min(...[...main, ...own].map((xy) => distTo(xy, f.xy[i], f.xy[i + 1])));
+          expect(d, name).toBeLessThan(1);
+        }
+    }
+    // Both kinds occur.
+    expect(lanes).toBeGreaterThan(0);
+    expect(bare).toBeGreaterThan(0);
   });
 });

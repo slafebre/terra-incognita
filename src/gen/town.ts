@@ -3,7 +3,7 @@ import { lerp, smoothstep } from '../lib/noise';
 import { NODE } from './hydro';
 import { nearestVertex, vertexPos } from './lattice';
 import { ROAD_C, ROAD_P, ROAD_T, type RoadPatch, type SegmentPath } from './roads';
-import { TOWN, VILLAGE, type Rank, type Site } from './settle';
+import { HAMLET, TOWN, VILLAGE, type Rank, type Site } from './settle';
 
 /**
  * Street plans for villages and towns — the inner network of a settlement.
@@ -25,8 +25,12 @@ import { TOWN, VILLAGE, type Rank, type Site } from './settle';
  * a few generations deep. Towns grow an organic core this way, and beyond it
  * straighter, more regular suburban streets.
  *
+ * Hamlets get the same treatment in miniature: built-up land along their main road
+ * only, or one or two short residential streets off it.
+ *
  * Output: the streets, the built-up frontage along streets and roads, and the
- * centre (the crossroads the roads meet at, where the church stands).
+ * centre (the crossroads the roads meet at, where a village's or town's church
+ * stands).
  */
 
 export const STREET = 0;
@@ -56,7 +60,7 @@ export interface TownPlan {
 }
 
 /** Everything a plan draws lies within this distance of its site (m), per rank. */
-export const PLAN_EXTENT = [900, 380];
+export const PLAN_EXTENT = [900, 380, 220];
 /** Roads and terrain the plan reads: its extent plus this margin (m). */
 export const PLAN_MARGIN = 64;
 /** What a plan draws reaches this far beyond its extent (frontage, line widths; m). */
@@ -103,7 +107,7 @@ const BLOCK = 42;
 /** Junction angles below this are refused (rad). */
 const MIN_ANGLE = (32 * Math.PI) / 180;
 /** Gradient limit for streets (soft, refused above HARD × it): steeper in towns and hill country. */
-const GRADE = [0.16, 0.14];
+const GRADE = [0.16, 0.14, 0.14];
 const GRADE_HILL = 0.06;
 const HARD = 1.6;
 /** Drainage area (km²) above which a street won't cross; below it a stream is bridged at most once. */
@@ -124,6 +128,8 @@ interface Line {
   /** Cumulative arc length at each point. */
   s: number[];
   road: boolean;
+  /** A road's class (streets: -1). */
+  cls: number;
   gen: number;
   style: Style | null;
   /** Removed after growth (a stub). */
@@ -135,7 +141,7 @@ export const planStats: Record<string, number> = {};
 
 export function planTown({ site, roads, patch: p }: PlanInput): TownPlan {
   const rank = site.rank;
-  if (rank !== TOWN && rank !== VILLAGE) throw new Error('plans are for villages and towns');
+  if (rank !== TOWN && rank !== VILLAGE && rank !== HAMLET) throw new Error('plans are for hamlets, villages and towns');
   const seed = hashString(site.id);
   const rand = rng(seed);
   const R = site.R;
@@ -188,9 +194,12 @@ export function planTown({ site, roads, patch: p }: PlanInput): TownPlan {
   // Settlement size: lowland villages sprawl more than mountain ones.
   const mount = smoothstep(0.35, 0.85, R);
   const size = (0.75 + 0.5 * rand()) * lerp(1, 0.6, mount);
-  const core = rank === TOWN ? lerp(260, 340, rand()) * size : lerp(140, 200, rand()) * size;
-  const reach = Math.min(extent - 60, rank === TOWN ? lerp(650, 850, rand()) * size : core * 1.7);
-  const budget = (rank === TOWN ? lerp(14000, 22000, rand()) : lerp(900, 2000, rand())) * size * size;
+  const core = (rank === TOWN ? lerp(260, 340, rand()) : rank === VILLAGE ? lerp(140, 200, rand()) : lerp(40, 70, rand())) * size;
+  const reach = Math.min(
+    extent - 60,
+    rank === TOWN ? lerp(650, 850, rand()) * size : rank === VILLAGE ? core * 1.7 : lerp(80, 150, rand()) * size,
+  );
+  let budget = (rank === TOWN ? lerp(14000, 22000, rand()) : lerp(900, 2000, rand())) * size * size;
   // Character. A village is clustered round its crossroads or strung out along its
   // roads (more often in the mountains, where valleys are narrow). Every settlement
   // leans one way: it grows further and denser there.
@@ -205,6 +214,10 @@ export function planTown({ site, roads, patch: p }: PlanInput): TownPlan {
   const zoneDist = (x: number, y: number, road: boolean) =>
     Math.hypot(x - cx, y - cy) / ((1 + leanAmt * Math.cos(Math.atan2(y - cy, x - cx) - lean)) * (road ? roadStretch : 1));
   const hardReach = extent - 30;
+  // A hamlet is built up along its main road only, or gets one or two short
+  // residential streets off it (fewer in the mountains).
+  const lanes = rank === HAMLET ? (rand() < lerp(0.5, 0.25, mount) ? (rand() < 0.4 ? 2 : 1) : 0) : Infinity;
+  if (rank === HAMLET) budget = 130 * lanes;
   const grade = GRADE[rank] + GRADE_HILL * smoothstep(0.2, 0.7, R);
 
   const organic: Style = {
@@ -234,8 +247,9 @@ export function planTown({ site, roads, patch: p }: PlanInput): TownPlan {
     cls: STREET,
   };
   const outer: Style = { ...organic, density: 0.35, ring: 0.15, gens: 1, deadEnd: 0.8, depth: 18, cls: LANE };
+  const lane: Style = { ...organic, spacing: 40, density: 1, len: [40, 110], jitter: 0.4, ring: 0, gens: 1, deadEnd: 1, depth: 18 };
   const styleAt = (d: number): Style | null =>
-    d < core ? organic : d < reach ? (rank === TOWN ? suburb : outer) : null;
+    rank === HAMLET ? (d < reach ? lane : null) : d < core ? organic : d < reach ? (rank === TOWN ? suburb : outer) : null;
 
   // --- The network so far: lines with a spatial index of their pieces --------------
   const lines: Line[] = [];
@@ -256,10 +270,10 @@ export function planTown({ site, roads, patch: p }: PlanInput): TownPlan {
         a.push(li * 4096 + k);
       }
   };
-  const addLine = (xs: number[], ys: number[], road: boolean, gen: number, style: Style | null) => {
+  const addLine = (xs: number[], ys: number[], road: boolean, gen: number, style: Style | null, cls = -1) => {
     const s = [0];
     for (let i = 1; i < xs.length; i++) s.push(s[i - 1] + Math.hypot(xs[i] - xs[i - 1], ys[i] - ys[i - 1]));
-    const li = lines.push({ xs, ys, s, road, gen, style }) - 1;
+    const li = lines.push({ xs, ys, s, road, cls, gen, style }) - 1;
     for (let k = 0; k + 1 < xs.length; k++) indexPiece(li, k);
     return li;
   };
@@ -345,7 +359,7 @@ export function planTown({ site, roads, patch: p }: PlanInput): TownPlan {
     const deg = at.length;
     const r =
       rank === TOWN ? lerp(30, 45, rand()) * Math.sqrt(size) : deg >= 3 ? lerp(24, 34, rand()) : lerp(35, 60, rand());
-    const chance = rank === TOWN ? 1 : deg >= 3 ? 0.8 : deg === 2 ? lerp(0.4, 0.1, mount) : 0;
+    const chance = rank === HAMLET ? 0 : rank === TOWN ? 1 : deg >= 3 ? 0.8 : deg === 2 ? lerp(0.4, 0.1, mount) : 0;
     if (deg >= 2 && slope < 0.1 && rand() < chance) {
       // Each road from the centre, cut at r: [kept polyline (outward), cut point, outward direction].
       const cuts: { r: SegmentPath; xs: number[]; ys: number[]; ux: number; uy: number; a: number }[] = [];
@@ -482,7 +496,7 @@ export function planTown({ site, roads, patch: p }: PlanInput): TownPlan {
           cur = j;
         }
       }
-      addLine(chain.map((c) => c[0]), chain.map((c) => c[1]), true, 0, null);
+      addLine(chain.map((c) => c[0]), chain.map((c) => c[1]), true, 0, null, r.cls);
     });
   }
 
@@ -661,14 +675,14 @@ export function planTown({ site, roads, patch: p }: PlanInput): TownPlan {
   if (rank === TOWN) {
     ring(core, 0.9, { ...organic, cls: STREET });
     ring(core * 0.55, 0.6, organic);
-  } else {
+  } else if (rank === VILLAGE) {
     ring(core * lerp(0.5, 0.85, rand()), lerp(0.8, 0.25, strung), organic);
   }
 
   for (let li = 0; li < lines.length; li++) offer(li);
 
   let rounds = 0;
-  while (built < budget) {
+  while (built < budget && streets.length < lanes) {
     // Out of branch points with budget left: offer every street again, at fresh
     // places (towns fill in their blocks this way).
     if (!heap.length) {
@@ -845,7 +859,7 @@ export function planTown({ site, roads, patch: p }: PlanInput): TownPlan {
   // slopes stop them early); in towns, so do stubs that stopped alongside another
   // street. Leaves go first, repeatedly, as their parents may become leaves in turn.
   const hilly = smoothstep(0.2, 0.7, R);
-  const stub = rank === TOWN ? lerp(60, 130, hilly) : lerp(40, 60, hilly);
+  const stub = rank === TOWN ? lerp(60, 130, hilly) : rank === VILLAGE ? lerp(40, 60, hilly) : 35;
   const alive = streets.map(() => true);
   for (let changed = true; changed; ) {
     changed = false;
@@ -880,9 +894,15 @@ export function planTown({ site, roads, patch: p }: PlanInput): TownPlan {
   const upgraded: Street[] = [];
   // Built-up land: along every street, and along roads near streets or the core.
   const streetNear = (x: number, y: number) => nearest(x, y, 70, (li) => lines[li].road || !!lines[li].pruned);
+  /** A hamlet's main road: the roads proper (not tracks or paths) through it. */
+  const mainRoad = (li: number) => lines[li].road && lines[li].cls <= ROAD_C;
   const builtAt = (x: number, y: number) => {
     const d = zoneDist(x, y, true);
-    return d < reach && Math.hypot(x - cx, y - cy) < hardReach && !wet(x, y) && (d < core * 0.8 || !!streetNear(x, y));
+    if (d >= reach || Math.hypot(x - cx, y - cy) >= hardReach || wet(x, y)) return false;
+    // A hamlet is built up only along its main road and its own streets.
+    if (rank === HAMLET)
+      return !!nearest(x, y, 12, (li) => !mainRoad(li)) || !!nearest(x, y, 25, (li) => lines[li].road || !!lines[li].pruned);
+    return d < core * 0.8 || !!streetNear(x, y);
   };
 
   // Tracks and footpaths through built-up land are residential streets there: the
@@ -927,12 +947,13 @@ export function planTown({ site, roads, patch: p }: PlanInput): TownPlan {
   const frontage: { depth: number; xy: Float32Array }[] = [];
   // (Own copies: a plan's buffers are transferred from the worker, each once.)
   kept.forEach(({ li }, i) => frontage.push({ depth: lines[li].style!.depth, xy: out[i].xy.slice() }));
-  for (const u of upgraded) frontage.push({ depth: organic.depth, xy: u.xy.slice() });
+  const roadDepth = rank === HAMLET ? lane.depth : organic.depth;
+  for (const u of upgraded) frontage.push({ depth: roadDepth, xy: u.xy.slice() });
   for (const L of lines) {
-    if (!L.road) continue;
+    if (!L.road || (rank === HAMLET && L.cls > ROAD_C)) continue;
     let run: number[] = [];
     const flush = () => {
-      if (run.length >= 4) frontage.push({ depth: organic.depth, xy: Float32Array.from(run) });
+      if (run.length >= 4) frontage.push({ depth: roadDepth, xy: Float32Array.from(run) });
       run = [];
     };
     for (let i = 0; i < L.xs.length; i++) {

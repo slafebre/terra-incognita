@@ -1,6 +1,6 @@
 // Dev tool: street plans of villages and towns, as SVG.
 //   npx vite-node dev/towns.ts [per region] [R,R,...]
-// Finds villages (TOWNS=1: towns) with a world seed (SEED=n), runs the whole
+// Finds villages (TOWNS=1: towns, HAMLETS=1: hamlets) with a world seed (SEED=n), runs the whole
 // pipeline in-process around each and writes its plan over the fine terrain:
 // contours, water, roads, streets and built-up frontage. INPUTS=<file> caches the
 // pipeline's output (the plans' inputs), so plans can be tuned without rerunning it. OUT=<prefix> names the
@@ -8,7 +8,7 @@
 import { ChunkManager } from '../src/chunks/manager';
 import { CoarseField, NODE } from '../src/gen/hydro';
 import { SeedStore, SeedView } from '../src/gen/seeds';
-import { Settlements, TOWN, VILLAGE, type Site } from '../src/gen/settle';
+import { HAMLET, Settlements, TOWN, VILLAGE, type Site } from '../src/gen/settle';
 import { setRegionOverride, Terrain } from '../src/gen/terrain';
 import { NET_REACH } from '../src/gen/roads';
 import { LANE, PLAN_EXTENT, planStats, planTown, type TownPlan, type PlanInput } from '../src/gen/town';
@@ -28,7 +28,7 @@ const { writeFileSync, readFileSync, existsSync } = (await import(/* @vite-ignor
 const PER = Number(process.argv[2] ?? 2);
 const REGIONS = (process.argv[3] ?? '0.15,0.45,0.7').split(',').map(Number);
 const SEED = Number(process.env.SEED ?? 1);
-const RANK = process.env.TOWNS ? TOWN : VILLAGE;
+const RANK = process.env.TOWNS ? TOWN : process.env.HAMLETS ? HAMLET : VILLAGE;
 const OUT = process.env.OUT ?? 'towns';
 
 /** Sites of `rank` found from the seeds alone (the pipeline will agree: same world seed). */
@@ -37,7 +37,7 @@ function findSites(R: number, n: number): Site[] {
   const pick = rng(SEED * 31 + Math.round(R * 1000));
   const x = Math.round((pick() - 0.5) * 2e6);
   const y = Math.round((pick() - 0.5) * 2e6);
-  const S = RANK === TOWN ? 30000 : 12000;
+  const S = RANK === TOWN ? 30000 : RANK === VILLAGE ? 12000 : 5000;
   const r = { x0: x, y0: y, x1: x + S, y1: y + S };
   const view = new SeedView(store.payloadFor({ x0: x, y0: y, x1: x + 16, y1: y + 16 }, { x0: x - NET_REACH, y0: y - NET_REACH, x1: x + S + NET_REACH, y1: y + S + NET_REACH }));
   const t = new Terrain(view);

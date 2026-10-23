@@ -2,7 +2,7 @@ import { APRON, CELL, CHUNK, DEM_W } from '../lib/constants';
 import { COVER, COVER_SCALE } from '../gen/landcover';
 import { smoothPolyline } from '../lib/polyline';
 import { ROAD_C, ROAD_D, ROAD_N, ROAD_P, ROAD_T, type SegmentPath } from '../gen/roads';
-import { SITE_RADIUS, VILLAGE, type Site } from '../gen/settle';
+import { HAMLET, SITE_RADIUS, VILLAGE, type Site } from '../gen/settle';
 import { LANE, type Street, type TownPlan } from '../gen/town';
 import { STYLE } from './style';
 
@@ -17,11 +17,11 @@ const STREET_PX = [1.6, 1.3];
 /** Few passes: heavy smoothing pulls the legs of a hairpin onto each other. */
 const SMOOTH_PASSES = [2, 1, 1, 1, 1];
 
-/** Built-up placeholders for hamlets and farms (villages and towns have plans). */
+/** Built-up placeholders for farms (hamlets, villages and towns have plans). */
 export function drawSites(ctx: Ctx, sites: Site[], cx: number, cy: number, pxPerM: number): void {
   const p = new Path2D();
   for (const s of sites) {
-    if (s.rank <= VILLAGE) continue;
+    if (s.rank <= HAMLET) continue;
     const x = (s.x - cx * CHUNK) * pxPerM;
     const y = (s.y - cy * CHUNK) * pxPerM;
     const r = SITE_RADIUS[s.rank] * pxPerM;
@@ -129,6 +129,7 @@ export function drawChurches(ctx: Ctx, plans: TownPlan[], cx: number, cy: number
   ctx.fillStyle = STYLE.church;
   ctx.lineWidth = 0.9 * dpr;
   for (const s of plans) {
+    if (s.rank > VILLAGE) continue; // hamlets have none
     const x = (s.x - cx * CHUNK) * pxPerM;
     const y = (s.y - cy * CHUNK) * pxPerM;
     const r = 2.2 * dpr;
