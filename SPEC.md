@@ -99,6 +99,7 @@ Grid overlay
    - bigger basins (about 1 % of mountain land) stay filled: flats that streams cross in straight lines.
 3. **Routing.**
    - Priority-flood, **breaching** depressions where that cuts at most 4 m (the fine detail leaves dams of a metre or two along valleys) and filling deeper ones; then stochastic routing: a lower neighbour weighted by slope².
+   - Crossing filled ground costs a smoothly varying amount (exp(3·noise) over 32–128 m, at least 0.25), in the flood, in carving and in the final pass alike. At uniform cost every stream entering a flat crossed it along the same shortest line to the spill: parallel straight streams. Now they wander and gather into the cheap corridors.
    - The randomness is **tied to place**: a hash of the node and its chunk's seed. Overlapping solves therefore agree on routing.
 4. **Four erosion passes** of route → accumulate → carve:
    - Later passes use steepest descent on the carved surface, keeping the current receiver unless another neighbour is more than 1.5× steeper.
@@ -109,8 +110,8 @@ Grid overlay
    - *Natural lakes:* filled depressions of the uneroded surface of at least 25 nodes and 1.5 m deep, clear of the window edge. (On the eroded surface they depended on how deep each window, with its own truncated catchments, cut the outflow notch, and lakes ended at chunk lines.)
 6. **Valley floors** around channels with A ≥ 0.5 km² (floodplains, glacial U-floors). Half-width is `k·√A`, capped at 180 m.
 7. **Hillslope limiter.** Lower envelope: no node sits more than 1.15·Smax·d above any neighbour, which removes cliffs. Channels are included and re-routed into the lower ground; otherwise a small side stream left above a freshly carved valley floor stands as a one-node wall up to ~190 m high. Only channels beside a lake keep their course, so its inflows and outflow stay intact.
-   - *Breached lakes:* floors and the limiter lower the land around lakes, never the lakes. A lake whose rim ends up more than 1 m below its level along at least 3 shore nodes and 10 % of its shore (one or two low nodes are just its outflow notch; the old single-node rule drained 70 % of lakes) is drained, and the limiter runs again to lower its bed towards the breach. Otherwise it hangs above its surroundings: in hills and mountains most natural lakes did, by 8–360 m.
-8. **Final drainage guarantee.** A priority-flood from the outlets fills any remaining pit by a hair and routes it on. Every receiver points at an earlier-settled node, so there are no dead ends and no cycles. Accumulation is then recomputed.
+   - *Breached lakes:* floors and the limiter lower the land around lakes, never the lakes. A lake whose rim ends up more than 1 m below its level along at least 3 shore nodes and 10 % of its shore (one or two low nodes are just its outflow notch; the old single-node rule drained 70 % of lakes) is drained, its bed returned to the eroded ground (left at the level it stood as a dead-flat plateau), and the limiter runs again to lower its bed towards the breach. Otherwise it hangs above its surroundings: in hills and mountains most natural lakes did, by 8–360 m.
+8. **Final drainage guarantee.** Nodes whose receivers fall strictly (or across one lake) to an outlet keep them; a priority-flood from the outlets fills any remaining pit by a hair and routes it on. (Keeping only receivers the flood had already reached re-routed whole flats into straight lines from the outlet.) Every receiver points at an earlier-settled node, so there are no dead ends and no cycles. Accumulation is then recomputed.
 9. **Output.** Only the core is kept: the chunk ± 16 nodes, i.e. the support of its blend weight.
 
 **Blending**
@@ -126,6 +127,7 @@ Grid overlay
 
 **Streams**
 - Channels with A ≥ 0.07–0.3 km² become polylines split at heads and confluences. The threshold is continuous in R, and everything downstream of a stream head stays a stream until it reaches a lake.
+- **Meanders.** On flat ground (eroded slope below 1 %, fading out by 4 %) a stream drawn through 16 m nodes is straight, so each vertex is displaced sideways to the flow (taken over 4 nodes downstream) by `a·sin(2π·s/λ + drift)`: `s` the position along the flow, wavelength λ = max(70 m, 12 river widths), amplitude a = min(60 m, 12 m + 8 widths), and a phase drift from 256 m noise so loops vary. Only place, flow direction and the shared patch go in, so chunks agree.
 - They're Gaussian-smoothed over ±3 vertices and stroked per segment with width `1.1·A^0.55` m. Wider rivers get a casing.
 
 **Invariants (tested)**

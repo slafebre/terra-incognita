@@ -1,6 +1,7 @@
 import { CHUNK } from '../lib/constants';
 import { hash3, rng } from '../lib/hash';
 import { MinHeap } from '../lib/heap';
+import { gnoise } from '../lib/noise';
 import { COARSE_SPACINGS, MAX_WARP, type SeedView } from './seeds';
 import { baseField, erodeK, erodeSmax, maxIncisionOf, regionOverrideKey, Terrain, upliftOf } from './terrain';
 
@@ -79,6 +80,19 @@ export interface PreResult {
    */
   off: Float32Array;
 }
+
+/**
+ * Cost of crossing filled ground, exp(MEANDER_GAIN · noise) with noise from these
+ * octaves ([spacing, weight, lattice offset x, y as fractions of the spacing]).
+ */
+const MEANDER_OCTAVES: [number, number, number, number][] = [
+  [128, 0.55, 0.31, 0.77],
+  [64, 0.35, 0.53, 0.19],
+  [32, 0.2, 0.89, 0.41],
+];
+const MEANDER_GAIN = 3;
+const MEANDER_MIN = 0.25;
+const SALT_MEANDER = 0x6f1d2b3a;
 
 /** Octaves at or above this spacing are the coarse solve's; the fine solve adds the rest. */
 const COARSE_MIN_S = 512;
@@ -829,6 +843,24 @@ export function solveHydro(win: HydroWindow, cx: number, cy: number, view: SeedV
     inflows++;
   }
 
+  // Filled ground (flats behind dams too deep to breach) drains along the cheapest way
+  // to its spill point. At uniform cost that is a straight line, the same for every
+  // stream entering the flat, so they crossed it side by side in parallel straight
+  // lines. A smoothly varying cost makes them wander and gather into the cheap
+  // corridors, as streams do on a floodplain. Bound to place, like all randomness here.
+  const fillCost = new Float32Array(N);
+  {
+    const lat = MEANDER_OCTAVES.map(([S, , ox, oy]) => view.shifted(S, ox * S, oy * S));
+    for (let k = 0; k < N; k++) {
+      const x = worldX(k % w);
+      const y = worldY(Math.floor(k / w));
+      let n = 0;
+      for (let o = 0; o < lat.length; o++) n += MEANDER_OCTAVES[o][1] * gnoise(lat[o], SALT_MEANDER + o, x, y);
+      // At least MEANDER_MIN: a fill step must still register in float32 heights.
+      fillCost[k] = Math.max(MEANDER_MIN, Math.exp(MEANDER_GAIN * n));
+    }
+  }
+
   // --- Closed coarse basins (see coarseBasins) --------------------------------------
   // Breach channels cut into the surface this solve erodes; lakes come after erosion.
   const basins = coarseBasins(field, x0, y0, x1, y1);
@@ -881,7 +913,7 @@ export function solveHydro(win: HydroWindow, cx: number, cy: number, view: SeedV
       if (seen[q]) continue;
       seen[q] = 1;
       rec[q] = (d + 4) & 7;
-      key[q] = Math.max(zPre[q], kc + EPS * DIST[d]);
+      key[q] = Math.max(zPre[q], kc + EPS * DIST[d] * fillCost[q]);
       if (key[q] > zPre[q] && breachable(q, c, d)) {
         // Shallow dam: carve the way out down below q instead of filling behind it.
         key[q] = zPre[q];
@@ -1026,7 +1058,7 @@ export function solveHydro(win: HydroWindow, cx: number, cy: number, view: SeedV
       if (q < 0) continue; // outlet or pit
       const d = DIST[rec[c]];
       const S = channelSlope(A[c], R[c]);
-      zE[c] = Math.max(zE[q] + EPS * d, Math.min(zPre[c], zE[q] + S * d));
+      zE[c] = Math.max(zE[q] + EPS * d * fillCost[c], Math.min(zPre[c], zE[q] + S * d));
     }
   };
   // Breaching lowered nodes the flood had already settled: order afresh.
@@ -1040,6 +1072,8 @@ export function solveHydro(win: HydroWindow, cx: number, cy: number, view: SeedV
     carve();
   }
 
+  /** Eroded height of lake nodes before they became lake. */
+  const preLake = new Float32Array(N);
   // --- Dammed lakes ------------------------------------------------------------
   // Erosion drains almost every depression, but real valleys hold lakes behind
   // riegels, moraines and landslides. Every chunk in the window gets the same
@@ -1103,6 +1137,7 @@ export function solveHydro(win: HydroWindow, cx: number, cy: number, view: SeedV
       }
       if (!ok || members.length < LAKE_MIN_NODES || !awayFromEdge(members)) continue;
       for (const c of members) {
+        preLake[c] = zE[c];
         zE[c] = level;
         lake[c] = level;
         const pc = parent.get(c)!;
@@ -1129,6 +1164,7 @@ export function solveHydro(win: HydroWindow, cx: number, cy: number, view: SeedV
     let L = NaN;
     for (let d = -1; d < 8 && Number.isNaN(L); d++) L = basins.level[d < 0 ? gj * basins.gw + gi : (gj + DY[d]) * basins.gw + gi + DX[d]];
     if (Number.isNaN(L) || zPre[k] >= L || field.z(x, y) >= L - LAKE_SHORE_DROP) continue;
+    preLake[k] = zE[k];
     zE[k] = L;
     lake[k] = L;
     coarseLake[k] = 1;
@@ -1170,6 +1206,7 @@ export function solveHydro(win: HydroWindow, cx: number, cy: number, view: SeedV
     }
     if (members.length < LAKE_MIN_NODES || depth < LAKE_MIN_DEPTH || !awayFromEdge(members)) continue;
     for (const c of members) {
+      preLake[c] = zE[c];
       zE[c] = level;
       lake[c] = level;
     }
@@ -1300,7 +1337,12 @@ export function solveHydro(win: HydroWindow, cx: number, cy: number, view: SeedV
         shoreSeen[q] = 0;
       }
       if (low < Math.max(BREACH_MIN_NODES, BREACH_SHARE * shore.length)) continue;
-      for (const c of members) lake[c] = NaN;
+      // The bed goes back to the eroded ground (left at the level, it would stand
+      // as a dead-flat plateau, crossed by straight streams).
+      for (const c of members) {
+        lake[c] = NaN;
+        zE[c] = preLake[c];
+      }
       drained++;
     }
     if (drained) limitHillslopes();
@@ -1336,6 +1378,38 @@ export function solveHydro(win: HydroWindow, cx: number, cy: number, view: SeedV
   // settled nodes are kept, so every receiver points at an earlier-settled node.
   let fills = 0;
   {
+    // Nodes whose receivers fall strictly all the way to an outlet keep them. (The
+    // flood alone would keep a receiver only if reached first, and across a flat
+    // the front reaches most nodes before their receivers: it re-routed every
+    // stream there into a straight line from the outlet.)
+    const drains = new Uint8Array(N); // 0 unknown, 1 reaches an outlet, 2 doesn't
+    const chain: number[] = [];
+    for (let k0 = 0; k0 < N; k0++) {
+      if (drains[k0]) continue;
+      chain.length = 0;
+      let x = k0;
+      let ok: number;
+      for (;;) {
+        if (drains[x]) {
+          ok = drains[x];
+          break;
+        }
+        if (rec[x] === REC_EXIT) {
+          ok = 1;
+          break;
+        }
+        chain.push(x);
+        drains[x] = 2; // provisional: guards against cycles
+        const q = recIdx(x);
+        // Strictly downhill, or on across one lake (flat at its level).
+        if (q < 0 || !(zE[q] < zE[x] || (lake[q] === lake[x] && zE[q] === zE[x]))) {
+          ok = 2;
+          break;
+        }
+        x = q;
+      }
+      for (const c of chain) drains[c] = ok;
+    }
     const fill = new MinHeap(4 * (w + h));
     const done = new Uint8Array(N);
     for (let k = 0; k < N; k++)
@@ -1355,9 +1429,9 @@ export function solveHydro(win: HydroWindow, cx: number, cy: number, view: SeedV
         if (done[q]) continue;
         done[q] = 1;
         const tq = recIdx(q);
-        const keep = tq >= 0 && done[tq] && zE[tq] < zE[q];
+        const keep = drains[q] === 1 || (tq >= 0 && done[tq] && zE[tq] < zE[q]);
         if (!keep) {
-          const min = zE[c] + EPS * DIST[d];
+          const min = zE[c] + EPS * DIST[d] * fillCost[q];
           if (zE[q] < min) {
             if (min - zE[q] > 0.5) fills++;
             zE[q] = min;
