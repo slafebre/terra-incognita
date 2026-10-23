@@ -113,9 +113,11 @@ function svg({ input, plan: p }: { input: PlanInput; plan: TownPlan }): string {
       d += `M${(x0 + xy[i] * NODE).toFixed(1)} ${(y0 + xy[i + 1] * NODE).toFixed(1)}L${(x0 + xy[i + 2] * NODE).toFixed(1)} ${(y0 + xy[i + 3] * NODE).toFixed(1)}`;
     s += `<path d="${d}" fill="none" stroke="rgba(190,120,60,${lev % 25 ? 0.35 : 0.6})" stroke-width="${lev % 25 ? 1.2 : 2.4}"/>`;
   }
-  // Roads: casings, then fills.
-  const roads = input.roads.filter((r) => r.cls <= 2).sort((a, b) => b.cls - a.cls);
-  for (const r of input.roads.filter((r) => r.cls > 2))
+  // Roads (the plan's replacing the network's): casings, then fills.
+  const redrawn = new Set(p.roads.map((r) => r.key));
+  const all = [...input.roads.filter((r) => !redrawn.has(r.key)), ...p.roads];
+  const roads = all.filter((r) => r.cls <= 2).sort((a, b) => b.cls - a.cls);
+  for (const r of all.filter((r) => r.cls > 2))
     s += `<path d="${poly(r.xy)}" fill="none" stroke="${ROAD[r.cls]}" stroke-width="${ROAD_W[r.cls]}" ${r.cls === 4 ? 'stroke-dasharray="8 6"' : ''}/>`;
   for (const st of p.streets) s += `<path d="${poly(st.xy)}" fill="none" stroke="#463a34" stroke-width="${st.cls === LANE ? 5 : 7}" stroke-linecap="round" stroke-linejoin="round"/>`;
   for (const r of roads) s += `<path d="${poly(r.xy)}" fill="none" stroke="#463a34" stroke-width="${ROAD_W[r.cls] + 3}" stroke-linecap="round" stroke-linejoin="round"/>`;

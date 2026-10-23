@@ -2,7 +2,7 @@ import { hash1, hash3, rng } from '../lib/hash';
 import { lerp, smoothstep } from '../lib/noise';
 import { NODE } from './hydro';
 import { nearestVertex, vertexPos } from './lattice';
-import type { RoadPatch, SegmentPath } from './roads';
+import { ROAD_C, type RoadPatch, type SegmentPath } from './roads';
 import { TOWN, VILLAGE, type Rank, type Site } from './settle';
 
 /**
@@ -304,12 +304,124 @@ export function planTown({ site, roads, patch: p }: PlanInput): TownPlan {
     return [dx / l, dy / l];
   };
 
+  // --- The crossroads: a square, a green or a spindle ----------------------------
+  // The roads ending at the centre are cut back and joined by short links round it,
+  // each leaving its road at an angle and bulging outward: three or more roads make
+  // a triangular green or a small square (a market square in a town), a road passing
+  // straight through may part round a long green (an Anger). The cut roads keep
+  // their keys and replace the network's; their far ends don't move.
+  const redrawn: SegmentPath[] = [];
+  let net = sorted;
+  {
+    const at = sorted.filter((r) => {
+      const n = r.xy.length;
+      return r.cls <= ROAD_C && (Math.hypot(r.xy[0] - cx, r.xy[1] - cy) < 1 || Math.hypot(r.xy[n - 2] - cx, r.xy[n - 1] - cy) < 1);
+    });
+    const slope = Math.hypot(zAt(cx + 16, cy) - zAt(cx - 16, cy), zAt(cx, cy + 16) - zAt(cx, cy - 16)) / 32;
+    const deg = at.length;
+    const r =
+      rank === TOWN ? lerp(30, 45, rand()) * Math.sqrt(size) : deg >= 3 ? lerp(24, 34, rand()) : lerp(35, 60, rand());
+    const chance = rank === TOWN ? 1 : deg >= 3 ? 0.8 : deg === 2 ? lerp(0.4, 0.1, mount) : 0;
+    if (deg >= 2 && slope < 0.1 && rand() < chance) {
+      // Each road from the centre, cut at r: [kept polyline (outward), cut point, outward direction].
+      const cuts: { r: SegmentPath; xs: number[]; ys: number[]; ux: number; uy: number; a: number }[] = [];
+      for (const road of at) {
+        const n = road.xy.length / 2;
+        const fromStart = Math.hypot(road.xy[0] - cx, road.xy[1] - cy) < 1;
+        const px: number[] = [];
+        const py: number[] = [];
+        for (let i = 0; i < n; i++) {
+          const k = fromStart ? i : n - 1 - i;
+          px.push(road.xy[2 * k]);
+          py.push(road.xy[2 * k + 1]);
+        }
+        // First point at distance r from the centre (the road leaves it).
+        let i = 1;
+        while (i < n && Math.hypot(px[i] - cx, py[i] - cy) < r) i++;
+        if (i >= n - 2) break;
+        const d0 = Math.hypot(px[i - 1] - cx, py[i - 1] - cy);
+        const d1 = Math.hypot(px[i] - cx, py[i] - cy);
+        const t = (r - d0) / (d1 - d0 || 1);
+        const qx = px[i - 1] + t * (px[i] - px[i - 1]);
+        const qy = py[i - 1] + t * (py[i] - py[i - 1]);
+        const xs = [qx, ...px.slice(i)];
+        const ys = [qy, ...py.slice(i)];
+        // Outward direction: over the first 20 m beyond the cut.
+        let j = 1;
+        while (j < xs.length - 1 && Math.hypot(xs[j] - qx, ys[j] - qy) < 20) j++;
+        const ux = xs[j] - qx;
+        const uy = ys[j] - qy;
+        const ul = Math.hypot(ux, uy) || 1;
+        cuts.push({ r: road, xs, ys, ux: ux / ul, uy: uy / ul, a: Math.atan2(qy - cy, qx - cx) });
+      }
+      cuts.sort((p1, p2) => p1.a - p2.a);
+      // Links between neighbouring cuts round the centre.
+      const links: SegmentPath[] = [];
+      let ok = cuts.length === deg;
+      // Squares and greens: nearly straight sides (a rounded triangle or square, not a
+      // ring); spindles: a narrow parting.
+      const angle = deg >= 3 || rank === TOWN ? (62 * Math.PI) / 180 : (35 * Math.PI) / 180;
+      const pull = deg >= 3 || rank === TOWN ? 0.3 : 0.5;
+      for (let i = 0; ok && i < deg; i++) {
+        const A = cuts[i];
+        const B = cuts[(i + 1) % deg];
+        let gap = B.a - A.a;
+        if (gap <= 0) gap += 2 * Math.PI;
+        if (gap > (200 * Math.PI) / 180 && deg >= 3) continue; // open on that side
+        if (deg === 2 && Math.abs(gap - Math.PI) > (40 * Math.PI) / 180) ok = false; // a spindle needs a road passing straight through
+        const ax = A.xs[0];
+        const ay = A.ys[0];
+        const bx = B.xs[0];
+        const by = B.ys[0];
+        // Leaving each road inward, turned towards the other by `angle`.
+        const dir = (C: typeof A, ox: number, oy: number): [number, number] => {
+          const side = -C.uy * (ox - C.xs[0]) + C.ux * (oy - C.ys[0]) > 0 ? 1 : -1;
+          const nx = -C.uy * side;
+          const ny = C.ux * side;
+          return [-C.ux * Math.cos(angle) + nx * Math.sin(angle), -C.uy * Math.cos(angle) + ny * Math.sin(angle)];
+        };
+        const [tax, tay] = dir(A, bx, by);
+        const [tbx, tby] = dir(B, ax, ay);
+        const d = Math.hypot(bx - ax, by - ay);
+        const k = pull * Math.max(d, r);
+        const m = Math.max(4, Math.ceil((1.4 * Math.max(d, r)) / 8));
+        const xy: number[] = [];
+        for (let q = 0; q <= m; q++) {
+          const u = q / m;
+          const b0 = (1 - u) ** 3;
+          const b1 = 3 * u * (1 - u) ** 2;
+          const b2 = 3 * u * u * (1 - u);
+          const b3 = u ** 3;
+          const x = b0 * ax + b1 * (ax + tax * k) + b2 * (bx + tbx * k) + b3 * bx;
+          const y = b0 * ay + b1 * (ay + tay * k) + b2 * (by + tby * k) + b3 * by;
+          if (wet(x, y)) ok = false;
+          xy.push(x, y);
+        }
+        // A link carries the lesser of its two roads: the through road keeps its class along its side.
+        links.push({ key: `${site.id}#sq${i}`, cls: Math.max(A.r.cls, B.r.cls) as SegmentPath['cls'], xy: Float32Array.from(xy) });
+      }
+      if (ok && links.length) {
+        const cutKeys = new Set(cuts.map((c) => c.r.key));
+        for (const c of cuts) {
+          const xy = new Float32Array(2 * c.xs.length);
+          for (let i = 0; i < c.xs.length; i++) {
+            xy[2 * i] = c.xs[i];
+            xy[2 * i + 1] = c.ys[i];
+          }
+          redrawn.push({ key: c.r.key, cls: c.r.cls, xy, micro: c.r.micro });
+        }
+        redrawn.push(...links);
+        net = [...sorted.filter((q) => !cutKeys.has(q.key)), ...redrawn].sort((p1, p2) => (p1.key < p2.key ? -1 : p1.key > p2.key ? 1 : 0));
+      }
+    }
+  }
+
   // Roads seed the network, segments chained into whole roads where two meet end
   // to end (shared vertices are bit-identical), so a road reads as one line.
   {
     const ends = new Map<string, number[]>();
     const ek = (r: SegmentPath, end: number) => `${r.xy[end]},${r.xy[end + 1]}`;
-    sorted.forEach((r, i) => {
+    net.forEach((r, i) => {
       for (const end of [0, r.xy.length - 2]) {
         const k = ek(r, end);
         if (!ends.has(k)) ends.set(k, []);
@@ -327,7 +439,7 @@ export function planTown({ site, roads, patch: p }: PlanInput): TownPlan {
       const at = ends.get(k)!;
       return at.length === 2 ? at.find((j) => j !== from)! : -1;
     };
-    sorted.forEach((r, i) => {
+    net.forEach((r, i) => {
       if (used.has(i)) return;
       used.add(i);
       let chain = pts(r, false);
@@ -337,9 +449,9 @@ export function planTown({ site, roads, patch: p }: PlanInput): TownPlan {
         for (;;) {
           const [x, y] = back ? chain[0] : chain[chain.length - 1];
           const j = next(`${x},${y}`, cur);
-          if (j < 0 || used.has(j) || sorted[j].cls !== r.cls) break;
+          if (j < 0 || used.has(j) || net[j].cls !== r.cls) break;
           used.add(j);
-          const q = sorted[j];
+          const q = net[j];
           const fwd = q.xy[0] === x && q.xy[1] === y;
           const more = pts(q, back ? fwd : !fwd);
           chain = back ? [...more.slice(0, -1), ...chain] : [...chain, ...more.slice(1)];
@@ -713,12 +825,13 @@ export function planTown({ site, roads, patch: p }: PlanInput): TownPlan {
       const x = L.xs[i];
       const y = L.ys[i];
       const d = Math.hypot(x - cx, y - cy);
-      if (d < reach && (d < core * 0.8 || streetNear(x, y))) run.push(x, y);
+      if (d < reach && !wet(x, y) && (d < core * 0.8 || streetNear(x, y))) run.push(x, y);
       else flush();
     }
     flush();
   }
-  return { id: site.id, rank, x: cx, y: cy, streets: out, roads: [], frontage };
+    // (Copies: transferred separately from the inputs.)
+  return { id: site.id, rank, x: cx, y: cy, streets: out, roads: redrawn.map((q) => ({ ...q, xy: q.xy.slice() })), frontage };
 }
 
 function angDiff(a: number, b: number): number {
