@@ -130,9 +130,12 @@ export const COARSE = 128;
  * Known limitation: every tile drains to its own edges, so overlapping tiles
  * disagree (dev/tilespread.ts: ~50 m in lowlands, 120–190 m in hills and mountains),
  * and where they disagree on a valley floor the blend can hold a closed basin, which
- * window solves fill (flats). Taking tile edges from a coarser regional solve was
- * tried: tiles agree better, but draining through fewer outlets lifts much of the
- * land onto the uneroded surface (plateaus), and it costs ~5× more.
+ * window solves breach, turn into lakes, or (beyond ~6 km) fill (see coarseBasins).
+ * Tried without success: tile edges from a coarser regional solve (tiles agree
+ * better, but draining through fewer outlets lifts much of the land onto plateaus,
+ * at ~5× the cost); a second pass with edges from the first's blend (worse); tiles
+ * solved 5–10 km beyond their blended part (barely better); edges at the base level
+ * without the incision clamp (no better).
  */
 export const TILE_STRIDE = 80;
 const TILE_N = 2 * TILE_STRIDE + 1;
@@ -430,6 +433,247 @@ export class CoarseField {
   }
 }
 
+export interface CoarseBasins {
+  /** Grid cell (i, j) is centred at world ((g0x + i)·COARSE, (g0y + j)·COARSE). */
+  g0x: number;
+  g0y: number;
+  gw: number;
+  gh: number;
+  /** Lake level of a cell in a lake basin, else NaN. */
+  level: Float32Array;
+  /** Lowering of the surface (≤ 0, m) along breach channels. */
+  cut: Float32Array;
+  /** Depth of the coarse fill at each cell (m; > 0 in closed basins). */
+  depth: Float32Array;
+  /** Basin cells by outcome: 1 lake, 2 breached, 3 too close to the grid's edge, 4 too big to breach. */
+  kind: Uint8Array;
+}
+
+/**
+ * Closed basins of the coarse surface around a window (see LAKE_REACH). A pure
+ * function of the coarse surface for every basin clear of the grid's edge, so every
+ * window whose blend weight reaches such a basin treats it alike.
+ *
+ * Deep, compact basins are lakes at their spill level. The others are breached: a
+ * channel from the basin's lowest cell to its saddle, over the lowest ground (not
+ * the straight line a flat fill would give), and on downhill until the ground falls
+ * below it, falling gently all the way, and every pocket of the basin floor carved
+ * to drain into it. Channels step between edge-sharing cells only: interpolated
+ * across a diagonal step, a cut would leave a dam halfway.
+ */
+export function coarseBasins(field: CoarseField, x0: number, y0: number, x1: number, y1: number): CoarseBasins {
+  const g0x = Math.floor((x0 - LAKE_REACH) / COARSE);
+  const g0y = Math.floor((y0 - LAKE_REACH) / COARSE);
+  const gw = Math.ceil((x1 + LAKE_REACH) / COARSE) - g0x + 1;
+  const gh = Math.ceil((y1 + LAKE_REACH) / COARSE) - g0y + 1;
+  const gn = gw * gh;
+  const gz = new Float32Array(gn);
+  const fill = new Float32Array(gn);
+  const seen = new Uint8Array(gn);
+  const heap = new MinHeap(4 * (gw + gh));
+  for (let j = 0; j < gh; j++)
+    for (let i = 0; i < gw; i++) {
+      const k = j * gw + i;
+      gz[k] = field.z((g0x + i) * COARSE, (g0y + j) * COARSE);
+      if (i === 0 || j === 0 || i === gw - 1 || j === gh - 1) {
+        fill[k] = gz[k];
+        seen[k] = 1;
+        heap.push(k, gz[k]);
+      }
+    }
+  while (heap.size) {
+    const c = heap.pop();
+    const ci = c % gw;
+    const cj = (c - ci) / gw;
+    for (let d = 0; d < 8; d++) {
+      const i = ci + DX[d];
+      const j = cj + DY[d];
+      if (i < 0 || j < 0 || i >= gw || j >= gh) continue;
+      const q = j * gw + i;
+      if (seen[q]) continue;
+      seen[q] = 1;
+      fill[q] = Math.max(gz[q], fill[c]);
+      heap.push(q, fill[q]);
+    }
+  }
+
+  const level = new Float32Array(gn).fill(NaN);
+  const cut = new Float32Array(gn);
+  const kind = new Uint8Array(gn);
+  const comp = new Int32Array(gn).fill(-1);
+  const cells: number[] = [];
+  const cost = new Float64Array(gn);
+  const from = new Int32Array(gn);
+  const D4 = [0, 2, 4, 6];
+  const filled = (k: number) => fill[k] - gz[k] > 0;
+  for (let s0 = 0; s0 < gn; s0++) {
+    if (comp[s0] >= 0 || !filled(s0)) continue;
+    // The basin: connected filled cells (cells are in row-major world order, so the
+    // lowest-index choices below are the same in every window).
+    cells.length = 0;
+    cells.push(s0);
+    comp[s0] = s0;
+    let pit = s0;
+    let i0 = gw, i1 = 0, j0 = gh, j1 = 0;
+    for (let p = 0; p < cells.length; p++) {
+      const c = cells[p];
+      const ci = c % gw;
+      const cj = (c - ci) / gw;
+      i0 = Math.min(i0, ci);
+      i1 = Math.max(i1, ci);
+      j0 = Math.min(j0, cj);
+      j1 = Math.max(j1, cj);
+      if (gz[c] < gz[pit] || (gz[c] === gz[pit] && c < pit)) pit = c;
+      for (let d = 0; d < 8; d++) {
+        const i = ci + DX[d];
+        const j = cj + DY[d];
+        if (i < 0 || j < 0 || i >= gw || j >= gh) continue;
+        const q = j * gw + i;
+        if (comp[q] >= 0 || !filled(q)) continue;
+        comp[q] = s0;
+        cells.push(q);
+      }
+    }
+    const m = LAKE_GRID_MARGIN;
+    if (i0 < m || j0 < m || i1 >= gw - m || j1 >= gh - m) {
+      for (const c of cells) kind[c] = 3;
+      continue;
+    }
+    const depth = fill[pit] - gz[pit];
+    if (depth >= LAKE_DEEP && i1 - i0 < LAKE_MAX_CELLS && j1 - j0 < LAKE_MAX_CELLS) {
+      for (const c of cells) {
+        level[c] = fill[c];
+        kind[c] = 1;
+      }
+      continue;
+    }
+    // Breach. Saddle: the lowest cell beside the basin (4-neighbours).
+    let saddle = -1;
+    for (const c of cells) {
+      const ci = c % gw;
+      const cj = (c - ci) / gw;
+      for (const d of D4) {
+        const q = (cj + DY[d]) * gw + ci + DX[d];
+        if (comp[q] === s0) continue;
+        if (saddle < 0 || gz[q] < gz[saddle] || (gz[q] === gz[saddle] && q < saddle)) saddle = q;
+      }
+    }
+    // Cheapest 4-connected path from the pit to the saddle, paying for height above
+    // the pit (and a little for length), so it keeps to the basin floor.
+    // (Anywhere in the basin's box plus one cell: the basin is 8-connected, a
+    // 4-connected path may have to step outside it, paying for the height.)
+    for (let j = j0 - 1; j <= j1 + 1; j++) for (let i = i0 - 1; i <= i1 + 1; i++) cost[j * gw + i] = Infinity;
+    cost[pit] = 0;
+    from[pit] = -1;
+    const pq = new MinHeap(64);
+    pq.push(pit, 0);
+    while (pq.size) {
+      const kc = pq.peekKey();
+      const c = pq.pop();
+      if (kc > cost[c]) continue;
+      if (c === saddle) break;
+      const ci = c % gw;
+      const cj = (c - ci) / gw;
+      for (const d of D4) {
+        const i = ci + DX[d];
+        const j = cj + DY[d];
+        if (i < i0 - 1 || j < j0 - 1 || i > i1 + 1 || j > j1 + 1) continue;
+        const q = j * gw + i;
+        const nc = cost[c] + Math.max(0, gz[q] - gz[pit]) + 1;
+        if (nc < cost[q]) {
+          cost[q] = nc;
+          from[q] = c;
+          pq.push(q, nc);
+        }
+      }
+    }
+    for (const c of cells) kind[c] = 4;
+    if (cost[saddle] === Infinity) continue;
+    const path: number[] = [];
+    for (let c = saddle; c >= 0; c = from[c]) path.push(c);
+    path.reverse();
+    // On downhill from the saddle (lowest 4-neighbour) until below the channel.
+    const onPath = new Set(path);
+    for (let n = 0; n < BREACH_MAX_OUT; n++) {
+      const c = path[path.length - 1];
+      if (gz[c] < gz[pit] - BREACH_FALL * (path.length - 1)) break;
+      const ci = c % gw;
+      const cj = (c - ci) / gw;
+      let next = -1;
+      for (const d of D4) {
+        const i = ci + DX[d];
+        const j = cj + DY[d];
+        if (i < 0 || j < 0 || i >= gw || j >= gh) continue;
+        const q = j * gw + i;
+        if (comp[q] === s0 || onPath.has(q)) continue;
+        if (next < 0 || gz[q] < gz[next]) next = q;
+      }
+      if (next < 0) break;
+      path.push(next);
+      onPath.add(next);
+    }
+    let bi0 = i0, bi1 = i1, bj0 = j0, bj1 = j1;
+    for (const c of path) {
+      const ci = c % gw;
+      const cj = (c - ci) / gw;
+      bi0 = Math.min(bi0, ci);
+      bi1 = Math.max(bi1, ci);
+      bj0 = Math.min(bj0, cj);
+      bj1 = Math.max(bj1, cj);
+    }
+    if (bi1 - bi0 >= BREACH_MAX_CELLS || bj1 - bj0 >= BREACH_MAX_CELLS) continue;
+    for (const c of cells) kind[c] = 2;
+    // The channel, then every other basin cell drained into it: a priority-flood
+    // up from the channel, where a cell lower than the one reaching it (a pocket of
+    // the basin floor) has its way back carved down to below it.
+    const surf = new Map<number, number>();
+    const via = new Map<number, number>();
+    const fq = new MinHeap(64);
+    for (let p = 0; p < path.length; p++) {
+      const c = path[p];
+      const t = Math.min(gz[c], gz[pit] - BREACH_FALL * p);
+      surf.set(c, t);
+      via.set(c, -1);
+      fq.push(c, t);
+    }
+    while (fq.size) {
+      const kc = fq.peekKey();
+      const c = fq.pop();
+      if (kc !== surf.get(c)) continue; // stale entry
+      const ci = c % gw;
+      const cj = (c - ci) / gw;
+      for (let d = 0; d < 8; d++) {
+        const q = (cj + DY[d]) * gw + ci + DX[d];
+        if (comp[q] !== s0 || surf.has(q)) continue;
+        surf.set(q, gz[q]);
+        via.set(q, c);
+        fq.push(q, gz[q]);
+        let t = gz[q] - BREACH_FALL;
+        for (let x = c; x >= 0 && surf.get(x)! > t; x = via.get(x)!, t -= BREACH_FALL) {
+          surf.set(x, t);
+          fq.push(x, t);
+        }
+      }
+    }
+    for (const [c, t] of surf) if (t < gz[c]) cut[c] = Math.min(cut[c], t - gz[c]);
+  }
+  const depth = new Float32Array(gn);
+  for (let k = 0; k < gn; k++) depth[k] = fill[k] - gz[k];
+  return { g0x, g0y, gw, gh, level, cut, depth, kind };
+}
+
+/** Bilinear value of a basin grid array at world (x, y). */
+function basinAt(b: CoarseBasins, a: Float32Array, x: number, y: number): number {
+  const u = x / COARSE - b.g0x;
+  const v = y / COARSE - b.g0y;
+  const i = Math.floor(u);
+  const j = Math.floor(v);
+  const fu = u - i;
+  const fv = v - j;
+  const k = j * b.gw + i;
+  return (a[k] * (1 - fu) + a[k + 1] * fu) * (1 - fv) + (a[k + b.gw] * (1 - fu) + a[k + b.gw + 1] * fu) * fv;
+}
+
 // ---------------------------------------------------------------------------
 // Window solve
 
@@ -469,8 +713,39 @@ const LAKE_MIN_NODES = 25;
 const LAKE_EDGE_MARGIN = NODES;
 /** Chance that a chunk has one dammed lake, by region. */
 const LAKES_PER_CHUNK = (R: number) => (R > 0.8 ? 0.12 : R > 0.52 ? 0.05 : R > 0.25 ? 0.06 : 0.07);
-/** A lake whose rim ends up this far below its level (m) is drained. */
+/**
+ * A lake is drained where its rim ends up this far below its level (m), along at
+ * least BREACH_MIN_NODES shore nodes and BREACH_SHARE of its shore.
+ */
 const LAKE_BREACH = 1;
+const BREACH_MIN_NODES = 3;
+const BREACH_SHARE = 0.1;
+/**
+ * Closed basins of the coarse surface (where overlapping coarse tiles disagree, the
+ * blend can hold them), found on a world-aligned grid of COARSE cells reaching
+ * LAKE_REACH beyond the window; only basins LAKE_GRID_MARGIN cells clear of the
+ * grid's edge count. Basins at least LAKE_DEEP deep and at most LAKE_MAX_CELLS across
+ * become lakes; the others are breached.
+ */
+export const LAKE_REACH = 6144;
+const LAKE_GRID_MARGIN = 8;
+const LAKE_DEEP = 10;
+const LAKE_MAX_CELLS = 24;
+/** Coarse lakes end where the coarse surface comes within this of their level (m). */
+const LAKE_SHORE_DROP = 0.5;
+/** Fine depressions are breached where that cuts at most this deep (m). */
+const BREACH_FINE_DEPTH = 4;
+/** Fall of a breach channel per cell (m). */
+const BREACH_FALL = 0.02;
+/** A breach channel ends this many cells past the saddle at most. */
+const BREACH_MAX_OUT = 12;
+/**
+ * Basin and breach channel together span at most LAKE_REACH: every window blending a
+ * node within reach then has all of it well inside its grid (whose edge lies
+ * LAKE_REACH + 1 km beyond any node it blends), so all of them cut alike. Bigger
+ * basins stay filled.
+ */
+const BREACH_MAX_CELLS = LAKE_REACH / COARSE;
 /** Valley floors for channels with A above this (km²). */
 const FLOOR_MIN_A = 0.5;
 const FLOOR_MAX_HALF = 180;
@@ -554,6 +829,30 @@ export function solveHydro(win: HydroWindow, cx: number, cy: number, view: SeedV
     inflows++;
   }
 
+  // --- Closed coarse basins (see coarseBasins) --------------------------------------
+  // Breach channels cut into the surface this solve erodes; lakes come after erosion.
+  const basins = coarseBasins(field, x0, y0, x1, y1);
+  for (let k = 0; k < N; k++) {
+    const c = basinAt(basins, basins.cut, worldX(k % w), worldY(Math.floor(k / w)));
+    if (c < 0) zPre[k] += c;
+  }
+
+  // Depressions are breached rather than filled where that cuts no deeper than
+  // BREACH_FINE_DEPTH (the fine terrain detail leaves dams of a metre or two along
+  // coarse valleys and breach channels, and filling behind them leaves flats that
+  // streams cross in straight lines). Deeper ones fill (and may become lakes).
+  const breachable = (q: number, c: number, d: number): boolean => {
+    let t = zPre[q] - EPS * DIST[d];
+    for (let x = c; key[x] > t; ) {
+      if (zPre[x] - t > BREACH_FINE_DEPTH) return false;
+      const r = rec[x];
+      if (r < 0) return true;
+      t -= EPS * DIST[r];
+      x = (Math.floor(x / w) + DY[r]) * w + (x % w) + DX[r];
+    }
+    return true;
+  };
+
   // --- Outlets and priority-flood ---------------------------------------------
   for (let j = 0; j < h; j++)
     for (let i = 0; i < w; i++) {
@@ -583,9 +882,30 @@ export function solveHydro(win: HydroWindow, cx: number, cy: number, view: SeedV
       seen[q] = 1;
       rec[q] = (d + 4) & 7;
       key[q] = Math.max(zPre[q], kc + EPS * DIST[d]);
+      if (key[q] > zPre[q] && breachable(q, c, d)) {
+        // Shallow dam: carve the way out down below q instead of filling behind it.
+        key[q] = zPre[q];
+        let t = zPre[q] - EPS * DIST[d];
+        for (let x = c; key[x] > t; ) {
+          key[x] = t;
+          const r = rec[x];
+          if (r < 0) break;
+          t -= EPS * DIST[r];
+          x = (Math.floor(x / w) + DY[r]) * w + (x % w) + DX[r];
+        }
+      }
       heap.push(q, key[q]);
     }
   }
+  // Carved ways are part of the surface eroded from here on.
+  for (let k = 0; k < N; k++) if (key[k] < zPre[k]) zPre[k] = key[k];
+
+  const awayFromEdge = (nodes: number[]) =>
+    nodes.every((k) => {
+      const i = k % w;
+      const j = (k - i) / w;
+      return i >= LAKE_EDGE_MARGIN && j >= LAKE_EDGE_MARGIN && i < w - LAKE_EDGE_MARGIN && j < h - LAKE_EDGE_MARGIN;
+    });
 
   // --- Receivers: stochastic steepest descent on the filled surface -----------
   // Flood order alone gives straight D8 lines on smooth slopes. A random lower
@@ -709,6 +1029,8 @@ export function solveHydro(win: HydroWindow, cx: number, cy: number, view: SeedV
       zE[c] = Math.max(zE[q] + EPS * d, Math.min(zPre[c], zE[q] + S * d));
     }
   };
+  // Breaching lowered nodes the flood had already settled: order afresh.
+  m = buildOrder();
   for (let it = 0; it < EROSION_PASSES; it++) {
     if (it > 0) {
       routeSteepest();
@@ -717,13 +1039,6 @@ export function solveHydro(win: HydroWindow, cx: number, cy: number, view: SeedV
     accumulate();
     carve();
   }
-
-  const awayFromEdge = (nodes: number[]) =>
-    nodes.every((k) => {
-      const i = k % w;
-      const j = (k - i) / w;
-      return i >= LAKE_EDGE_MARGIN && j >= LAKE_EDGE_MARGIN && i < w - LAKE_EDGE_MARGIN && j < h - LAKE_EDGE_MARGIN;
-    });
 
   // --- Dammed lakes ------------------------------------------------------------
   // Erosion drains almost every depression, but real valleys hold lakes behind
@@ -797,12 +1112,40 @@ export function solveHydro(win: HydroWindow, cx: number, cy: number, view: SeedV
       lakes++;
     }
 
+  // --- Coarse lakes ------------------------------------------------------------------
+  // Deep, compact basins of the coarse surface (see coarseBasins). A node is lake
+  // where a lake cell at or next to it has a level above both the node's starting
+  // surface and, clearly, the coarse surface (beyond the basin the fine detail can
+  // dip below the level, and past the spill the coarse floor is graded within
+  // centimetres of it). Per node, without connectivity, so no window sees it
+  // differently. These lakes are never drained (that is decided per window).
+  const coarseLake = new Uint8Array(N);
+  for (let k = 0; k < N; k++) {
+    if (!Number.isNaN(lake[k])) continue;
+    const x = worldX(k % w);
+    const y = worldY(Math.floor(k / w));
+    const gi = Math.round(x / COARSE) - basins.g0x;
+    const gj = Math.round(y / COARSE) - basins.g0y;
+    let L = NaN;
+    for (let d = -1; d < 8 && Number.isNaN(L); d++) L = basins.level[d < 0 ? gj * basins.gw + gi : (gj + DY[d]) * basins.gw + gi + DX[d]];
+    if (Number.isNaN(L) || zPre[k] >= L || field.z(x, y) >= L - LAKE_SHORE_DROP) continue;
+    zE[k] = L;
+    lake[k] = L;
+    coarseLake[k] = 1;
+  }
+
   // --- Natural lakes: large filled depressions -----------------------------------
+  // Found on the flood-filled uneroded surface (`key`), not the eroded one. A closed
+  // depression's fill level is set by its own saddle, so every solve that sees the
+  // whole basin (away from its edge) finds the same lake at the same level. On the
+  // eroded surface it depended on how deep each solve, with its own truncated
+  // catchments, cut the outflow notch: neighbouring solves disagreed, and lakes ended
+  // at chunk lines.
   const comp = new Int32Array(N).fill(-1);
   const stack: number[] = [];
   const members: number[] = [];
   for (let s0 = 0; s0 < N; s0++) {
-    if (comp[s0] >= 0 || !Number.isNaN(lake[s0]) || zE[s0] - zPre[s0] <= 0.3) continue;
+    if (comp[s0] >= 0 || !Number.isNaN(lake[s0]) || key[s0] - zPre[s0] <= 0.3) continue;
     members.length = 0;
     stack.push(s0);
     comp[s0] = s0;
@@ -811,8 +1154,8 @@ export function solveHydro(win: HydroWindow, cx: number, cy: number, view: SeedV
     while (stack.length) {
       const c = stack.pop()!;
       members.push(c);
-      depth = Math.max(depth, zE[c] - zPre[c]);
-      level = Math.max(level, zE[c]);
+      depth = Math.max(depth, key[c] - zPre[c]);
+      level = Math.max(level, key[c]);
       const ci = c % w;
       const cj = (c - ci) / w;
       for (let d = 0; d < 8; d++) {
@@ -820,7 +1163,7 @@ export function solveHydro(win: HydroWindow, cx: number, cy: number, view: SeedV
         const j = cj + DY[d];
         if (i < 0 || j < 0 || i >= w || j >= h) continue;
         const q = j * w + i;
-        if (comp[q] >= 0 || !Number.isNaN(lake[q]) || zE[q] - zPre[q] <= 0.3) continue;
+        if (comp[q] >= 0 || !Number.isNaN(lake[q]) || key[q] - zPre[q] <= 0.3) continue;
         comp[q] = s0;
         stack.push(q);
       }
@@ -915,18 +1258,22 @@ export function solveHydro(win: HydroWindow, cx: number, cy: number, view: SeedV
   // Valley floors and the limiter lower the land around lakes, never the lakes. Where
   // that cuts through a lake's rim, the lake would hang above its surroundings (and
   // meet a neighbouring solve without it at a cliff). Drain such lakes, and let the
-  // limiter lower their beds towards the breach.
+  // limiter lower their beds towards the breach. A low node or two is just the
+  // outflow leaving through its notch (a mountain stream drops metres per node), so a
+  // rim counts as cut only where a real part of the shore lies low.
   let drained = 0;
   {
     const done = new Uint8Array(N);
+    const shoreSeen = new Uint8Array(N);
     const members: number[] = [];
+    const shore: number[] = [];
     for (let s0 = 0; s0 < N; s0++) {
-      if (done[s0] || Number.isNaN(lake[s0])) continue;
+      if (done[s0] || Number.isNaN(lake[s0]) || coarseLake[s0]) continue;
       const level = lake[s0];
       members.length = 0;
+      shore.length = 0;
       members.push(s0);
       done[s0] = 1;
-      let rim = Infinity;
       for (let p = 0; p < members.length; p++) {
         const c = members[p];
         const ci = c % w;
@@ -941,10 +1288,18 @@ export function solveHydro(win: HydroWindow, cx: number, cy: number, view: SeedV
               done[q] = 1;
               members.push(q);
             }
-          } else if (Number.isNaN(lake[q]) && !damSites.has(q) && zE[q] < rim) rim = zE[q];
+          } else if (Number.isNaN(lake[q]) && !damSites.has(q) && !shoreSeen[q]) {
+            shoreSeen[q] = 1;
+            shore.push(q);
+          }
         }
       }
-      if (rim >= level - LAKE_BREACH) continue;
+      let low = 0;
+      for (const q of shore) {
+        if (zE[q] < level - LAKE_BREACH) low++;
+        shoreSeen[q] = 0;
+      }
+      if (low < Math.max(BREACH_MIN_NODES, BREACH_SHARE * shore.length)) continue;
       for (const c of members) lake[c] = NaN;
       drained++;
     }

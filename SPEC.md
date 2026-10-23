@@ -84,7 +84,7 @@ Grid overlay
   - Filled depressions become floors graded at min(S, 0.3 %) rather than dead flats.
   - The same hillslope limiter as window solves (no node more than 1.15·Smax·d above any neighbour), as raster sweeps; without it window solves cut 40–50 m off the coarse surface.
 - This makes the coarse surface a pure function of the coarse seeds. Each worker caches tiles, keyed by tile and a hash of the seeds they depend on.
-- **Known limitation.** Every tile drains to its own edges, so overlapping tiles disagree (~50 m in lowlands, 120–190 m in hills and mountains, `dev/tilespread.ts`). Where they disagree along a valley floor, the blend can hold a closed basin, which window solves fill (about 5 % of mountain land). Taking tile edges from a 1 km regional solve, with a second local pass, made tiles agree much better but drained the land through too few outlets (plateaus, half the relief) at ~5× the cost.
+- **Known limitation.** Every tile drains to its own edges, so overlapping tiles disagree (~50 m in lowlands, 120–190 m in hills and mountains, `dev/tilespread.ts`). Where they disagree along a valley floor, the blend can hold a closed basin, which window solves breach, turn into lakes or fill (Window solve, step 2). Tried without success: tile edges from a 1 km regional solve, with a second local pass (tiles agree much better, but the land drains through too few outlets: plateaus, half the relief, at ~5× the cost); a second pass with edges from the first's blend (worse); tiles solved 5–10 km beyond their blended part (barely better); edges at the base level without the incision clamp (no better).
 
 **Fine surface**
 - Nodes are 16 m apart. `zPre` = the coarse surface + the terrain detail between 64 and 512 m (terrain with octaves ≥ 64 m minus terrain with octaves ≥ 512 m). Window solves thus refine the coarse valley network instead of growing their own, and the map agrees with the coarse surface: slopes over 512 m correlate 0.92–0.94 (the best a 256 m sampling of the map could do is 0.95–0.98), heights within ~5–20 m on average (`dev/terraincmp.ts`). Before, window solves eroded the uplifted terrain themselves and the correlation was ~0.5.
@@ -93,21 +93,25 @@ Grid overlay
 1. **Outlets.**
    - Window-edge nodes drain at `max(min(zPre, coarse base), zPre − maxIncision(R))`.
    - Big coarse rivers entering the window are injected as inflows.
-2. **Routing.**
-   - Priority-flood filling, then stochastic routing: a lower neighbour weighted by slope².
+2. **Closed coarse basins** (`coarseBasins`). Where overlapping coarse tiles disagree, the blended coarse surface can hold closed basins. Each window fills the coarse surface on a world-aligned 128 m grid reaching 6 km beyond it; basins clear of that grid's edge (a pure function of the coarse surface, so every window blending a node near one treats it alike):
+   - at least 10 m deep and at most 3 km across become **lakes** at their spill level (after erosion; a node is lake where a lake cell at or next to it lies above both its surface and, by 0.5 m, the coarse surface). They are never drained.
+   - the others, if basin and channel span at most 6 km, are **breached**: a channel from the lowest cell to the saddle over the lowest ground and on downhill (edge-sharing cells only, falling 2 cm per cell), and every pocket carved to drain into it; the cut is interpolated into this window's surface.
+   - bigger basins (about 1 % of mountain land) stay filled: flats that streams cross in straight lines.
+3. **Routing.**
+   - Priority-flood, **breaching** depressions where that cuts at most 4 m (the fine detail leaves dams of a metre or two along valleys) and filling deeper ones; then stochastic routing: a lower neighbour weighted by slope².
    - The randomness is **tied to place**: a hash of the node and its chunk's seed. Overlapping solves therefore agree on routing.
-3. **Four erosion passes** of route → accumulate → carve:
+4. **Four erosion passes** of route → accumulate → carve:
    - Later passes use steepest descent on the carved surface, keeping the current receiver unless another neighbour is more than 1.5× steeper.
    - Carving: `zE = max(zE(rec) + ε·d, min(zPre, zE(rec) + S·d))`, with `S = clamp(k(R)·A^-½, 3e-4, Smax(R))`.
    - `k` ranges from 0.012 (lowland) to 0.15 (alpine). `Smax` ranges from 0.18 to 0.75.
-4. **Lakes.**
+5. **Lakes.**
    - *Dammed lakes:* every chunk has a seeded 5–12% chance of a dam (1.5–25 m by region) at a place-bound site. The lake floods upstream unless it would leak.
-   - *Natural lakes:* filled depressions of at least 25 nodes and 1.5 m deep.
-5. **Valley floors** around channels with A ≥ 0.5 km² (floodplains, glacial U-floors). Half-width is `k·√A`, capped at 180 m.
-6. **Hillslope limiter.** Lower envelope: no node sits more than 1.15·Smax·d above any neighbour, which removes cliffs. Channels are included and re-routed into the lower ground; otherwise a small side stream left above a freshly carved valley floor stands as a one-node wall up to ~190 m high. Only channels beside a lake keep their course, so its inflows and outflow stay intact.
-   - *Breached lakes:* floors and the limiter lower the land around lakes, never the lakes. A lake whose rim ends up more than 1 m below its level (the dam site excepted) is drained, and the limiter runs again to lower its bed towards the breach. Otherwise it hangs above its surroundings: in hills and mountains most natural lakes did, by 8–360 m.
-7. **Final drainage guarantee.** A priority-flood from the outlets fills any remaining pit by a hair and routes it on. Every receiver points at an earlier-settled node, so there are no dead ends and no cycles. Accumulation is then recomputed.
-8. **Output.** Only the core is kept: the chunk ± 16 nodes, i.e. the support of its blend weight.
+   - *Natural lakes:* filled depressions of the uneroded surface of at least 25 nodes and 1.5 m deep, clear of the window edge. (On the eroded surface they depended on how deep each window, with its own truncated catchments, cut the outflow notch, and lakes ended at chunk lines.)
+6. **Valley floors** around channels with A ≥ 0.5 km² (floodplains, glacial U-floors). Half-width is `k·√A`, capped at 180 m.
+7. **Hillslope limiter.** Lower envelope: no node sits more than 1.15·Smax·d above any neighbour, which removes cliffs. Channels are included and re-routed into the lower ground; otherwise a small side stream left above a freshly carved valley floor stands as a one-node wall up to ~190 m high. Only channels beside a lake keep their course, so its inflows and outflow stay intact.
+   - *Breached lakes:* floors and the limiter lower the land around lakes, never the lakes. A lake whose rim ends up more than 1 m below its level along at least 3 shore nodes and 10 % of its shore (one or two low nodes are just its outflow notch; the old single-node rule drained 70 % of lakes) is drained, and the limiter runs again to lower its bed towards the breach. Otherwise it hangs above its surroundings: in hills and mountains most natural lakes did, by 8–360 m.
+8. **Final drainage guarantee.** A priority-flood from the outlets fills any remaining pit by a hair and routes it on. Every receiver points at an earlier-settled node, so there are no dead ends and no cycles. Accumulation is then recomputed.
+9. **Output.** Only the core is kept: the chunk ± 16 nodes, i.e. the support of its blend weight.
 
 **Blending**
 - A node's elevation is the blend of the four solves whose centres surround it.

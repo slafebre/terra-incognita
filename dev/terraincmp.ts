@@ -4,9 +4,10 @@
 // Samples every 64 m in each area: fine zE (hydro solve of the node's chunk), coarse
 // z, coarse drainage area, and the uplift surface zPre. Reports overall agreement
 // (heights and 256 m / 512 m slopes) and the height difference by coarse drainage
-// class (hillslope … river), which shows where the two disagree.
+// class (hillslope … river), which shows where the two disagree, and the share of
+// lakes and of dry filled flats (closed basins the fine solve filled).
 import { ChunkManager } from '../src/chunks/manager';
-import { CoarseField, CORE, CORE_PAD, NODE, NODES } from '../src/gen/hydro';
+import { CoarseField, COARSE, coarseBasins, CORE, CORE_PAD, NODE, NODES } from '../src/gen/hydro';
 import { expand, SeedView } from '../src/gen/seeds';
 import { setRegionOverride, Terrain } from '../src/gen/terrain';
 import type { TaskRequest, TaskResult } from '../src/worker/protocol';
@@ -19,6 +20,10 @@ const REGIONS = (process.argv[3] ?? '0.2,0.45,0.65').split(',').map(Number);
 const SIZE = 3000;
 const SEED = Number(process.env.SEED ?? 11);
 let filledN = 0;
+let lakeN = 0;
+let inBasinN = 0;
+let cutN = 0;
+const kindN = [0, 0, 0, 0, 0];
 
 async function area(R: number, n: number) {
   setRegionOverride(R);
@@ -52,6 +57,9 @@ async function area(R: number, n: number) {
   const r = { x0: x - 600, y0: y - 600, x1: x + SIZE + 600, y1: y + SIZE + 600 };
   const sv = new SeedView(m.seeds.payloadFor(r, expand(r, 40000)));
   const field = new CoarseField(new Terrain(sv), sv);
+  // Closed basins of the coarse surface around the area, to tell which dry flats lie in them.
+  const basins = coarseBasins(field, x, y, x + SIZE, y + SIZE);
+  const cell = (sx: number, sy: number) => (Math.round(sy / COARSE) - basins.g0y) * basins.gw + Math.round(sx / COARSE) - basins.g0x;
   const samples: { zf: number; zc: number; zp: number; zi: number; A: number; x: number; y: number }[] = [];
   for (let sy = y; sy < y + SIZE; sy += 64)
     for (let sx = x; sx < x + SIZE; sx += 64) {
@@ -62,7 +70,14 @@ async function area(R: number, n: number) {
       const k = (gy - (c.cy * NODES - CORE_PAD)) * CORE + (gx - (c.cx * NODES - CORE_PAD));
       const pk = (gy - c.cy * NODES) * NODES + (gx - c.cx * NODES);
       samples.push({ zf: c.hydro.zE[k], zc: field.z(sx, sy), zp: c.pre.zPre[pk], zi: NaN, A: field.area(sx, sy), x: sx, y: sy });
-      if (c.hydro.zE[k] - c.pre.zPre[pk] > 1) filledN++;
+      if (!Number.isNaN(c.hydro.lake[k])) lakeN++;
+      else if (c.hydro.zE[k] - c.pre.zPre[pk] > 1) {
+        filledN++;
+        const q = cell(sx, sy);
+        if (basins.depth[q] > 0) inBasinN++;
+        if (basins.cut[q] < 0) cutN++;
+        kindN[basins.kind[q]]++;
+      }
     }
   const index = new Map(samples.map((s) => [`${s.x},${s.y}`, s]));
   return { samples, field, at: (sx: number, sy: number) => index.get(`${sx},${sy}`) };
@@ -118,8 +133,12 @@ for (const R of REGIONS) {
         }
   }
   const mean = (f: (s: (typeof all)[0]) => number, xs = all) => xs.reduce((a, s) => a + f(s), 0) / (xs.length || 1);
-  console.log(`R=${R}: filled (fine surface > 1 m above its starting surface) ${((100 * filledN) / all.length).toFixed(1)}% of samples`);
+  console.log(`R=${R}: lakes ${((100 * lakeN) / all.length).toFixed(1)}%, dry filled flats (> 1 m above the starting surface) ${((100 * filledN) / all.length).toFixed(1)}% of samples (${inBasinN} of ${filledN} in coarse basins, ${cutN} on breach channels; by basin outcome none/lake/breached/edge/too big: ${kindN.join('/')})`);
+  kindN.fill(0);
+  inBasinN = 0;
+  cutN = 0;
   filledN = 0;
+  lakeN = 0;
   console.log(
     `R=${R}: ${all.length} samples; heights fine ${mean((s) => s.zf).toFixed(0)}, coarse ${mean((s) => s.zc).toFixed(0)}, pre ${mean((s) => s.zp).toFixed(0)} m; ` +
       `correlation fine~coarse ${corr(all.map((s) => s.zf), all.map((s) => s.zc)).toFixed(2)}, fine~pre ${corr(all.map((s) => s.zf), all.map((s) => s.zp)).toFixed(2)}; ` +
