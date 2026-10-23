@@ -274,6 +274,7 @@ function stats(segs: SegmentPath[]): { km: number; crossings: number; alongside:
 }
 
 let loopsN = 0, areaKm2 = 0, inKm = 0, deadFine = 0;
+const microStats = [0, 0, 0];
 const siteCount = [0, 0, 0, 0];
 const gradeLen = [[0, 0, 0], [0, 0, 0], [0, 0, 0], [0, 0, 0], [0, 0, 0]];
 const crossKinds = new Map<string, number>();
@@ -285,6 +286,25 @@ for (const R of REGIONS) {
     const s = stats(segs);
     const lp = smallLoops(segs);
     const de = deadEnds(segs);
+    {
+      // Micro-routed pieces (keys of several edges joined by '+', or single edges whose
+      // drawn length is well beyond the straight line).
+      let pieces = 0, pieceKm = 0, longer = 0;
+      for (const g of segs) {
+        const n = g.xy.length / 2;
+        let len = 0;
+        for (let i = 1; i < n; i++) len += Math.hypot(g.xy[2 * i] - g.xy[2 * i - 2], g.xy[2 * i + 1] - g.xy[2 * i - 1]);
+        const chord = Math.hypot(g.xy[2 * n - 2] - g.xy[0], g.xy[2 * n - 1] - g.xy[1]);
+        if (g.key.includes('+')) {
+          pieces++;
+          pieceKm += len / 1000;
+        }
+        if (len > 1.5 * chord) longer++;
+      }
+      microStats[0] += pieces;
+      microStats[1] += pieceKm;
+      microStats[2] += longer;
+    }
     if (process.env.GRADECMP && DEBUG_PATHS?.length) {
       // Coarse (what the network sees) vs fine (what the map shows) gradient of every
       // lattice edge in the area, between its vertices.
@@ -461,6 +481,8 @@ for (const R of REGIONS) {
     alongside += s.alongside;
   }
   console.log(`SMALL LOOPS R=${R}: ${loopsN} in ${areaKm2} km² with ${inKm.toFixed(0)} km road → ${((100 * loopsN) / inKm).toFixed(1)} per 100 km`);
+  console.log(`MICRO R=${R}: ${microStats[0]} multi-edge pieces drawn (${microStats[1].toFixed(1)} km), ${microStats[2]} paths over 1.5× their chord`);
+  microStats.fill(0);
   console.log(`DEAD ENDS R=${R}: ${deadFine} (road ends not at a settlement or farm)`);
   console.log(`UNREACHED R=${R} town/village/hamlet/farm: ${unreached.map((u, i) => `${u}/${siteCount[i]}`).join('  ')}`);
   console.log(`GRADE R=${R} share of road over its limit / over 1.5× limit: ` + ['N', 'D', 'C', 'T', 'P'].map((n, i) => `${n} ${((100 * gradeLen[i][1]) / (gradeLen[i][0] || 1)).toFixed(0)}% / ${((100 * gradeLen[i][2]) / (gradeLen[i][0] || 1)).toFixed(0)}% of ${(gradeLen[i][0] / 1000).toFixed(0)} km`).join('  '));

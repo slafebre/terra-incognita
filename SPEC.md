@@ -171,11 +171,11 @@ Grid overlay
 - A fixed tie-break of up to 1 %, so best paths are unique.
 
 **Stages.** Each stage grows from the previous one, so a cell needs each stage known a bit further out than the next: main roads up to ~11 km around it, hamlet roads ~7 km, farm roads ~2.4 km, tracks ~1.2 km.
-1. **Main roads.** For each town pair (N) and village pair (D), the cheapest path inside a fixed corridor (|pa| + |pb| ≤ 1.3·d + 1 km), with a small cost for turning. The corridor makes the path a function of the pair alone, so every cell finds the same one.
-2. **Hamlet roads.** One cheapest-path forest grown out from the main network; each hamlet's road follows it back, so roads from nearby hamlets merge like streams.
+1. **Main roads.** For each town pair (N) and village pair (D), the cheapest path inside a fixed corridor (|pa| + |pb| ≤ 1.3·d + 1 km), with a small cost for turning and a large one (400 m) for a sharp turn at a vertex — on steep ground, hairpins are left to the fine routing. The corridor makes the path a function of the pair alone, so every cell finds the same one.
+2. **Hamlet roads.** One cheapest-path forest grown out from the main network (with the heading in the state, turns costing as on main roads); each hamlet's road follows it back, so roads from nearby hamlets merge like streams.
 3. **Shortcuts.** Neighbouring settlements (Gabriel pairs, 0.4–2 km apart) that the roads so far join only by a way round longer than 2× their distance get a corridor path as a C road; where its edges would be steeper than 1.3× the road limit, a footpath instead. Decided on main and hamlet roads only, so every cell decides each pair alike.
 4. **Farm roads.** Grown like hamlet roads, from all roads so far.
-5. **Tracks.** Scattered points (14 % of vertices, by hash) with no road within 200 m, below 2,300 m and not on a cliff, get a track back to the network, grown as one forest so nearby tracks merge.
+5. **Tracks.** Scattered points (14 % of vertices, by hash, falling by up to 85 % as the 500 m slope rises from 10 % to 35 %) with no road within 200 m, below 2,300 m and not on a cliff, get a track back to the network, grown as one forest so nearby tracks merge. Mountain slopes thus carry few ways (about 2.2 km per km² against 3 in the lowlands; Alpine forest roads run at 2.5–4.5), which leaves them room to wind. Farms, too, want flatter ground than other settlements.
 
 An edge used by several ways takes the highest class.
 
@@ -183,14 +183,16 @@ An edge used by several ways takes the highest class.
 - Vertices are snapped within 32 m to gentler, dry ground on the fine terrain.
 - Each edge is one cubic Hermite curve between its vertices. At each vertex its edges are paired greedily (highest class, then straightest); a pair continues smoothly with a shared Catmull–Rom direction, never shorter than a quarter of the shorter leg, so a sharp turn becomes a rounded hairpin. A side road meeting a through road arrives straight.
 - The curve is then fitted to the fine terrain: samples every 10 m may move up to 32 m sideways, fading to nothing at both vertices. Dynamic programming over the offsets picks a line that is gentle, smooth, near the edge, out of lakes and off stream beds; the chosen shifts are then smoothed.
-- All of this uses only the edge, its neighbours at both ends and the terrain near it, so every chunk draws an edge identically.
+- **Steep pieces.** Consecutive edges of one way are grouped into pieces of at most 3 edges, between anchors (junctions, dead ends, class changes, and vertices picked by a hash of their position). A piece that climbs more than 1.3× its class limit on the fine terrain, mostly uphill, is routed on the fine terrain itself by the chunk owning its middle edge: A* over 16 m nodes with heading (at most 45° per step, turns costing 20 m per 45°), gradient held near the limit, within a band of up to 200 m but under 45 % of the way to the nearest other way (so two such pieces cannot meet), clear of other ways by 24 m except near the piece's ends, out of lakes. The others skip its edges. The steep test uses only the piece's vertices and terrain inside it, so every chunk that sees the piece decides alike.
+- All of this uses only the edge (or piece), its neighbours at both ends and the terrain near it, so every chunk draws an edge identically.
 
 **Rendering.** Footpaths and tracks first, uncased, under the roads; then all road casings; then road fills from C up to N.
 
 **Measured** (seeded test areas): small closed loops 3–8 per 100 km of road, junction-less crossings ≤ 0.05 per km, almost nothing running alongside another road, every settlement and farm reached. Total ways about 3 km per km² in the lowlands. Net cells take about 1–1.5 s each.
 
 **Open.**
-- Roads in hilly terrain are often steeper than their class allows on the fine terrain: the network cannot see those slopes, and switchbacks are not drawn yet.
+- Roads in mountains are still often steeper than their class allows on the fine terrain: the network cannot see those slopes, and steep pieces rarely have the room or length for a full serpentine.
+- Net cells take 2–3 s each since forests carry headings.
 - Lakes are not known to the network; only small ones are avoided, by the fitting.
 - Footpaths to summits and passes, bridges and tunnels as symbols.
 - Making the coarse surface match the fine one (it is ~40–200 m lower and poorly correlated in hills) would help both roads and settlement placement.

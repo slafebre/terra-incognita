@@ -91,7 +91,7 @@ const COARSE_RADIUS_M = COARSE_REACH + (WIN_CHUNKS + 1) * CHUNK + 512;
  */
 export class ChunkManager {
   readonly chunks = new Map<string, Chunk>();
-  readonly seeds = new SeedStore();
+  readonly seeds: SeedStore;
   renderBucket = 1;
   dpr = 1;
   readonly stats: Record<TaskKind, { ms: number; n: number }> & { errors: number } = {
@@ -118,7 +118,11 @@ export class ChunkManager {
   constructor(
     private readonly pool: TaskRunner,
     private readonly onChange: () => void,
-  ) {}
+    /** Debugging: a world seed makes every place reproducible (see SeedStore). */
+    worldSeed?: number,
+  ) {
+    this.seeds = new SeedStore(worldSeed);
+  }
 
   get pxSize(): number {
     return Math.ceil((CHUNK / M_PER_CSS_PX) * this.renderBucket * Math.min(this.dpr, DPR_MAX));

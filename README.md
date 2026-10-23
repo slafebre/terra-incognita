@@ -7,7 +7,7 @@ npm install
 npm run dev        # http://localhost:5173
 ```
 
-URL parameters (debugging): `?debug` shows chunk stages and timings, `?at=x,y` sets the start position (world metres), `?z=0.5` sets the start zoom, and `?R=0.9` forces the region everywhere (0 = lowland … 1 = alpine).
+URL parameters (debugging): `?debug` shows chunk stages and timings, `?at=x,y` sets the start position (world metres), `?z=0.5` sets the start zoom, `?R=0.9` forces the region everywhere (0 = lowland … 1 = alpine), and `?seed=7` makes the world reproducible (seeds hashed from position instead of fresh), for comparing changes on the same land.
 
 ```
 npm test

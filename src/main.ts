@@ -28,7 +28,9 @@ const workers = Math.max(1, Math.min(4, (navigator.hardwareConcurrency || 2) - 1
 // Debug: `?R=0.1` forces the region (0 lowland … 1 alpine) everywhere.
 const regionOverride = Number(new URLSearchParams(location.search).get('R') ?? NaN);
 const pool = new WorkerPool(workers, () => manager.schedule(), { regionOverride });
-const manager = new ChunkManager(pool, () => (dirty = true));
+// Debug: `?seed=n` makes the world reproducible (the same place, the same land).
+const seedParam = new URLSearchParams(location.search).get('seed');
+const manager = new ChunkManager(pool, () => (dirty = true), seedParam === null ? undefined : Number(seedParam) >>> 0);
 const input = new Input(canvas, vp, actual, desired);
 
 function resize(): void {

@@ -2,7 +2,7 @@ import { CHUNK } from '../lib/constants';
 import { hash3 } from '../lib/hash';
 import { MinHeap } from '../lib/heap';
 import { smoothstep } from '../lib/noise';
-import { type CoarseField, NODE } from './hydro';
+import { type CoarseField, DX, DY, NODE } from './hydro';
 import {
   MAX_GRADE,
   MAX_LEN,
@@ -58,8 +58,11 @@ const JITTER = 0.22 * LATTICE;
 /** Valley floors (drainage area ramp, km²) cost up to VALLEY_BONUS less. */
 const VALLEY_AREA = [0.3, 4];
 const VALLEY_BONUS = 0.3;
-/** Main roads: turning by θ costs TURN_COST × (1 − cos θ) (m). */
+/** Turning by θ at a vertex costs TURN_COST × (1 − cos θ) (m); a sharp turn (cos θ < SHARP_COS,
+ * the lattice's 120°) costs SHARP_TURN — on steep ground the fine routing makes the hairpins. */
 const TURN_COST = 25;
+const SHARP_COS = -0.2;
+const SHARP_TURN = 400;
 /** Main-road corridor: vertices with |pa| + |pb| ≤ CORRIDOR × d + CORRIDOR_EXTRA. */
 const CORRIDOR = 1.3;
 const CORRIDOR_EXTRA = 1000;
@@ -85,6 +88,9 @@ const TRACK_GAP = 200;
 const TRACK_ALT = 2300;
 const TRACK_STEEP = 0.5;
 const TRACK_REACH = 1200;
+/** Track density falls by up to TRACK_THIN over this range of slope (500 m baseline). */
+const TRACK_THIN = 0.85;
+const TRACK_THIN_SLOPE = [0.1, 0.35];
 
 /** Spatial hash of points for radius queries. */
 class Grid<T extends { x: number; y: number }> {
@@ -342,21 +348,12 @@ export function latticeCell(gx: number, gy: number, field: CoarseField, set: Set
         goalState = st;
         break;
       }
-      const pv = pos(v);
       const c0 = cost.get(sk)!;
       for (const w of neighbours(v)) {
         if (w === from || !inside(w)) continue;
         const pw = pos(w);
         let c = c0 + edgeCost(field, v, w, k);
-        if (from >= 0) {
-          const pf = pos(from);
-          const ux = pv.x - pf.x;
-          const uy = pv.y - pf.y;
-          const wx = pw.x - pv.x;
-          const wy = pw.y - pv.y;
-          const cos = (ux * wx + uy * wy) / (Math.hypot(ux, uy) * Math.hypot(wx, wy));
-          c += TURN_COST * (1 - cos);
-        }
+        if (from >= 0) c += turnCost(from, v, w);
         const nk = key(w, v);
         if (c >= (cost.get(nk) ?? Infinity)) continue;
         cost.set(nk, c);
@@ -403,34 +400,84 @@ export function latticeCell(gx: number, gy: number, field: CoarseField, set: Set
    * Cheapest-path forest grown from `sources` over the vertices within margin m;
    * returns each reached vertex's next vertex towards the network.
    */
-  const forest = (sources: Set<number>, m: number, reach: number, k: RoadClass = ROAD_C): Map<number, number> => {
-    const parent = new Map<number, number>();
-    const cost = new Map<number, number>();
+  /**
+   * Cheapest-path forest grown from `sources` over the vertices within margin m, with
+   * the heading in the state so turning costs as on main roads (a sharp turn at a
+   * vertex is dear: turning on steep ground is left to the fine routing). Returns the
+   * way from a vertex back to the network.
+   */
+  const forest = (sources: Set<number>, m: number, reach: number, k: RoadClass = ROAD_C): ((v: number) => number[]) => {
+    // Vertices of the box, indexed locally; states are local index × 9 + direction code.
+    const vi0 = Math.floor((x0 - m - JITTER) / LATTICE) - 2;
+    const vi1 = Math.ceil((x1 + m + JITTER) / LATTICE) + 2;
+    const vj0 = Math.floor((y0 - m - JITTER) / ROW) - 2;
+    const vj1 = Math.ceil((y1 + m + JITTER) / ROW) + 2;
+    const ni = vi1 - vi0 + 1;
+    const nj = vj1 - vj0 + 1;
+    const loc = (v: number) => {
+      const a = vi(v) - vi0;
+      const b = vj(v) - vj0;
+      return a < 0 || b < 0 || a >= ni || b >= nj ? -1 : b * ni + a;
+    };
+    const glob = (l: number) => pack((l % ni) + vi0, Math.floor(l / ni) + vj0);
+    const cost = new Float64Array(ni * nj * 9).fill(Infinity);
+    const parent = new Int32Array(ni * nj * 9).fill(-1);
+    const done = new Uint8Array(ni * nj * 9);
+    const best = new Int32Array(ni * nj).fill(-1); // vertex → its cheapest state
     const heap = new MinHeap(1024);
-    const ids: number[] = [];
-    for (const s of sources) {
-      cost.set(s, 0);
-      ids.push(s);
-      heap.push(ids.length - 1, 0);
+    const fromOf = (st: number) => {
+      const code = st % 9;
+      if (code === 4) return -1;
+      const v = glob((st - code) / 9);
+      return pack(vi(v) + (code % 3) - 1, vj(v) + Math.floor(code / 3) - 1);
+    };
+    for (const s0 of sources) {
+      const l = loc(s0);
+      if (l < 0) continue;
+      cost[l * 9 + 4] = 0;
+      heap.push(l * 9 + 4, 0);
     }
-    const done = new Set<number>();
     while (heap.size) {
-      const v = ids[heap.pop()];
-      if (done.has(v)) continue;
-      done.add(v);
-      const c0 = cost.get(v)!;
+      const st = heap.pop();
+      if (done[st]) continue;
+      done[st] = 1;
+      const l = (st - (st % 9)) / 9;
+      if (best[l] < 0) best[l] = st;
+      const v = glob(l);
+      const c0 = cost[st];
+      const from = fromOf(st);
       for (const w of neighbours(v)) {
-        if (!inBox(pos(w), m)) continue;
-        const c = c0 + edgeCost(field, v, w, k);
-        if (c > reach || c >= (cost.get(w) ?? Infinity)) continue;
-        cost.set(w, c);
-        parent.set(w, v);
-        ids.push(w);
-        heap.push(ids.length - 1, c);
+        if (w === from) continue;
+        const lw = loc(w);
+        if (lw < 0 || !inBox(pos(w), m)) continue;
+        const c = c0 + edgeCost(field, v, w, k) + (from >= 0 ? turnCost(from, v, w) : 0);
+        const ns = lw * 9 + dirCode(w, v);
+        if (c > reach || c >= cost[ns]) continue;
+        cost[ns] = c;
+        parent[ns] = st;
+        heap.push(ns, c);
       }
     }
-    return parent;
+    return (v: number) => {
+      const out: number[] = [];
+      const l = loc(v);
+      if (l < 0 || best[l] < 0) return out;
+      for (let st = best[l]; st >= 0; st = parent[st]) out.push(glob((st - (st % 9)) / 9));
+      return out;
+    };
   };
+  /** Cost of turning at v, coming from `from` and going on to w (m). */
+  function turnCost(from: number, v: number, w: number): number {
+    const pf = pos(from);
+    const pv = pos(v);
+    const pw = pos(w);
+    const ux = pv.x - pf.x;
+    const uy = pv.y - pf.y;
+    const wx = pw.x - pv.x;
+    const wy = pw.y - pv.y;
+    const cos = (ux * wx + uy * wy) / (Math.hypot(ux, uy) * Math.hypot(wx, wy));
+    return cos < SHARP_COS ? SHARP_TURN : TURN_COST * (1 - cos);
+  }
   /** Vertices on roads (not tracks or paths), plus the given sites'. */
   const roadVertices = (extra: Site[]) => {
     const s = new Set<number>();
@@ -438,8 +485,9 @@ export function latticeCell(gx: number, gy: number, field: CoarseField, set: Set
     for (const t of extra) s.add(nearestVertex(t.x, t.y));
     return s;
   };
-  const follow = (parent: Map<number, number>, from: number, k: RoadClass) => {
-    for (let v = from; parent.has(v); v = parent.get(v)!) use(v, parent.get(v)!, k);
+  const follow = (way: (v: number) => number[], from: number, k: RoadClass) => {
+    const vs = way(from);
+    for (let i = 1; i < vs.length; i++) use(vs[i - 1], vs[i], k);
   };
 
   // 3. Hamlet roads.
@@ -525,8 +573,13 @@ export function latticeCell(gx: number, gy: number, field: CoarseField, set: Set
     const pT = forest(roadVertices([]), farmM, TRACK_REACH * COST_CAP, ROAD_T);
     const box = { x0: x0 - trackM, y0: y0 - trackM, x1: x1 + trackM, y1: y1 + trackM };
     for (const v of verticesIn(box)) {
-      if (hash3(0x7ac4, vi(v), vj(v)) / 4294967296 >= TRACK_DENSITY) continue;
       const p = pos(v);
+      // Fewer on steep ground: mountain slopes are crossed by few ways, which then
+      // have room to wind (see microRoute).
+      const gx = field.z(p.x + 250, p.y) - field.z(p.x - 250, p.y);
+      const gy = field.z(p.x, p.y + 250) - field.z(p.x, p.y - 250);
+      const thin = 1 - TRACK_THIN * smoothstep(TRACK_THIN_SLOPE[0], TRACK_THIN_SLOPE[1], Math.hypot(gx, gy) / 500);
+      if (hash3(0x7ac4, vi(v), vj(v)) / 4294967296 >= TRACK_DENSITY * thin) continue;
       if (p.z > TRACK_ALT || roadPts.near(p.x, p.y, TRACK_GAP).length) continue;
       if (neighbours(v).some((w) => edgeGrade(field, v, w) > TRACK_STEEP)) continue;
       follow(pT, v, ROAD_T);
@@ -599,11 +652,66 @@ export function latticeSegments(edges: RoadEdge[], cx: number, cy: number): Segm
       partner.set(`${inc[p.j].key}@${vk}`, [inc[p.i].ox, inc[p.i].oy]);
     }
   }
+  // Pieces: runs of up to PIECE_EDGES edges of one road between anchors — junctions,
+  // dead ends, class changes, and vertices picked by a hash of their position. A
+  // piece too steep for its class is drawn as one serpentine (see routeCurves).
+  const byKey = new Map<string, RoadEdge>();
+  for (const e of edges) byKey.set(e.id, e);
+  const anchor = (vk: string) => {
+    const inc = at.get(vk) ?? [];
+    if (inc.length !== 2 || inc[0].cls !== inc[1].cls) return true;
+    const [x, y] = vk.split(',').map(Number);
+    return hash3(0x9a1c, Math.round(x), Math.round(y)) / 4294967296 < PIECE_ANCHOR;
+  };
+  /** The piece containing edge e: vertices and edge keys, in canonical order; null if too long. */
+  const pieceOf = (e: RoadEdge): { pts: number[]; keys: string[] } | null => {
+    const [ax, ay, bx, by] = e.route;
+    // Walk from vertex (x, y), leaving it away from edge `from`, until an anchor.
+    const walk = (x: number, y: number, from: string) => {
+      const pts: number[] = [];
+      const keys: string[] = [];
+      let vk = k2(x, y);
+      let prev = from;
+      while (!anchor(vk) && keys.length <= PIECE_EDGES) {
+        const next = (at.get(vk) ?? []).find((i) => i.key !== prev)!;
+        keys.push(next.key);
+        pts.push(next.ox, next.oy);
+        prev = next.key;
+        vk = k2(next.ox, next.oy);
+      }
+      return { pts, keys };
+    };
+    const back = walk(ax, ay, e.id);
+    const fwd = walk(bx, by, e.id);
+    const keys = [...back.keys.reverse(), e.id, ...fwd.keys];
+    if (keys.length > PIECE_EDGES) return null;
+    const bp: number[] = [];
+    for (let i = back.pts.length - 2; i >= 0; i -= 2) bp.push(back.pts[i], back.pts[i + 1]);
+    let pts = [...bp, ax, ay, bx, by, ...fwd.pts];
+    let ks = keys;
+    // Canonical direction: from the smaller end vertex.
+    if (k2(pts[pts.length - 2], pts[pts.length - 1]) < k2(pts[0], pts[1])) {
+      const r: number[] = [];
+      for (let i = pts.length - 2; i >= 0; i -= 2) r.push(pts[i], pts[i + 1]);
+      pts = r;
+      ks = [...keys].reverse();
+    }
+    return { pts, keys: ks };
+  };
+  const segDist = (p: number[], q: number[]) => {
+    const pd = (x: number, y: number, s: number[]) => {
+      const dx = s[2] - s[0];
+      const dy = s[3] - s[1];
+      const t = Math.max(0, Math.min(1, ((x - s[0]) * dx + (y - s[1]) * dy) / (dx * dx + dy * dy || 1)));
+      return Math.hypot(x - s[0] - t * dx, y - s[1] - t * dy);
+    };
+    return Math.min(pd(p[0], p[1], q), pd(p[2], p[3], q), pd(q[0], q[1], p), pd(q[2], q[3], p));
+  };
   const out: SegmentTask[] = [];
   for (const e of edges) {
     const [ax, ay, bx, by] = e.route;
     if (Math.floor((ax + bx) / 2 / CHUNK) !== cx || Math.floor((ay + by) / 2 / CHUNK) !== cy) continue;
-    out.push({
+    const task: SegmentTask = {
       key: e.id,
       cls: e.cls,
       ax,
@@ -612,10 +720,56 @@ export function latticeSegments(edges: RoadEdge[], cx: number, cy: number): Segm
       by,
       pa: partner.get(`${e.id}@${k2(ax, ay)}`),
       pb: partner.get(`${e.id}@${k2(bx, by)}`),
-    });
+    };
+    const pc = pieceOf(e);
+    if (pc) {
+      const n = pc.pts.length / 2;
+      const own = new Set(pc.keys);
+      const ends = new Set<string>();
+      for (let i = 0; i < n; i++) ends.add(k2(pc.pts[2 * i], pc.pts[2 * i + 1]));
+      // Room either side: the nearest way not part of the piece nor meeting it.
+      let room = Infinity;
+      const obstacles: number[] = [];
+      for (const o of edges) {
+        if (own.has(o.id)) continue;
+        let r = o.route;
+        // A way meeting the piece at a vertex: only its far half counts (near the
+        // junction itself they must be close).
+        const atA = ends.has(k2(r[0], r[1]));
+        const atB = ends.has(k2(r[2], r[3]));
+        if (atA && atB) continue;
+        if (atA) r = [(r[0] + r[2]) / 2, (r[1] + r[3]) / 2, r[2], r[3]];
+        else if (atB) r = [r[0], r[1], (r[0] + r[2]) / 2, (r[1] + r[3]) / 2];
+        for (let i = 1; i < n; i++) {
+          const sgm = [pc.pts[2 * i - 2], pc.pts[2 * i - 1], pc.pts[2 * i], pc.pts[2 * i + 1]];
+          if (Math.abs((r[0] + r[2]) / 2 - (sgm[0] + sgm[2]) / 2) > 600 || Math.abs((r[1] + r[3]) / 2 - (sgm[1] + sgm[3]) / 2) > 600) continue;
+          const d = segDist(sgm, r);
+          room = Math.min(room, d, ROOM_REACH);
+          if (d < ROOM_REACH && (obstacles.length < 4 || obstacles[obstacles.length - 4] !== r[0] || obstacles[obstacles.length - 3] !== r[1])) obstacles.push(...r);
+        }
+      }
+      const first = byKey.get(pc.keys[0])!;
+      const last = byKey.get(pc.keys[pc.keys.length - 1])!;
+      task.piece = {
+        key: pc.keys.join('+'),
+        pts: pc.pts,
+        owner: pc.keys[Math.floor((pc.keys.length - 1) / 2)] === e.id,
+        room,
+        obstacles,
+        pa: partner.get(`${first.id}@${k2(pc.pts[0], pc.pts[1])}`),
+        pb: partner.get(`${last.id}@${k2(pc.pts[2 * n - 2], pc.pts[2 * n - 1])}`),
+      };
+    }
+    out.push(task);
   }
   return out;
 }
+
+/** Room around a piece is looked for this far (m): every chunk that sees the piece knows all ways that close. */
+const ROOM_REACH = 300;
+/** Pieces: at most this many edges; a vertex is an anchor with this probability. */
+const PIECE_EDGES = 3;
+const PIECE_ANCHOR = 0.5;
 
 /** Snap radius (fine nodes) for vertices: onto gentler, dry ground nearby. */
 const VSNAP = 2;
@@ -662,7 +816,34 @@ export function routeCurves(tasks: SegmentTask[], p: RoadPatch): SegmentPath[] {
     const z = p.zE;
     return (z[k] * (1 - fu) + z[k + 1] * fu) * (1 - fv) + (z[k + w] * (1 - fu) + z[k + w + 1] * fu) * fv;
   };
-  return tasks.map((t) => {
+  const out: SegmentPath[] = [];
+  for (const t of tasks) {
+    // A steep piece: drawn once, as a serpentine, by the chunk owning its middle edge.
+    if (t.piece) {
+      const pc = t.piece;
+      const n = pc.pts.length / 2;
+      const steep = serpentineFrame(pc.pts, MAX_GRADE[t.cls], zAt);
+      if (steep) {
+        if (pc.owner) {
+          const [ax, ay] = snap(pc.pts[0], pc.pts[1]);
+          const [bx, by] = snap(pc.pts[2 * n - 2], pc.pts[2 * n - 1]);
+          // Directions at the ends: the shared Catmull–Rom direction there (next vertex
+          // minus previous), as the piece or edge on the other side also uses.
+          const inDir = pc.pa ? [pc.pts[2] - pc.pa[0], pc.pts[3] - pc.pa[1]] : [bx - ax, by - ay];
+          const outDir = pc.pb ? [pc.pb[0] - pc.pts[2 * n - 4], pc.pb[1] - pc.pts[2 * n - 3]] : [bx - ax, by - ay];
+          // Each serpentine keeps to under half the way to its neighbour: two can't meet.
+          const band = Math.min(MICRO_BAND, MICRO_ROOM * Math.min(pc.room, ROOM_REACH));
+          const xy = microRoute(ax, ay, bx, by, inDir, outDir, MAX_GRADE[t.cls], p, zAt, pc.obstacles, band);
+          out.push({ key: pc.key, cls: t.cls, xy: Float32Array.from(xy), micro: true });
+        }
+        continue;
+      }
+    }
+    out.push(curveOf(t));
+  }
+  return out;
+
+  function curveOf(t: SegmentTask): SegmentPath {
     const [ax, ay] = snap(t.ax, t.ay);
     const [bx, by] = snap(t.bx, t.by);
     const len = Math.hypot(bx - ax, by - ay) || 1;
@@ -707,8 +888,51 @@ export function routeCurves(tasks: SegmentTask[], p: RoadPatch): SegmentPath[] {
       xy[2 * s + 1] = ys[s];
     }
     return { key: t.key, cls: t.cls, xy };
-  });
+  }
 }
+
+/** Serpentines: a piece climbing more than SERP_TRIGGER × its class limit, mostly uphill. */
+const SERP_TRIGGER = 1.3;
+const SERP_UPHILL = 0.5;
+
+/**
+ * Whether a piece (vertices `pts`) is too steep for `gmax` on the fine terrain, and if
+ * so its frame: e1 along the contour, e2 across it towards the piece's end. Uses
+ * only the piece's own vertices and terrain inside it, so every chunk that sees the
+ * piece decides alike.
+ */
+function serpentineFrame(
+  pts: number[],
+  gmax: number,
+  zAt: (x: number, y: number) => number,
+): { e1: [number, number]; e2: [number, number] } | null {
+  const n = pts.length / 2;
+  const ax = pts[0];
+  const ay = pts[1];
+  const bx = pts[2 * n - 2];
+  const by = pts[2 * n - 1];
+  let len = 0;
+  for (let i = 1; i < n; i++) len += Math.hypot(pts[2 * i] - pts[2 * i - 2], pts[2 * i + 1] - pts[2 * i - 1]);
+  const dz = Math.abs(zAt(bx, by) - zAt(ax, ay));
+  if (dz <= SERP_TRIGGER * gmax * len) return null;
+  // Slope direction, averaged over three points inside the piece.
+  let gx = 0;
+  let gy = 0;
+  for (const t of [0.25, 0.5, 0.75]) {
+    const px = ax + (bx - ax) * t;
+    const py = ay + (by - ay) * t;
+    gx += zAt(px + 40, py) - zAt(px - 40, py);
+    gy += zAt(px, py + 40) - zAt(px, py - 40);
+  }
+  const G = Math.hypot(gx, gy);
+  if (G < 1e-6) return null;
+  let e2: [number, number] = [gx / G, gy / G];
+  if ((bx - ax) * e2[0] + (by - ay) * e2[1] < 0) e2 = [-e2[0], -e2[1]];
+  const L = Math.hypot(bx - ax, by - ay);
+  if ((bx - ax) * e2[0] + (by - ay) * e2[1] < SERP_UPHILL * L) return null; // mostly along the contour
+  return { e1: [-e2[1], e2[0]], e2 };
+}
+
 
 /** Terrain fitting: samples every FIT_STEP m, shifted sideways by up to FIT_BAND m in FIT_OFFSET steps. */
 const FIT_STEP = 10;
@@ -812,4 +1036,182 @@ function fitToTerrain(
     xs[s] += smooth[s] * nx[s];
     ys[s] += smooth[s] * ny[s];
   }
+}
+
+/** Micro routing: search band either side of the piece (m), clearance kept from other
+ * ways (m) except this near the piece's ends (m). */
+const MICRO_BAND = 200;
+/** …and at most this share of the room to the nearest other way. */
+const MICRO_ROOM = 0.45;
+const MICRO_CLEAR = 24;
+const MICRO_FREE = 48;
+/** Costs (m-equivalent): per 45° of turn, per unit of over-limit gradient per m, for
+ * leaving off the road's arriving/leaving direction (per 45°), entering a stream bed. */
+const MICRO_TURN = 20;
+const MICRO_STEEP = 25;
+const MICRO_ENDS = 3;
+const MICRO_STREAM = 15;
+const MDIST = DX.map((dx, i) => Math.hypot(dx, DY[i]) * NODE);
+
+/**
+ * A steep piece routed on the fine terrain itself (16 m nodes, with heading: at most
+ * 45° of turn per step, so a hairpin is a turn of some 20 m). The gradient is held near
+ * the class limit, so where the slope is steep the road zig-zags across it, its legs
+ * following the real contours. It stays within a band around the piece, clear of the
+ * other ways near it, out of lakes. A to B are the piece's (snapped) ends.
+ */
+function microRoute(
+  ax: number,
+  ay: number,
+  bx: number,
+  by: number,
+  inDir: number[],
+  outDir: number[],
+  gmax: number,
+  p: RoadPatch,
+  zAt: (x: number, y: number) => number,
+  obstacles: number[],
+  band: number,
+): number[] {
+  const { w, h } = p;
+  const node = (x: number, y: number) => [Math.round(x / NODE) - p.gx, Math.round(y / NODE) - p.gy];
+  const [ia, ja] = node(ax, ay);
+  const [ib, jb] = node(bx, by);
+  const pad = Math.ceil(band / NODE);
+  const i0 = Math.max(1, Math.min(ia, ib) - pad);
+  const j0 = Math.max(1, Math.min(ja, jb) - pad);
+  const i1 = Math.min(w - 2, Math.max(ia, ib) + pad);
+  const j1 = Math.min(h - 2, Math.max(ja, jb) + pad);
+  const bw = i1 - i0 + 1;
+  const bh = j1 - j0 + 1;
+  const straight = () => [ax, ay, bx, by];
+  if (bw < 2 || bh < 2) return straight();
+  // Allowed nodes: in the band, dry, clear of other ways (near the ends anything goes).
+  const ok = new Uint8Array(bw * bh);
+  const segDistTo = (x: number, y: number, s: number[], o: number) => {
+    const dx = s[o + 2] - s[o];
+    const dy = s[o + 3] - s[o + 1];
+    const t = Math.max(0, Math.min(1, ((x - s[o]) * dx + (y - s[o + 1]) * dy) / (dx * dx + dy * dy || 1)));
+    return Math.hypot(x - s[o] - t * dx, y - s[o + 1] - t * dy);
+  };
+  const ab = [ax, ay, bx, by];
+  for (let lj = 0; lj < bh; lj++)
+    for (let li = 0; li < bw; li++) {
+      const x = (p.gx + li + i0) * NODE;
+      const y = (p.gy + lj + j0) * NODE;
+      const k = (lj + j0) * w + li + i0;
+      if (segDistTo(x, y, ab, 0) > Math.max(band, MICRO_FREE) || !Number.isNaN(p.lake[k])) continue;
+      const nearEnd = Math.hypot(x - ax, y - ay) < MICRO_FREE || Math.hypot(x - bx, y - by) < MICRO_FREE;
+      let clear = true;
+      if (!nearEnd) for (let o = 0; o + 3 < obstacles.length && clear; o += 4) if (segDistTo(x, y, obstacles, o) < MICRO_CLEAR) clear = false;
+      if (clear) ok[lj * bw + li] = 1;
+    }
+  const la = (ja - j0) * bw + (ia - i0);
+  const lb = (jb - j0) * bw + (ib - i0);
+  if (la < 0 || lb < 0 || la >= bw * bh || lb >= bw * bh) return straight();
+  ok[la] = ok[lb] = 1;
+  const dirOf = (dx: number, dy: number) => ((Math.round((Math.atan2(dy, dx) / Math.PI) * 4) % 8) + 8) % 8;
+  const hIn = dirOf(inDir[0], inDir[1]);
+  const hOut = dirOf(outDir[0], outDir[1]);
+  const turn = (a: number, b: number) => Math.min((a - b + 8) & 7, (b - a + 8) & 7);
+  const S = bw * bh * 8;
+  const cost = new Float64Array(S).fill(Infinity);
+  const from = new Int32Array(S).fill(-1);
+  const heap = new MinHeap(512);
+  const hEst = (li: number, lj: number) => Math.hypot(li + i0 - ib, lj + j0 - jb) * NODE;
+  for (let d = 0; d < 8; d++) {
+    cost[la * 8 + d] = MICRO_ENDS * turn(d, hIn);
+    heap.push(la * 8 + d, cost[la * 8 + d] + hEst(ia - i0, ja - j0));
+  }
+  let goal = -1;
+  while (heap.size) {
+    const st = heap.pop();
+    const cell = st >> 3;
+    const d0 = st & 7;
+    if (cell === lb) {
+      goal = st;
+      break;
+    }
+    const li = cell % bw;
+    const lj = (cell - li) / bw;
+    const k = (lj + j0) * w + li + i0;
+    for (let t = -1; t <= 1; t++) {
+      const d = (d0 + t + 8) & 7;
+      const ni = li + DX[d];
+      const nj = lj + DY[d];
+      if (ni < 0 || nj < 0 || ni >= bw || nj >= bh) continue;
+      const nc = nj * bw + ni;
+      if (!ok[nc]) continue;
+      const q = (nj + j0) * w + ni + i0;
+      const dist = MDIST[d];
+      const g = Math.abs(p.zE[q] - p.zE[k]) / dist;
+      let c = cost[st] + dist * (1 + 0.5 * (g / gmax) ** 2) + MICRO_TURN * Math.abs(t);
+      if (g > gmax) c += dist * MICRO_STEEP * (g / gmax - 1);
+      if (p.A[q] > 1 && p.A[k] <= 1) c += MICRO_STREAM;
+      if (nc === lb) c += MICRO_ENDS * turn(d, hOut);
+      const ns = (nc << 3) | d;
+      if (c < cost[ns]) {
+        cost[ns] = c;
+        from[ns] = st;
+        heap.push(ns, c + hEst(ni, nj));
+      }
+    }
+  }
+  if (goal < 0) return straight();
+  const cells: number[] = [];
+  for (let st = goal; st >= 0; st = from[st]) cells.push(st >> 3);
+  cells.reverse();
+  const pts: number[] = [];
+  for (const c of cells) {
+    const li = c % bw;
+    const lj = (c - li) / bw;
+    pts.push((p.gx + li + i0) * NODE, (p.gy + lj + j0) * NODE);
+  }
+  pts[0] = ax;
+  pts[1] = ay;
+  pts[pts.length - 2] = bx;
+  pts[pts.length - 1] = by;
+  // Straighten the 8-direction staircase where the shortcut keeps to the limit and
+  // clear of other ways; hairpins survive because they're needed.
+  const n = pts.length / 2;
+  const outPts: number[] = [pts[0], pts[1]];
+  let i = 0;
+  while (i < n - 1) {
+    let j = Math.min(n - 1, i + 12);
+    for (; j > i + 1; j--) {
+      const x0 = pts[2 * i];
+      const y0 = pts[2 * i + 1];
+      const x1 = pts[2 * j];
+      const y1 = pts[2 * j + 1];
+      const len = Math.hypot(x1 - x0, y1 - y0);
+      const m = Math.max(1, Math.ceil(len / 8));
+      // Close to the searched path (a hairpin is never cut)…
+      let good = true;
+      for (let k2 = i + 1; k2 < j && good; k2++) {
+        const u = (k2 - i) / (j - i);
+        if (Math.hypot(pts[2 * k2] - (x0 + (x1 - x0) * u), pts[2 * k2 + 1] - (y0 + (y1 - y0) * u)) > 10) good = false;
+      }
+      // …and within the limit all along.
+      let zp = zAt(x0, y0);
+      for (let s2 = 1; s2 <= m && good; s2++) {
+        const z = zAt(x0 + ((x1 - x0) * s2) / m, y0 + ((y1 - y0) * s2) / m);
+        if (Math.abs(z - zp) / (len / m) > gmax * 1.1) good = false;
+        zp = z;
+      }
+      if (good) break;
+    }
+    outPts.push(pts[2 * j], pts[2 * j + 1]);
+    i = j;
+  }
+  // Resample, so smoothing has points to work with.
+  const xy: number[] = [outPts[0], outPts[1]];
+  for (let k = 2; k < outPts.length; k += 2) {
+    const x0 = outPts[k - 2];
+    const y0 = outPts[k - 1];
+    const x1 = outPts[k];
+    const y1 = outPts[k + 1];
+    const m = Math.max(1, Math.ceil(Math.hypot(x1 - x0, y1 - y0) / 8));
+    for (let s2 = 1; s2 <= m; s2++) xy.push(x0 + ((x1 - x0) * s2) / m, y0 + ((y1 - y0) * s2) / m);
+  }
+  return xy;
 }

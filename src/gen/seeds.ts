@@ -69,17 +69,24 @@ export class SeedStore {
   readonly chunk = new Map<string, number>();
   readonly coarse = new Map<string, number>();
 
+  /**
+   * Debugging only: with a world seed, every seed is a hash of it and its lattice
+   * position, so the same place comes out the same on every load (`?seed=n`).
+   * Without one (the normal case) seeds are fresh: the world is emergent.
+   */
+  constructor(private readonly worldSeed?: number) {}
+
   chunkSeed(cx: number, cy: number): number {
     const k = `${cx},${cy}`;
     let s = this.chunk.get(k);
-    if (s === undefined) this.chunk.set(k, (s = freshSeed()));
+    if (s === undefined) this.chunk.set(k, (s = this.worldSeed === undefined ? freshSeed() : hash3(this.worldSeed, cx, cy)));
     return s;
   }
 
   coarseSeed(S: number, ix: number, iy: number): number {
     const k = `${S}:${ix},${iy}`;
     let s = this.coarse.get(k);
-    if (s === undefined) this.coarse.set(k, (s = freshSeed()));
+    if (s === undefined) this.coarse.set(k, (s = this.worldSeed === undefined ? freshSeed() : hash3(hash3(this.worldSeed, S, 0x5eed), ix, iy)));
     return s;
   }
 

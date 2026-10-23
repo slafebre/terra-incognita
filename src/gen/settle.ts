@@ -89,7 +89,8 @@ export class Settlements {
     const A = f.area(x, y);
     const R = this.terrain.region(x, y);
     // Flat enough *for the region*: at 256 m, mountain valley floors still read steep.
-    const tol = lerp(0.08, 0.3, smoothstep(0.2, 0.9, R));
+    // Farms are pickier: few cling to steep mountainsides.
+    const tol = lerp(0.08, 0.3, smoothstep(0.2, 0.9, R)) * (rank === FARM ? 0.6 : 1);
     const flat = Math.exp(-((slope / tol) ** 2));
     // Towns want real rivers; villages and hamlets are happy with streams.
     // Farms care least: a spring or a well will do.
