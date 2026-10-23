@@ -9,7 +9,8 @@ import { DEBUG_PATHS, debugPaths, edgeGrade, nearestVertex, neighbours, vertexPo
 import { setRegionOverride, Terrain, upliftOf } from '../src/gen/terrain';
 import { SeedView } from '../src/gen/seeds';
 import { APRON, CELL, CHUNK, DEM_W } from '../src/lib/constants';
-import { CORE, CORE_PAD, NODE, NODES } from '../src/gen/hydro';
+import { COARSE, CoarseField, coarseBasins, CORE, CORE_PAD, NODE, NODES } from '../src/gen/hydro';
+import { expand } from '../src/gen/seeds';
 import type { TaskRequest, TaskResult } from '../src/worker/protocol';
 import { runTask } from '../src/worker/tasks';
 import { rng } from '../src/lib/hash';
@@ -57,6 +58,12 @@ function deadEnds(segs: SegmentPath[]): { fine: { x: number; y: number }[] } {
 let slopeAt: (x: number, y: number) => number = () => NaN;
 /** Hydro (16 m, what the fine routing sees) elevation at world (x, y), nearest node. */
 let zEAt: (x: number, y: number) => number = () => NaN;
+/** In a lake of a closed coarse basin (what the network could know about)? */
+let coarseLakeAt: (x: number, y: number) => boolean = () => false;
+/** Lake level at world (x, y) in the solve of the node's own chunk (what roads see), else NaN. */
+let lakeOwnAt: (x: number, y: number) => number = () => NaN;
+/** Lake depth (m, > 0 under water) at world (x, y), nearest DEM vertex. */
+let waterAt: (x: number, y: number) => number = () => NaN;
 /** Fine elevation (m) at world (x, y), from the last area's DEMs. */
 let elevAt: (x: number, y: number) => number = () => NaN;
 
@@ -89,7 +96,8 @@ async function segments(R: number): Promise<SegmentPath[]> {
       );
     },
   };
-  const m = new ChunkManager(pool, () => {});
+  // HASHSEED=n: seeds hashed from position, as the app's ?seed=n (to look at a place in the browser).
+  const m = new ChunkManager(pool, () => {}, process.env.HASHSEED === undefined ? undefined : Number(process.env.HASHSEED) >>> 0);
   const x = Math.round((Math.random() - 0.5) * 2e6);
   const y = Math.round((Math.random() - 0.5) * 2e6);
   const view = { x0: x, y0: y, x1: x + SIZE, y1: y + SIZE };
@@ -128,6 +136,36 @@ async function segments(R: number): Promise<SegmentPath[]> {
     const d = c.dem;
     return (d[k] * (1 - fu) + d[k + 1] * fu) * (1 - fv) + (d[k + DEM_W] * (1 - fu) + d[k + DEM_W + 1] * fu) * fv;
   };
+  waterAt = (x, y) => {
+    const c = m.chunks.get(`${Math.floor(x / CHUNK)},${Math.floor(y / CHUNK)}`);
+    if (!c?.water) return NaN;
+    const i = APRON + Math.round((x - c.cx * CHUNK) / CELL);
+    const j = APRON + Math.round((y - c.cy * CHUNK) / CELL);
+    return c.water[j * DEM_W + i];
+  };
+  lakeOwnAt = (x, y) => {
+    const gx = Math.round(x / NODE);
+    const gy = Math.round(y / NODE);
+    const c = m.chunks.get(`${Math.floor(gx / NODES)},${Math.floor(gy / NODES)}`);
+    if (!c?.hydro) return NaN;
+    return c.hydro.lake[(gy - (c.cy * NODES - CORE_PAD)) * CORE + (gx - (c.cx * NODES - CORE_PAD))];
+  };
+  {
+    const r = { x0: view.x0 - 600, y0: view.y0 - 600, x1: view.x1 + 600, y1: view.y1 + 600 };
+    const sv = new SeedView(m.seeds.payloadFor(r, expand(r, 40000)));
+    const basins = coarseBasins(new CoarseField(new Terrain(sv), sv), view.x0, view.y0, view.x1, view.y1);
+    coarseLakeAt = (x, y) => {
+      // The fine lake spreads up to a cell beyond the coarse lake cells.
+      const i0 = Math.round(x / COARSE) - basins.g0x;
+      const j0 = Math.round(y / COARSE) - basins.g0y;
+      for (let dj = -1; dj <= 1; dj++)
+        for (let di = -1; di <= 1; di++) {
+          const i = i0 + di, j = j0 + dj;
+          if (i >= 0 && j >= 0 && i < basins.gw && j < basins.gh && basins.kind[j * basins.gw + i] === 1) return true;
+        }
+      return false;
+    };
+  }
   areaTerrain = new Terrain(new SeedView(m.seeds.payloadFor({ x0: view.x0 - 600, y0: view.y0 - 600, x1: view.x1 + 600, y1: view.y1 + 600 })));
   lastSites = [];
   lastEdges = [];
@@ -290,6 +328,11 @@ const siteCount = [0, 0, 0, 0];
 const gradeLen = [[0, 0, 0], [0, 0, 0], [0, 0, 0], [0, 0, 0], [0, 0, 0]];
 const crossKinds = new Map<string, number>();
 const unreached = [0, 0, 0, 0];
+/** Roads in lakes per class: [km in water, crossings over WET_RUN m, short clips]; lake share of the area. */
+const wetLen = [[0, 0, 0], [0, 0, 0], [0, 0, 0], [0, 0, 0], [0, 0, 0]];
+const WET_RUN = 30;
+let lakeCells = 0, areaCells = 0, wetVerts = 0, allVerts = 0, wetCoarse = 0, wetVertsCoarse = 0, lakeCoarse = 0;
+const wetMarks: { x: number; y: number; a: number }[] = [];
 for (const R of REGIONS) {
   let km = 0, crossings = 0, alongside = 0;
   for (let a = 0; a < AREAS; a++) {
@@ -460,6 +503,79 @@ for (const R of REGIONS) {
         if (gr > 1.5 * lim) gradeLen[g.cls][2] += step;
       }
     }
+    // Roads standing in lakes (DEM water > 0), inside the area: total length, and runs
+    // of wet road longer than WET_RUN (crossings) vs shorter (shore clips).
+    for (const g of segs) {
+      let run = 0, rx = 0, ry = 0;
+      const end = () => {
+        if (run > WET_RUN) {
+          wetLen[g.cls][1]++;
+          wetMarks.push({ x: rx, y: ry, a: run });
+        } else if (run > 0) wetLen[g.cls][2]++;
+        run = 0;
+      };
+      for (let i = 1; i < g.xy.length / 2; i++) {
+        const x = g.xy[2 * i], y = g.xy[2 * i + 1];
+        if (x < area.x0 || x >= area.x1 || y < area.y0 || y >= area.y1) {
+          end();
+          continue;
+        }
+        const step = Math.hypot(x - g.xy[2 * i - 2], y - g.xy[2 * i - 1]);
+        if (waterAt(x, y) > 0) {
+          if (run === 0) [rx, ry] = [x, y];
+          run += step;
+          wetLen[g.cls][0] += step / 1000;
+          if (coarseLakeAt(x, y)) wetCoarse += step / 1000;
+        } else end();
+      }
+      end();
+    }
+    {
+      const vs = new Set<string>();
+      for (const e of lastEdges)
+        for (const i of [0, 2]) {
+          const [x, y] = [e.route[i], e.route[i + 1]];
+          if (x < area.x0 || x >= area.x1 || y < area.y0 || y >= area.y1 || vs.has(`${x},${y}`)) continue;
+          vs.add(`${x},${y}`);
+          allVerts++;
+          if (waterAt(x, y) > 0) {
+            wetVerts++;
+            if (coarseLakeAt(x, y)) wetVertsCoarse++;
+          }
+        }
+    }
+    if (process.env.LAKECMP) {
+      // Roads see each node's own-chunk solve; the map draws the blend. How far apart?
+      let both = 0, ownOnly = 0, mapOnly = 0;
+      const mapOnlyDist = new Array(8).fill(0);
+      for (let y = area.y0; y < area.y1; y += 16)
+        for (let x = area.x0; x < area.x1; x += 16) {
+          const own = !Number.isNaN(lakeOwnAt(x, y));
+          const drawn = waterAt(x, y) > 0;
+          if (own && drawn) both++;
+          else if (own) ownOnly++;
+          else if (drawn) {
+            mapOnly++;
+            let d = 99;
+            for (let r = 1; r <= 6 && d === 99; r++)
+              for (let dy = -r; dy <= r; dy++)
+                for (let dx = -r; dx <= r; dx++) if (!Number.isNaN(lakeOwnAt(x + 16 * dx, y + 16 * dy))) d = Math.min(d, r);
+            mapOnlyDist[Math.min(d, 7)]++;
+          }
+        }
+      console.log(`LAKECMP: lake in both ${both}, only in own-chunk solve ${ownOnly}, only on the map ${mapOnly} (16 m samples); nodes from the nearest own-solve lake: ${mapOnlyDist.join(' ')}`);
+    }
+    for (let y = area.y0; y < area.y1; y += 16)
+      for (let x = area.x0; x < area.x1; x += 16) {
+        const wv = waterAt(x, y);
+        if (Number.isNaN(wv)) continue;
+        areaCells++;
+        if (wv > 0) lakeCells++;
+        if (wv > 0 && coarseLakeAt(x, y)) lakeCoarse++;
+      }
+    if (process.env.WETLOG) for (const w of wetMarks) console.log(`  wet run ${w.a.toFixed(0)} m at ?at=${Math.round(w.x)},${Math.round(w.y)}`);
+    if (process.env.WET && wetMarks.length) sheet(segs, wetMarks.splice(0), `${process.env.WET}-R${R}-${a}.svg`);
+    wetMarks.length = 0;
     // Settlements in the area that no road reaches (within 120 m of a drawn road point).
     {
       const pts = new Set<string>();
@@ -522,6 +638,16 @@ for (const R of REGIONS) {
   console.log(`UNREACHED R=${R} town/village/hamlet/farm: ${unreached.map((u, i) => `${u}/${siteCount[i]}`).join('  ')}`);
   console.log(`GRADE R=${R} share of road over its limit / over 1.5× limit: ` + ['N', 'D', 'C', 'T', 'P'].map((n, i) => `${n} ${((100 * gradeLen[i][1]) / (gradeLen[i][0] || 1)).toFixed(0)}% / ${((100 * gradeLen[i][2]) / (gradeLen[i][0] || 1)).toFixed(0)}% of ${(gradeLen[i][0] / 1000).toFixed(0)} km`).join('  '));
   for (const gl of gradeLen) gl.fill(0);
+  console.log(`LAKES R=${R}: ${((100 * lakeCells) / (areaCells || 1)).toFixed(1)}% of the area is lake, ${wetVerts} of ${allVerts} way vertices in a lake; road in water (km, crossings > ${WET_RUN} m, shore clips): ` + ['N', 'D', 'C', 'T', 'P'].map((n, i) => `${n} ${wetLen[i][0].toFixed(2)} / ${wetLen[i][1]} / ${wetLen[i][2]}`).join('  '));
+  console.log(`COARSE LAKES R=${R}: ${((100 * lakeCoarse) / (lakeCells || 1)).toFixed(0)}% of lake area, ${wetVertsCoarse} of ${wetVerts} wet vertices, ${wetCoarse.toFixed(2)} km of road in water lie in (or a cell from) a closed coarse basin's lake`);
+  for (const wl of wetLen) wl.fill(0);
+  lakeCells = 0;
+  areaCells = 0;
+  wetVerts = 0;
+  allVerts = 0;
+  wetCoarse = 0;
+  wetVertsCoarse = 0;
+  lakeCoarse = 0;
   console.log(`CROSS KINDS R=${R}: ${JSON.stringify(Object.fromEntries(crossKinds))}`);
   crossKinds.clear();
   siteCount.fill(0);
@@ -568,6 +694,8 @@ function sheet(segs: SegmentPath[], lp: { x: number; y: number; a: number }[], f
     const tx = (n % cols) * T, ty = Math.floor(n / cols) * T;
     out.push(`<svg x="${tx}" y="${ty}" width="${T - 4}" height="${T - 4}" viewBox="${l.x - half} ${l.y - half} ${2 * half} ${2 * half}" style="background:#fbfaf5">`);
     out.push(`<rect x="${l.x - half}" y="${l.y - half}" width="${2 * half}" height="${2 * half}" fill="#fbfaf5" stroke="#999"/>`);
+    for (let wy = l.y - half; wy < l.y + half; wy += 8)
+      for (let wx = l.x - half; wx < l.x + half; wx += 8) if (waterAt(wx, wy) > 0) out.push(`<rect x="${wx - 4}" y="${wy - 4}" width="8" height="8" fill="#9cd3f0"/>`);
     for (const g of segs) {
       let near = false;
       for (let i = 0; i < g.xy.length && !near; i += 2) near = Math.abs(g.xy[i] - l.x) < half * 1.5 && Math.abs(g.xy[i + 1] - l.y) < half * 1.5;

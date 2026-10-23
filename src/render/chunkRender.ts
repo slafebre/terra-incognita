@@ -201,7 +201,7 @@ export function renderChunk({ cx, cy, dem, cover, water, streams, roads, sites, 
   // Plans may redraw roads through their settlements: theirs replace the network's.
   const redrawn = new Set(plans.flatMap((p) => p.replaced));
   const drawn = [...roads.filter((r) => !redrawn.has(r.key)), ...plans.flatMap((p) => p.roads)];
-  drawRoads(ctx, drawn, plans.flatMap((p) => p.streets), cx, cy, pxPerM, dpr);
+  drawRoads(ctx, drawn, plans.flatMap((p) => p.streets), cx, cy, pxPerM, dpr, water);
   drawChurches(ctx, plans, cx, cy, pxPerM, dpr);
   return canvas;
 }

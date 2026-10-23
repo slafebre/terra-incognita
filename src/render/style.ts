@@ -45,6 +45,8 @@ export const STYLE = {
     casingWidth: 0.65,
     track: 'rgb(70, 58, 52)',
     path: 'rgb(70, 58, 52)',
+    /** Bridges: parapet lines (CSS px) a gap away from the way's edge. */
+    bridge: { color: 'rgb(40, 34, 30)', deck: 'rgb(255, 255, 255)', gap: 0.8, line: 0.7 },
   },
   /** Settlement placeholders until buildings exist. */
   builtUp: 'rgba(196, 160, 150, 0.45)',

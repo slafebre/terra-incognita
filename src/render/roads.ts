@@ -147,12 +147,30 @@ export function drawChurches(ctx: Ctx, plans: TownPlan[], cx: number, cy: number
 /**
  * Roads: each fine segment is smoothed with its endpoints fixed (they're shared
  * waypoints), so segments drawn by neighbouring chunks meet exactly. All casings
- * go first, then fills from minor to major, so junctions merge cleanly.
+ * go first, then fills from minor to major, so junctions merge cleanly. Where a
+ * way crosses water (`water`: the chunk's lake depth per DEM vertex) it is drawn
+ * again on top as a bridge, with parapets either side.
  */
-export function drawRoads(ctx: Ctx, roads: SegmentPath[], streets: Street[], cx: number, cy: number, pxPerM: number, dpr: number): void {
+export function drawRoads(
+  ctx: Ctx,
+  roads: SegmentPath[],
+  streets: Street[],
+  cx: number,
+  cy: number,
+  pxPerM: number,
+  dpr: number,
+  water: Float32Array,
+): void {
   const paths = [new Path2D(), new Path2D(), new Path2D(), new Path2D(), new Path2D()];
   const streetPaths = [new Path2D(), new Path2D()];
   for (const s of streets) trace(streetPaths[s.cls], s.xy, cx, cy, pxPerM, 1);
+  const bridges = [new Path2D(), new Path2D(), new Path2D(), new Path2D(), new Path2D()];
+  /** Over water at chunk pixel (x, y)? Undefined beyond the DEM (another chunk draws that part). */
+  const wetAt = (x: number, y: number): boolean | undefined => {
+    const i = APRON + Math.round(x / pxPerM / CELL);
+    const j = APRON + Math.round(y / pxPerM / CELL);
+    return i < 0 || j < 0 || i >= DEM_W || j >= DEM_W ? undefined : water[j * DEM_W + i] > 0;
+  };
   const ox = cx * CHUNK;
   const oy = cy * CHUNK;
   for (const seg of roads) {
@@ -170,6 +188,21 @@ export function drawRoads(ctx: Ctx, roads: SegmentPath[], streets: Street[], cx:
     p.moveTo(xs[0], ys[0]);
     for (let i = 1; i < n - 1; i++) p.quadraticCurveTo(xs[i], ys[i], (xs[i] + xs[i + 1]) / 2, (ys[i] + ys[i + 1]) / 2);
     p.lineTo(xs[n - 1], ys[n - 1]);
+    // Bridges: runs over water, one vertex past either shore. Beyond the DEM the
+    // state carries on, so a bridge leaving the chunk isn't capped at its edge.
+    const wet: boolean[] = [];
+    for (let i = 0; i < n; i++) wet.push(wetAt(xs[i], ys[i]) ?? (i > 0 && wet[i - 1]));
+    for (let i = 0; i < n; i++) {
+      if (!wet[i]) continue;
+      let e = i;
+      while (e + 1 < n && wet[e + 1]) e++;
+      const s0 = Math.max(0, i - 1);
+      const e0 = Math.min(n - 1, e + 1);
+      const b = bridges[seg.cls];
+      b.moveTo(xs[s0], ys[s0]);
+      for (let k = s0 + 1; k <= e0; k++) b.lineTo(xs[k], ys[k]);
+      i = e;
+    }
   }
   const width = (cls: number) => Math.max(WIDTH_M[cls] * pxPerM, MIN_PX[cls] * dpr);
   const streetWidth = (cls: number) => Math.max(STREET_M[cls] * pxPerM, STREET_PX[cls] * dpr);
@@ -202,5 +235,31 @@ export function drawRoads(ctx: Ctx, roads: SegmentPath[], streets: Street[], cx:
     ctx.strokeStyle = STYLE.roads.fill[cls];
     ctx.lineWidth = width(cls);
     ctx.stroke(paths[cls]);
+  }
+  // Bridges, on top: parapets, the gap between them, then the way itself again.
+  const { gap, line } = STYLE.roads.bridge;
+  ctx.lineCap = 'butt';
+  for (const cls of [ROAD_P, ROAD_T, ROAD_C, ROAD_D, ROAD_N]) {
+    const b = bridges[cls];
+    const cased = cls <= ROAD_C;
+    const W = width(cls) + (cased ? 2 * STYLE.roads.casingWidth * dpr : 0);
+    ctx.strokeStyle = STYLE.roads.bridge.color;
+    ctx.lineWidth = W + 2 * (gap + line) * dpr;
+    ctx.stroke(b);
+    ctx.strokeStyle = STYLE.roads.bridge.deck;
+    ctx.lineWidth = W + 2 * gap * dpr;
+    ctx.stroke(b);
+    if (cased) {
+      ctx.strokeStyle = STYLE.roads.casing;
+      ctx.lineWidth = W;
+      ctx.stroke(b);
+      ctx.strokeStyle = STYLE.roads.fill[cls];
+    } else {
+      ctx.strokeStyle = cls === ROAD_T ? STYLE.roads.track : STYLE.roads.path;
+      if (cls === ROAD_P) ctx.setLineDash([4 * dpr, 3 * dpr]);
+    }
+    ctx.lineWidth = width(cls);
+    ctx.stroke(b);
+    ctx.setLineDash([]);
   }
 }
