@@ -126,6 +126,8 @@ interface Line {
   road: boolean;
   gen: number;
   style: Style | null;
+  /** Removed after growth (a stub). */
+  pruned?: boolean;
 }
 
 /** Debugging: why branches ended or were refused, summed over plans. */
@@ -214,7 +216,7 @@ export function planTown({ site, roads, patch: p }: PlanInput): TownPlan {
     wander: 0.12,
     ring: rank === TOWN ? 0.25 : 0.08,
     gens: rank === TOWN ? 4 : strung > 0.6 ? 1 : 2,
-    deadEnd: rank === TOWN ? 0.85 : 0.6,
+    deadEnd: rank === TOWN ? 0.55 : 0.6,
     depth: rank === TOWN ? 24 : 22,
     cls: STREET,
   };
@@ -545,7 +547,8 @@ export function planTown({ site, roads, patch: p }: PlanInput): TownPlan {
     }
   };
   let built = 0;
-  const streets: { li: number; cls: StreetClass }[] = [];
+  /** Streets grown: the line they start on (parent) and the one they end on (target, -1 for a dead end; -2 for both of a back lane). */
+  const streets: { li: number; cls: StreetClass; parent: number; target: number; stop: string; len: number }[] = [];
   const no = (k: string) => (planStats[k] = (planStats[k] ?? 0) + 1);
 
   /**
@@ -568,7 +571,7 @@ export function planTown({ site, roads, patch: p }: PlanInput): TownPlan {
     let len = 0;
     for (let i = 1; i < n; i++) len += Math.hypot(xs[i] - xs[i - 1], ys[i] - ys[i - 1]);
     const li = addLine(xs, ys, false, gen, st);
-    streets.push({ li, cls: st.cls });
+    streets.push({ li, cls: st.cls, parent: -2, target: -2, stop: 'link', len });
     built += len;
     no('LINK');
     return true;
@@ -712,6 +715,7 @@ export function planTown({ site, roads, patch: p }: PlanInput): TownPlan {
     const ys = [P.y];
     let len = 0;
     let joined = false;
+    let target = -1;
     let bridged = false;
     let failed = '';
     let stop = 'length';
@@ -803,6 +807,7 @@ export function planTown({ site, roads, patch: p }: PlanInput): TownPlan {
         ys.push(ny);
         len += Math.hypot(nx - x, ny - y);
         joined = true;
+        target = hit.li;
         break;
       }
       // Alongside another street without meeting it: stop short.
@@ -830,13 +835,40 @@ export function planTown({ site, roads, patch: p }: PlanInput): TownPlan {
     }
     no(joined ? 'JOINED' : `DEAD END (${stop})`);
     const li = addLine(xs, ys, false, parent.road ? 1 : parent.gen + 1, st);
-    streets.push({ li, cls: joined || st.cls === STREET ? st.cls : LANE });
+    streets.push({ li, cls: joined || st.cls === STREET ? st.cls : LANE, parent: c.li, target, stop, len });
     built += len;
     offer(li);
   }
 
+  // --- Pruning -----------------------------------------------------------------
+  // Short dead ends nothing hangs off read as clutter, and hill towns grow many (the
+  // slopes stop them early); in towns, so do stubs that stopped alongside another
+  // street. Leaves go first, repeatedly, as their parents may become leaves in turn.
+  const hilly = smoothstep(0.2, 0.7, R);
+  const stub = rank === TOWN ? lerp(60, 130, hilly) : lerp(40, 60, hilly);
+  const alive = streets.map(() => true);
+  for (let changed = true; changed; ) {
+    changed = false;
+    const hangers = new Map<number, number>();
+    streets.forEach((q, i) => {
+      if (!alive[i]) return;
+      hangers.set(q.parent, (hangers.get(q.parent) ?? 0) + 1);
+      if (q.target >= 0) hangers.set(q.target, (hangers.get(q.target) ?? 0) + 1);
+    });
+    streets.forEach((q, i) => {
+      if (!alive[i] || q.target !== -1 || hangers.get(q.li)) return;
+      if (q.len < stub || (rank === TOWN && q.stop === 'alongside' && q.len < 2 * stub)) {
+        alive[i] = false;
+        lines[q.li].pruned = true;
+        changed = true;
+        no('PRUNED');
+      }
+    });
+  }
+  const kept = streets.filter((_, i) => alive[i]);
+
   // --- Output ------------------------------------------------------------------
-  const out: Street[] = streets.map(({ li, cls }) => {
+  const out: Street[] = kept.map(({ li, cls }) => {
     const L = lines[li];
     const xy = new Float32Array(2 * L.xs.length);
     for (let i = 0; i < L.xs.length; i++) {
@@ -847,7 +879,7 @@ export function planTown({ site, roads, patch: p }: PlanInput): TownPlan {
   });
   const upgraded: Street[] = [];
   // Built-up land: along every street, and along roads near streets or the core.
-  const streetNear = (x: number, y: number) => nearest(x, y, 70, (li) => lines[li].road);
+  const streetNear = (x: number, y: number) => nearest(x, y, 70, (li) => lines[li].road || !!lines[li].pruned);
   const builtAt = (x: number, y: number) => {
     const d = zoneDist(x, y, true);
     return d < reach && Math.hypot(x - cx, y - cy) < hardReach && !wet(x, y) && (d < core * 0.8 || !!streetNear(x, y));
@@ -893,7 +925,7 @@ export function planTown({ site, roads, patch: p }: PlanInput): TownPlan {
 
   const frontage: { depth: number; xy: Float32Array }[] = [];
   // (Own copies: a plan's buffers are transferred from the worker, each once.)
-  streets.forEach(({ li }, i) => frontage.push({ depth: lines[li].style!.depth, xy: out[i].xy.slice() }));
+  kept.forEach(({ li }, i) => frontage.push({ depth: lines[li].style!.depth, xy: out[i].xy.slice() }));
   for (const u of upgraded) frontage.push({ depth: organic.depth, xy: u.xy.slice() });
   for (const L of lines) {
     if (!L.road) continue;
