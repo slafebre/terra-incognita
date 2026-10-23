@@ -180,18 +180,32 @@ export function planTown({ site, roads, patch: p }: PlanInput): TownPlan {
   const mount = smoothstep(0.35, 0.85, R);
   const size = (0.75 + 0.5 * rand()) * lerp(1, 0.6, mount);
   const core = rank === TOWN ? lerp(260, 340, rand()) * size : lerp(140, 200, rand()) * size;
-  const reach = Math.min(extent - 30, rank === TOWN ? lerp(650, 850, rand()) * size : core * 1.7);
+  const reach = Math.min(extent - 60, rank === TOWN ? lerp(650, 850, rand()) * size : core * 1.7);
   const budget = (rank === TOWN ? lerp(14000, 22000, rand()) : lerp(900, 2000, rand())) * size * size;
+  // Character. A village is clustered round its crossroads or strung out along its
+  // roads (more often in the mountains, where valleys are narrow). Every settlement
+  // leans one way: it grows further and denser there.
+  const strung = rank === VILLAGE ? Math.min(1, 0.85 * rand() + 0.4 * mount) : 0;
+  const roadStretch = lerp(1, 1.7, strung);
+  const lean = rand() * 2 * Math.PI;
+  const leanAmt = lerp(0.15, 0.45, rand());
+  /**
+   * Distance from the centre as the zones see it: shorter towards the lean, and
+   * along roads in a strung-out village.
+   */
+  const zoneDist = (x: number, y: number, road: boolean) =>
+    Math.hypot(x - cx, y - cy) / ((1 + leanAmt * Math.cos(Math.atan2(y - cy, x - cx) - lean)) * (road ? roadStretch : 1));
+  const hardReach = extent - 30;
 
   const organic: Style = {
     spacing: rank === TOWN ? 55 : 70,
     density: rank === TOWN ? 0.9 : 0.75,
     len: rank === TOWN ? [50, 160] : [50, 200],
-    jitter: 0.35,
+    jitter: rank === TOWN ? 0.35 : 0.6,
     steer: [-1, -0.5, -0.25, 0, 0.25, 0.5, 1],
     wander: 0.12,
-    ring: rank === TOWN ? 0.25 : 0.25,
-    gens: rank === TOWN ? 4 : 2,
+    ring: rank === TOWN ? 0.25 : 0.08,
+    gens: rank === TOWN ? 4 : strung > 0.6 ? 1 : 2,
     deadEnd: rank === TOWN ? 0.85 : 0.6,
     depth: rank === TOWN ? 24 : 22,
     cls: STREET,
@@ -510,15 +524,15 @@ export function planTown({ site, roads, patch: p }: PlanInput): TownPlan {
       let s = 15 + rand() * 40;
       while (s < total - 15) {
         const { x, y } = pointAt(li, s);
-        const d = Math.hypot(x - cx, y - cy);
-        const st = styleAt(d);
+        const d = zoneDist(x, y, L.road);
+        const st = Math.hypot(x - cx, y - cy) < hardReach ? styleAt(d) : null;
         if (!st) {
           s += 30;
           continue;
         }
         const fall = 1 - 0.6 * smoothstep(0, reach, d);
         if (rand() < st.density * fall) push({ li, s, side, prio: d * (0.75 + 0.5 * rand()) + 60 * L.gen, tries: 0 });
-        s += st.spacing * (0.75 + 0.5 * rand());
+        s += st.spacing * (0.6 + 0.8 * rand());
       }
     }
   };
@@ -589,8 +603,8 @@ export function planTown({ site, roads, patch: p }: PlanInput): TownPlan {
         return [-h.ty * s1, h.tx * s1];
       };
       // The end points: along each road a little, either way, for irregular plots.
-      const rA = r * (0.85 + 0.3 * rand());
-      const rB = r * (0.85 + 0.3 * rand());
+      const rA = r * (0.65 + 0.6 * rand());
+      const rB = r * (0.65 + 0.6 * rand());
       const P = (h: typeof A, rr: number) => {
         const L = lines[h.li];
         // Walk the line to radius rr near the hit.
@@ -611,7 +625,12 @@ export function planTown({ site, roads, patch: p }: PlanInput): TownPlan {
       const [nbx, nby] = into(B, A.x, A.y);
       const d = Math.hypot(bx - ax, by - ay);
       if (d < 50) continue;
-      const k = (gap > 2.4 ? 0.55 : 0.4) * d;
+      const k = (gap > 2.4 ? lerp(0.4, 0.65, rand()) : lerp(0.25, 0.5, rand())) * d;
+      // Uneven: a slow sideways sway along the lane (no two plots alike).
+      const w1 = lerp(-0.12, 0.18, rand()) * d;
+      const w2 = lerp(-0.1, 0.1, rand()) * d;
+      const ox = -(by - ay) / d;
+      const oy = (bx - ax) / d;
       const xs: number[] = [];
       const ys: number[] = [];
       const steps = Math.max(4, Math.ceil((1.3 * d) / STEP));
@@ -621,8 +640,9 @@ export function planTown({ site, roads, patch: p }: PlanInput): TownPlan {
         const b1 = 3 * u * (1 - u) ** 2;
         const b2 = 3 * u * u * (1 - u);
         const b3 = u ** 3;
-        xs.push(b0 * ax + b1 * (ax + nax * k) + b2 * (bx + nbx * k) + b3 * bx);
-        ys.push(b0 * ay + b1 * (ay + nay * k) + b2 * (by + nby * k) + b3 * by);
+        const sway = w1 * Math.sin(Math.PI * u) + w2 * Math.sin(2 * Math.PI * u);
+        xs.push(b0 * ax + b1 * (ax + nax * k) + b2 * (bx + nbx * k) + b3 * bx + ox * sway);
+        ys.push(b0 * ay + b1 * (ay + nay * k) + b2 * (by + nby * k) + b3 * by + oy * sway);
       }
       tryStreet(xs, ys, st, 1);
     }
@@ -631,7 +651,7 @@ export function planTown({ site, roads, patch: p }: PlanInput): TownPlan {
     ring(core, 0.9, { ...organic, cls: STREET });
     ring(core * 0.55, 0.6, organic);
   } else {
-    ring(core * lerp(0.55, 0.8, rand()), 0.65, organic);
+    ring(core * lerp(0.5, 0.85, rand()), lerp(0.8, 0.25, strung), organic);
   }
 
   for (let li = 0; li < lines.length; li++) offer(li);
@@ -641,7 +661,7 @@ export function planTown({ site, roads, patch: p }: PlanInput): TownPlan {
     const parent = lines[c.li];
     const P = pointAt(c.li, c.s);
     const d0 = Math.hypot(P.x - cx, P.y - cy);
-    const st = styleAt(d0);
+    const st = styleAt(zoneDist(P.x, P.y, parent.road));
     if (!st) {
       no('outside');
       continue;
@@ -726,7 +746,7 @@ export function planTown({ site, roads, patch: p }: PlanInput): TownPlan {
       a = ba;
       let nx = x + Math.cos(a) * STEP;
       let ny = y + Math.sin(a) * STEP;
-      if (Math.hypot(nx - cx, ny - cy) > reach) {
+      if (zoneDist(nx, ny, false) > reach || Math.hypot(nx - cx, ny - cy) > hardReach) {
         stop = 'reach';
         break;
       }
@@ -824,8 +844,8 @@ export function planTown({ site, roads, patch: p }: PlanInput): TownPlan {
     for (let i = 0; i < L.xs.length; i++) {
       const x = L.xs[i];
       const y = L.ys[i];
-      const d = Math.hypot(x - cx, y - cy);
-      if (d < reach && !wet(x, y) && (d < core * 0.8 || streetNear(x, y))) run.push(x, y);
+      const d = zoneDist(x, y, true);
+      if (d < reach && Math.hypot(x - cx, y - cy) < hardReach && !wet(x, y) && (d < core * 0.8 || streetNear(x, y))) run.push(x, y);
       else flush();
     }
     flush();
