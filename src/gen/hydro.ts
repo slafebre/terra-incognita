@@ -732,7 +732,7 @@ const LAKE_GRID_MARGIN = 8;
 const LAKE_DEEP = 10;
 const LAKE_MAX_CELLS = 24;
 /** Coarse lakes end where the coarse surface comes within this of their level (m). */
-const LAKE_SHORE_DROP = 0.5;
+export const LAKE_SHORE_DROP = 0.5;
 /** Fine depressions are breached where that cuts at most this deep (m). */
 const BREACH_FINE_DEPTH = 4;
 /** Fall of a breach channel per cell (m). */

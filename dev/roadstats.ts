@@ -572,6 +572,7 @@ for (const R of REGIONS) {
         areaCells++;
         if (wv > 0) lakeCells++;
         if (wv > 0 && coarseLakeAt(x, y)) lakeCoarse++;
+        if (process.env.COARSELOG && wv > 0 && coarseLakeAt(x, y) && x % 512 === area.x0 % 512 && y % 512 === area.y0 % 512) console.log(`  coarse lake at ?at=${x},${y}`);
       }
     if (process.env.WETLOG) for (const w of wetMarks) console.log(`  wet run ${w.a.toFixed(0)} m at ?at=${Math.round(w.x)},${Math.round(w.y)}`);
     if (process.env.WET && wetMarks.length) sheet(segs, wetMarks.splice(0), `${process.env.WET}-R${R}-${a}.svg`);

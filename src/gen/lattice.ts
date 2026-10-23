@@ -3,6 +3,7 @@ import { hash3 } from '../lib/hash';
 import { MinHeap } from '../lib/heap';
 import { smoothstep } from '../lib/noise';
 import { type CoarseField, DX, DY, NODE } from './hydro';
+import { lakesOf } from './lakes';
 import {
   MAX_GRADE,
   MAX_LEN,
@@ -32,7 +33,8 @@ import type { Terrain } from './terrain';
  *  1. Edge costs per road class: length, a soft penalty for slope against the
  *     class's limit (judged on the coarse surface over 500 m: at the scale of one
  *     edge it does not predict the map's slopes), cheaper on valley floors, a small
- *     bridge charge across streams, plus a fixed tie-break so best paths are unique.
+ *     bridge charge across streams, dear across the lakes of closed coarse basins
+ *     (lakes.ts), plus a fixed tie-break so best paths are unique.
  *  2. Main roads: for each town pair (N) and village pair (D) of the relative-
  *     neighbourhood graphs, the cheapest path inside a fixed corridor around the
  *     pair, turns costing a little. The corridor makes it the same in every cell.
@@ -182,7 +184,7 @@ function verticesIn(r: { x0: number; y0: number; x1: number; y1: number }): numb
 const edgeKey = (u: number, v: number) => (u < v ? `${u}_${v}` : `${v}_${u}`);
 
 /** Terrain at vertices, cached per field. */
-const vertexCache = new WeakMap<CoarseField, Map<number, { x: number; y: number; z: number; area: number; valley: number }>>();
+const vertexCache = new WeakMap<CoarseField, Map<number, { x: number; y: number; z: number; area: number; valley: number; wet: boolean }>>();
 function vdata(field: CoarseField, v: number) {
   let m = vertexCache.get(field);
   if (!m) vertexCache.set(field, (m = new Map()));
@@ -190,7 +192,7 @@ function vdata(field: CoarseField, v: number) {
   if (!d) {
     const [x, y] = vertexPos(v);
     const area = field.area(x, y);
-    d = { x, y, z: field.z(x, y), area, valley: smoothstep(VALLEY_AREA[0], VALLEY_AREA[1], area) };
+    d = { x, y, z: field.z(x, y), area, valley: smoothstep(VALLEY_AREA[0], VALLEY_AREA[1], area), wet: lakesOf(field).wet(x, y) };
     m.set(v, d);
   }
   return d;
@@ -254,6 +256,11 @@ const SLOPE_CAP = 6;
 /** Crossing a stream draining more than BRIDGE_AREA km² costs a bridge (m), more for a river. */
 const BRIDGE_AREA = 1;
 const BRIDGE_COST = 40;
+/** Coarse lakes: water costs LAKE_W × its length, plus LAKE_BRIDGE (m) per crossing (as the
+ * fine routing, which goes round lakes the network can't see). Sampled at LAKE_SAMPLES points. */
+const LAKE_W = 12;
+const LAKE_BRIDGE = 150;
+const LAKE_SAMPLES = 5;
 function edgeCostRaw(field: CoarseField, u: number, v: number, cls: RoadClass): number {
   const a = vdata(field, u);
   const b = vdata(field, v);
@@ -262,6 +269,15 @@ function edgeCostRaw(field: CoarseField, u: number, v: number, cls: RoadClass): 
   let c = len * Math.min(SLOPE_CAP, 1 + SLOPE_W * (g / MAX_GRADE[cls]) ** 2);
   if (stream > BRIDGE_AREA) c += BRIDGE_COST * (1 + Math.log10(stream / BRIDGE_AREA));
   c *= 1 - (VALLEY_BONUS * (a.valley + b.valley)) / 2;
+  // Water under the edge (after the valley discount: lakes lie on valley floors).
+  // An edge leaving the shore pays half a crossing.
+  const lakes = lakesOf(field);
+  let wet = (a.wet ? 1 : 0) + (b.wet ? 1 : 0);
+  for (let s = 1; s < LAKE_SAMPLES - 1; s++) {
+    const t = s / (LAKE_SAMPLES - 1);
+    if (lakes.wet(a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t)) wet++;
+  }
+  if (wet) c += (len * LAKE_W * wet) / LAKE_SAMPLES + (wet < LAKE_SAMPLES ? LAKE_BRIDGE / 2 : 0);
   const lo = Math.min(u, v);
   const hi = Math.max(u, v);
   c *= 1 + 0.01 * (hash3(hash3(0x7e1d9, vi(lo), vj(lo)), vi(hi), vj(hi)) / 4294967296);
@@ -661,7 +677,7 @@ export function latticeCell(gx: number, gy: number, field: CoarseField, set: Set
       const gy = field.z(p.x, p.y + 250) - field.z(p.x, p.y - 250);
       const thin = 1 - TRACK_THIN * smoothstep(TRACK_THIN_SLOPE[0], TRACK_THIN_SLOPE[1], Math.hypot(gx, gy) / 500);
       if (hash3(0x7ac4, vi(v), vj(v)) / 4294967296 >= TRACK_DENSITY * thin) continue;
-      if (p.z > TRACK_ALT || roadPts.near(p.x, p.y, TRACK_GAP).length) continue;
+      if (p.z > TRACK_ALT || roadPts.near(p.x, p.y, TRACK_GAP).length || p.wet) continue;
       if (neighbours(v).some((w) => edgeGrade(field, v, w) > TRACK_STEEP)) continue;
       seeds.push(v);
     }

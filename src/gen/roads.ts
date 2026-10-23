@@ -1,4 +1,5 @@
-import { COARSE_REACH } from './hydro';
+import { COARSE_REACH, LAKE_REACH } from './hydro';
+import { LAKE_TILE } from './lakes';
 import { COARSE_KEEP_EXTRA } from './seeds';
 import type { Site } from './settle';
 
@@ -12,12 +13,15 @@ import type { Site } from './settle';
 export const NET_CELL = 8192;
 /**
  * How far around a net cell the coarse terrain is consulted (m): the main-road
- * corridors that reach the cell's stages and the sites deciding them (SITE_REACH),
- * plus the coarse surface's own reach. Coarse seeds are kept accordingly
- * (COARSE_KEEP_EXTRA).
+ * corridors that reach the cell's stages and the sites deciding them (SITE_REACH);
+ * coarse lakes are tested within LAKE_TEST_REACH (main-road corridors, and the
+ * villages deciding the cell's D roads; towns ignore lakes), and each test reads
+ * the surface up to LAKE_TILE + LAKE_REACH further (lakes.ts); plus the coarse
+ * surface's own reach. Coarse seeds are kept accordingly (COARSE_KEEP_EXTRA).
  */
 const SITE_REACH = 35500;
-export const NET_REACH = SITE_REACH + COARSE_REACH;
+const LAKE_TEST_REACH = 30000;
+export const NET_REACH = Math.max(SITE_REACH, LAKE_TEST_REACH + LAKE_TILE + LAKE_REACH) + COARSE_REACH;
 if (NET_REACH + 4000 > COARSE_KEEP_EXTRA) throw new Error('coarse seeds are not kept as far as net cells read them');
 
 export const ROAD_N = 0;

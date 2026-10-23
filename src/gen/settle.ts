@@ -1,6 +1,7 @@
 import { hash3 } from '../lib/hash';
 import { lerp, smoothstep } from '../lib/noise';
 import type { CoarseField } from './hydro';
+import { lakesOf } from './lakes';
 import type { Lattice, SeedView } from './seeds';
 import type { Terrain } from './terrain';
 
@@ -14,7 +15,7 @@ import type { Terrain } from './terrain';
  * site. Every rule is local, so any worker evaluating any chunk agrees.
  *
  * Suitability comes from the coarse eroded surface: flat ground, valley floors
- * near rivers, not too high up.
+ * near rivers, not too high up, and not in a lake.
  */
 
 export const TOWN = 0;
@@ -53,6 +54,12 @@ export function spacing(rank: Rank, R: number): number {
 
 /** Built-up radius (m) used for placeholders and clearing land around a site. */
 export const SITE_RADIUS = [320, 130, 45, 15];
+/**
+ * A site keeps its built-up area, and at least this much (m: its nearest lattice
+ * vertex), clear of coarse lakes. Towns don't look: they are decided too far away
+ * (roads.ts, NET_REACH), and a lake (at most 3 km across) rarely takes one.
+ */
+const LAKE_CLEAR = 120;
 
 interface Candidate {
   x: number;
@@ -102,7 +109,17 @@ export class Settlements {
     const D = 512;
     const tpi = z - (f.zNearest(x + D, y) + f.zNearest(x - D, y) + f.zNearest(x, y + D) + f.zNearest(x, y - D)) / 4;
     const low = 1 - 0.75 * smoothstep(2, 30, tpi);
-    return { suit: flat * (0.35 + 0.65 * river) * alt * low, z, R };
+    // Not in a lake, nor with the built-up area (or the road's vertex) in one.
+    const lakes = lakesOf(f);
+    const r = Math.max(SITE_RADIUS[rank], LAKE_CLEAR);
+    // (Only where the site would qualify otherwise: most places don't, and lake tests are dear.)
+    const suit = flat * (0.35 + 0.65 * river) * alt * low;
+    let dry = true;
+    if (rank !== TOWN && suit >= MIN_SUIT[rank]) {
+      dry = !lakes.wet(x, y);
+      for (let k = 0; k < 8 && dry; k++) dry = !lakes.wet(x + r * Math.cos((k * Math.PI) / 4), y + r * Math.sin((k * Math.PI) / 4));
+    }
+    return { suit: dry ? suit : 0, z, R };
   }
 
   private candidate(rank: Rank, i: number, j: number): Candidate | null {
