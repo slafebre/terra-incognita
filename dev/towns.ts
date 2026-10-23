@@ -114,7 +114,7 @@ function svg({ input, plan: p }: { input: PlanInput; plan: TownPlan }): string {
     s += `<path d="${d}" fill="none" stroke="rgba(190,120,60,${lev % 25 ? 0.35 : 0.6})" stroke-width="${lev % 25 ? 1.2 : 2.4}"/>`;
   }
   // Roads (the plan's replacing the network's): casings, then fills.
-  const redrawn = new Set(p.roads.map((r) => r.key));
+  const redrawn = new Set(p.replaced);
   const all = [...input.roads.filter((r) => !redrawn.has(r.key)), ...p.roads];
   const roads = all.filter((r) => r.cls <= 2).sort((a, b) => b.cls - a.cls);
   for (const r of all.filter((r) => r.cls > 2))

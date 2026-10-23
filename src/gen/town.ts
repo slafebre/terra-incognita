@@ -2,7 +2,7 @@ import { hash1, hash3, rng } from '../lib/hash';
 import { lerp, smoothstep } from '../lib/noise';
 import { NODE } from './hydro';
 import { nearestVertex, vertexPos } from './lattice';
-import { ROAD_C, type RoadPatch, type SegmentPath } from './roads';
+import { ROAD_C, ROAD_P, ROAD_T, type RoadPatch, type SegmentPath } from './roads';
 import { TOWN, VILLAGE, type Rank, type Site } from './settle';
 
 /**
@@ -47,7 +47,9 @@ export interface TownPlan {
   x: number;
   y: number;
   streets: Street[];
-  /** Road segments the plan redraws, replacing the roads stage's (same keys). */
+  /** Keys of the network's segments the plan redraws (or drops): chunks draw `roads` instead. */
+  replaced: string[];
+  /** The plan's road pieces (a redrawn segment may become several, keeping its key, or none). */
   roads: SegmentPath[];
   /** Built-up land: a strip `depth` m each side of each polyline. */
   frontage: { depth: number; xy: Float32Array }[];
@@ -90,6 +92,8 @@ const STEP = 12;
 const SNAP = 20;
 /** Streets keep at least this far apart where they don't meet (m). */
 const GAP = 26;
+/** Tracks and footpaths become streets along built-up runs at least this long (m). */
+const UPGRADE_MIN = 30;
 /** Attempts per branch point. */
 const RETRIES = 2;
 /** Branches leave at least this far from other junctions on their parent (m). */
@@ -829,11 +833,56 @@ export function planTown({ site, roads, patch: p }: PlanInput): TownPlan {
     }
     return { cls, xy };
   });
-  // Frontage: every street, and road stretches near streets or the core.
+  const upgraded: Street[] = [];
+  // Built-up land: along every street, and along roads near streets or the core.
+  const streetNear = (x: number, y: number) => nearest(x, y, 70, (li) => lines[li].road);
+  const builtAt = (x: number, y: number) => {
+    const d = zoneDist(x, y, true);
+    return d < reach && Math.hypot(x - cx, y - cy) < hardReach && !wet(x, y) && (d < core * 0.8 || !!streetNear(x, y));
+  };
+
+  // Tracks and footpaths through built-up land are residential streets there: the
+  // plan redraws those segments, built-up runs as streets and the rest as before.
+  const replaced = new Set(redrawn.map((q) => q.key));
+  const roadsOut = [...redrawn];
+  for (const q of net) {
+    if (q.cls !== ROAD_T && q.cls !== ROAD_P) continue;
+    const n = q.xy.length / 2;
+    const inside: boolean[] = [];
+    for (let i = 0; i < n; i++) inside.push(builtAt(q.xy[2 * i], q.xy[2 * i + 1]));
+    // Built-up runs shorter than UPGRADE_MIN stay tracks (a corner clipped at the edge).
+    for (let i = 0; i < n; ) {
+      if (!inside[i]) {
+        i++;
+        continue;
+      }
+      let j = i;
+      while (j + 1 < n && inside[j + 1]) j++;
+      let len = 0;
+      for (let k = i + 1; k <= j; k++) len += Math.hypot(q.xy[2 * k] - q.xy[2 * k - 2], q.xy[2 * k + 1] - q.xy[2 * k - 1]);
+      if (len < UPGRADE_MIN) for (let k = i; k <= j; k++) inside[k] = false;
+      i = j + 1;
+    }
+    if (!inside.some(Boolean)) continue;
+    replaced.add(q.key);
+    // Split into runs sharing their boundary points, so the pieces still meet.
+    let start = 0;
+    for (let i = 1; i <= n; i++) {
+      if (i < n && inside[i] === inside[start]) continue;
+      const end = Math.min(i, n - 1);
+      const xy = q.xy.slice(2 * start, 2 * end + 2);
+      if (xy.length >= 4) {
+        if (inside[start]) upgraded.push({ cls: STREET, xy }), no(`UPGRADED ${q.cls === ROAD_T ? "track" : "path"}`);
+        else roadsOut.push({ key: q.key, cls: q.cls, xy });
+      }
+      start = end;
+    }
+  }
+
   const frontage: { depth: number; xy: Float32Array }[] = [];
   // (Own copies: a plan's buffers are transferred from the worker, each once.)
   streets.forEach(({ li }, i) => frontage.push({ depth: lines[li].style!.depth, xy: out[i].xy.slice() }));
-  const streetNear = (x: number, y: number) => nearest(x, y, 70, (li) => lines[li].road);
+  for (const u of upgraded) frontage.push({ depth: organic.depth, xy: u.xy.slice() });
   for (const L of lines) {
     if (!L.road) continue;
     let run: number[] = [];
@@ -842,16 +891,22 @@ export function planTown({ site, roads, patch: p }: PlanInput): TownPlan {
       run = [];
     };
     for (let i = 0; i < L.xs.length; i++) {
-      const x = L.xs[i];
-      const y = L.ys[i];
-      const d = zoneDist(x, y, true);
-      if (d < reach && Math.hypot(x - cx, y - cy) < hardReach && !wet(x, y) && (d < core * 0.8 || streetNear(x, y))) run.push(x, y);
+      if (builtAt(L.xs[i], L.ys[i])) run.push(L.xs[i], L.ys[i]);
       else flush();
     }
     flush();
   }
+  return {
+    id: site.id,
+    rank,
+    x: cx,
+    y: cy,
+    streets: [...out, ...upgraded],
+    replaced: [...replaced],
     // (Copies: transferred separately from the inputs.)
-  return { id: site.id, rank, x: cx, y: cy, streets: out, roads: redrawn.map((q) => ({ ...q, xy: q.xy.slice() })), frontage };
+    roads: roadsOut.map((q) => ({ ...q, xy: q.xy.slice() })),
+    frontage,
+  };
 }
 
 function angDiff(a: number, b: number): number {
