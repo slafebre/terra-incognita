@@ -94,14 +94,17 @@ const SNAP = 20;
 const GAP = 26;
 /** Tracks and footpaths become streets along built-up runs at least this long (m). */
 const UPGRADE_MIN = 30;
+/** Extra rounds of branch points once the first run out. */
+const REFILL = 3;
 /** Attempts per branch point. */
 const RETRIES = 2;
 /** Branches leave at least this far from other junctions on their parent (m). */
 const BLOCK = 42;
 /** Junction angles below this are refused (rad). */
 const MIN_ANGLE = (32 * Math.PI) / 180;
-/** Gradient limit for streets (soft above SOFT, refused above HARD × it). */
-const GRADE = 0.14;
+/** Gradient limit for streets (soft, refused above HARD × it): steeper in towns and hill country. */
+const GRADE = [0.16, 0.14];
+const GRADE_HILL = 0.06;
 const HARD = 1.6;
 /** Drainage area (km²) above which a street won't cross; below it a stream is bridged at most once. */
 const RIVER_A = 3;
@@ -200,6 +203,7 @@ export function planTown({ site, roads, patch: p }: PlanInput): TownPlan {
   const zoneDist = (x: number, y: number, road: boolean) =>
     Math.hypot(x - cx, y - cy) / ((1 + leanAmt * Math.cos(Math.atan2(y - cy, x - cx) - lean)) * (road ? roadStretch : 1));
   const hardReach = extent - 30;
+  const grade = GRADE[rank] + GRADE_HILL * smoothstep(0.2, 0.7, R);
 
   const organic: Style = {
     spacing: rank === TOWN ? 55 : 70,
@@ -556,7 +560,7 @@ export function planTown({ site, roads, patch: p }: PlanInput): TownPlan {
     for (let i = 1; i < n; i++) {
       if (wet(xs[i], ys[i]) || areaAt(xs[i], ys[i]) > RIVER_A) return no('link: water'), false;
       const L = Math.hypot(xs[i] - xs[i - 1], ys[i] - ys[i - 1]);
-      if (Math.abs(zAt(xs[i], ys[i]) - zAt(xs[i - 1], ys[i - 1])) > HARD * GRADE * L) steep++;
+      if (Math.abs(zAt(xs[i], ys[i]) - zAt(xs[i - 1], ys[i - 1])) > HARD * grade * L) steep++;
       if (crossing(xs[i - 1], ys[i - 1], xs[i], ys[i], nearEnd)) return no('link: crosses'), false;
       if (i < n - 1 && nearest(xs[i], ys[i], GAP, nearEnd)) return no('link: alongside'), false;
     }
@@ -660,7 +664,15 @@ export function planTown({ site, roads, patch: p }: PlanInput): TownPlan {
 
   for (let li = 0; li < lines.length; li++) offer(li);
 
-  while (heap.length && built < budget) {
+  let rounds = 0;
+  while (built < budget) {
+    // Out of branch points with budget left: offer every street again, at fresh
+    // places (towns fill in their blocks this way).
+    if (!heap.length) {
+      if (rounds++ >= REFILL) break;
+      for (let li = 0; li < lines.length; li++) offer(li);
+      if (!heap.length) break;
+    }
     const c = pop();
     const parent = lines[c.li];
     const P = pointAt(c.li, c.s);
@@ -736,8 +748,8 @@ export function planTown({ site, roads, patch: p }: PlanInput): TownPlan {
         const ny = y + Math.sin(na) * STEP;
         if (wet(nx, ny)) continue;
         const g = Math.abs(zAt(nx, ny) - z) / STEP;
-        let cost = (g / GRADE) ** 2 + 0.6 * Math.abs(angDiff(na, want)) + 0.15 * Math.abs(da);
-        if (g > HARD * GRADE) cost += 50;
+        let cost = (g / grade) ** 2 + 0.6 * Math.abs(angDiff(na, want)) + 0.15 * Math.abs(da);
+        if (g > HARD * grade) cost += 50;
         if (cost < best) {
           best = cost;
           ba = na;
