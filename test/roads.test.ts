@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { CoarseField } from '../src/gen/hydro';
-import { NET_CELL, NET_REACH, netCell } from '../src/gen/roads';
+import { LATTICE, latticeCell, nearestVertex, vertexPos } from '../src/gen/lattice';
+import { NET_CELL, NET_REACH } from '../src/gen/roads';
 import { SeedStore, SeedView } from '../src/gen/seeds';
 import { Settlements } from '../src/gen/settle';
 import { Terrain } from '../src/gen/terrain';
@@ -14,18 +15,33 @@ describe('settlements and road network', () => {
     const field = new CoarseField(t, view);
     const set = new Settlements(field, t, view);
     const t0 = performance.now();
-    const cell = netCell(0, 0, field, set);
+    const cell = latticeCell(0, 0, field, set, t);
     const ms = performance.now() - t0;
-    const byRank = [0, 0, 0];
+    const byRank = [0, 0, 0, 0];
     for (const s of cell.sites) byRank[s.rank]++;
-    const byCls = [0, 0, 0];
-    for (const e of cell.edges) byCls[e.cls]++;
-    const len = cell.edges.reduce((a, e) => a + e.route.length / 2, 0);
-    console.log(`sites town/village/hamlet ${byRank.join('/')}, edges N/D/C ${byCls.join('/')} (shortcuts ${cell.edges.filter((e) => e.id.includes('~')).length}), waypoints ${len}, ${ms.toFixed(0)} ms`);
-    // A second cell reuses cached tiles.
+    const km = [0, 0, 0, 0, 0];
+    for (const e of cell.edges) km[e.cls] += Math.hypot(e.route[2] - e.route[0], e.route[3] - e.route[1]) / 1000;
+    console.log(
+      `sites town/village/hamlet/farm ${byRank.join('/')}, km N/D/C/track/path ${km.map((k) => k.toFixed(1)).join('/')}, ${ms.toFixed(0)} ms`,
+    );
+    // A second cell reuses cached tiles and paths.
     const t1 = performance.now();
-    netCell(1, 0, field, set);
+    latticeCell(1, 0, field, set, t);
     console.log(`neighbour cell ${(performance.now() - t1).toFixed(0)} ms`);
+
+    // Every edge is a lattice edge, listed once.
+    const keys = new Set<string>();
+    for (const e of cell.edges) {
+      expect(keys.has(e.id)).toBe(false);
+      keys.add(e.id);
+      expect(Math.hypot(e.route[2] - e.route[0], e.route[3] - e.route[1])).toBeLessThan(1.7 * LATTICE);
+    }
+    // Every site well inside the cell is on the network (its nearest vertex is used).
+    const used = new Set<string>();
+    for (const e of cell.edges) used.add(`${e.route[0]},${e.route[1]}`).add(`${e.route[2]},${e.route[3]}`);
+    const inner = cell.sites.filter((s) => s.x > 400 && s.y > 400 && s.x < NET_CELL - 400 && s.y < NET_CELL - 400);
+    const unreached = inner.filter((s) => !used.has(vertexPos(nearestVertex(s.x, s.y)).join(',')));
+    expect(unreached.length).toBe(0);
     const hist = new Array(10).fill(0);
     let Rsum = 0;
     for (let j = 0; j < 40; j++)
@@ -38,6 +54,5 @@ describe('settlements and road network', () => {
       }
     console.log(`village suitability deciles: ${hist.join(' ')}  meanR ${(Rsum / 1600).toFixed(2)}`);
     expect(cell.sites.length).toBeGreaterThan(0);
-    // Every owned site of rank village or hamlet has at least one edge from somewhere nearby.
   }, 120_000);
 });

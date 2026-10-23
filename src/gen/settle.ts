@@ -20,7 +20,9 @@ import type { Terrain } from './terrain';
 export const TOWN = 0;
 export const VILLAGE = 1;
 export const HAMLET = 2;
-export type Rank = typeof TOWN | typeof VILLAGE | typeof HAMLET;
+/** Isolated farmsteads: no built-up area to speak of, but they need a road. */
+export const FARM = 3;
+export type Rank = typeof TOWN | typeof VILLAGE | typeof HAMLET | typeof FARM;
 
 export interface Site {
   /** Stable id: rank and lattice cell. */
@@ -34,22 +36,23 @@ export interface Site {
 }
 
 /** Candidate lattice spacing (m) per rank. */
-const LATTICE = [3000, 900, 350];
+const LATTICE = [3000, 900, 350, 200];
 /** Minimum suitability per rank. */
-const MIN_SUIT = [0.3, 0.15, 0.06];
+const MIN_SUIT = [0.3, 0.15, 0.06, 0.08];
 /** Keep-out distance from higher-ranked sites (m). */
-const EXCLUDE = [0, 1700, 550];
-const SALT = [0x70776e, 0x76696c, 0x68616d];
+const EXCLUDE = [0, 1700, 550, 0]; // farms: see isSite
+const SALT = [0x70776e, 0x76696c, 0x68616d, 0x666172];
 
 /** Spacing radius (m) for rank at region R: sparser in the mountains. */
 export function spacing(rank: Rank, R: number): number {
   if (rank === TOWN) return 6500;
   if (rank === VILLAGE) return lerp(1900, 3400, smoothstep(0.15, 0.95, R));
-  return lerp(650, 1100, smoothstep(0.3, 0.95, R));
+  if (rank === HAMLET) return lerp(650, 1100, smoothstep(0.3, 0.95, R));
+  return lerp(280, 600, smoothstep(0.3, 0.95, R));
 }
 
 /** Built-up radius (m) used for placeholders and clearing land around a site. */
-export const SITE_RADIUS = [320, 130, 45];
+export const SITE_RADIUS = [320, 130, 45, 15];
 
 interface Candidate {
   x: number;
@@ -89,7 +92,9 @@ export class Settlements {
     const tol = lerp(0.08, 0.3, smoothstep(0.2, 0.9, R));
     const flat = Math.exp(-((slope / tol) ** 2));
     // Towns want real rivers; villages and hamlets are happy with streams.
-    const river = rank === TOWN ? smoothstep(3, 80, A) : rank === VILLAGE ? smoothstep(0.3, 10, A) : smoothstep(0.1, 2, A);
+    // Farms care least: a spring or a well will do.
+    const river =
+      rank === TOWN ? smoothstep(3, 80, A) : rank === VILLAGE ? smoothstep(0.3, 10, A) : rank === HAMLET ? smoothstep(0.1, 2, A) : 0.6;
     // Too high to live (alpine villages stay in the valleys).
     const alt = 1 - smoothstep(1450, 1850, z);
     // Topographic position: broad hilltops look flat at 256 m too; prefer valleys.
@@ -152,7 +157,8 @@ export class Settlements {
       // Keep away from higher-ranked sites.
       for (let hr = 0; hr < rank && ok; hr++) {
         const H = LATTICE[hr];
-        const ex = EXCLUDE[rank];
+        // Farms only keep out of the built-up area (plus a field or two).
+        const ex = rank === FARM ? SITE_RADIUS[hr] + 250 : EXCLUDE[rank];
         const n2 = Math.ceil(ex / H) + 1;
         const ci = Math.floor(c.x / H);
         const cj = Math.floor(c.y / H);

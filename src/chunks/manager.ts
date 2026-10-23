@@ -11,7 +11,8 @@ import {
   type HydroWindow,
   type PreResult,
 } from '../gen/hydro';
-import { NET_CELL, NET_REACH, ownedSegments, ROAD_PAD, type NetCell, type RoadEdge, type RoadPatch, type SegmentPath } from '../gen/roads';
+import { latticeSegments } from '../gen/lattice';
+import { NET_CELL, NET_REACH, ROAD_PAD, type NetCell, type RoadEdge, type RoadPatch, type SegmentPath } from '../gen/roads';
 import { expand, intersects, SeedStore, type Rect } from '../gen/seeds';
 import type { Site } from '../gen/settle';
 import type { TaskRunner } from '../worker/pool';
@@ -63,8 +64,12 @@ export function forChunksIn(r: Rect, f: (cx: number, cy: number) => void): void 
 }
 
 const PRE_BATCH = 8;
-/** Longest road edge (m): net cells this far around a chunk can route roads through it. */
-const EDGE_REACH = 9000 + CHUNK;
+/**
+ * Net cells this far around a chunk (m) own edges it needs: those it draws (owned by
+ * the cell holding their midpoint; lattice edges are short) and their neighbours,
+ * for smooth joins and clearance.
+ */
+const EDGE_REACH = 1000;
 /** Sites within this distance matter to a chunk's land cover and placeholders (m). */
 const SITE_REACH = 1600;
 
@@ -399,7 +404,7 @@ export class ChunkManager {
           kind,
           cx: c.cx,
           cy: c.cy,
-          segments: ownedSegments(this.edgesNear(chunkRect(c.cx, c.cy)), c.cx, c.cy),
+          segments: latticeSegments(this.edgesNear(chunkRect(c.cx, c.cy)), c.cx, c.cy),
           patch: this.roadPatch(c),
         };
         break;
