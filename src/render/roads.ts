@@ -1,4 +1,5 @@
-import { CHUNK } from '../lib/constants';
+import { APRON, CELL, CHUNK, DEM_W } from '../lib/constants';
+import { COVER, COVER_SCALE } from '../gen/landcover';
 import { smoothPolyline } from '../lib/polyline';
 import { ROAD_C, ROAD_D, ROAD_N, ROAD_P, ROAD_T, type SegmentPath } from '../gen/roads';
 import { SITE_RADIUS, VILLAGE, type Site } from '../gen/settle';
@@ -54,6 +55,56 @@ export function drawBuiltUp(ctx: Ctx, plans: TownPlan[], cx: number, cy: number,
   ctx.globalAlpha = STYLE.builtUpAlpha;
   ctx.drawImage(layer, 0, 0);
   ctx.restore();
+}
+
+/** Cover cleared under built-up land, and this many metres beyond its edge (a soft margin). */
+const CLEAR_EDGE = 6;
+/** Classes built-up land replaces: woods, vines, marsh and heath (not rock or ice). */
+const CLEARED = [COVER.forest, COVER.vineyard, COVER.wetland, COVER.heath];
+
+/**
+ * Clears the cover fields (in place) under the built-up strips of the plans, so
+ * no trees or vines show through: each field is held below the signed distance
+ * to the strip's edge.
+ */
+export function clearUnderBuiltUp(cover: Int8Array, plans: TownPlan[], cx: number, cy: number): void {
+  const N = DEM_W * DEM_W;
+  const ox = cx * CHUNK - APRON * CELL;
+  const oy = cy * CHUNK - APRON * CELL;
+  // Signed distance (m) to the nearest strip's edge, where within reach.
+  const dist = new Float32Array(N).fill(Infinity);
+  for (const pl of plans)
+    for (const f of pl.frontage) {
+      const reach = f.depth + CLEAR_EDGE;
+      for (let k = 2; k < f.xy.length; k += 2) {
+        const ax = f.xy[k - 2] - ox;
+        const ay = f.xy[k - 1] - oy;
+        const dx = f.xy[k] - ox - ax;
+        const dy = f.xy[k + 1] - oy - ay;
+        const i0 = Math.max(0, Math.floor((Math.min(ax, ax + dx) - reach) / CELL));
+        const i1 = Math.min(DEM_W - 1, Math.ceil((Math.max(ax, ax + dx) + reach) / CELL));
+        const j0 = Math.max(0, Math.floor((Math.min(ay, ay + dy) - reach) / CELL));
+        const j1 = Math.min(DEM_W - 1, Math.ceil((Math.max(ay, ay + dy) + reach) / CELL));
+        if (i0 > i1 || j0 > j1) continue;
+        const l2 = dx * dx + dy * dy || 1e-9;
+        for (let j = j0; j <= j1; j++)
+          for (let i = i0; i <= i1; i++) {
+            const px = i * CELL - ax;
+            const py = j * CELL - ay;
+            const t = Math.max(0, Math.min(1, (px * dx + py * dy) / l2));
+            const d = Math.hypot(px - t * dx, py - t * dy) - f.depth;
+            const o = j * DEM_W + i;
+            if (d < dist[o]) dist[o] = d;
+          }
+      }
+    }
+  for (let o = 0; o < N; o++) {
+    const d = dist[o];
+    if (d >= CLEAR_EDGE) continue;
+    // 0 at the soft margin's outer edge, negative inside: the class ends there.
+    const v = Math.round(Math.max(-127, ((d - CLEAR_EDGE) / CLEAR_EDGE) * COVER_SCALE));
+    for (const c of CLEARED) if (cover[c * N + o] > v) cover[c * N + o] = v;
+  }
 }
 
 /** Appends a polyline (world metres) to `p` in chunk pixels, smoothed `passes` times. */

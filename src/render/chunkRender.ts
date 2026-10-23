@@ -6,7 +6,7 @@ import type { SegmentPath } from '../gen/roads';
 import type { Site } from '../gen/settle';
 import type { TownPlan } from '../gen/town';
 import { cellCoverage, drawCoverSymbols, FILLS } from './landcover';
-import { drawBuiltUp, drawChurches, drawRoads, drawSites } from './roads';
+import { clearUnderBuiltUp, drawBuiltUp, drawChurches, drawRoads, drawSites } from './roads';
 import { CONTOURS, STYLE } from './style';
 
 export interface RenderInput {
@@ -64,6 +64,8 @@ export function renderChunk({ cx, cy, dem, cover, water, streams, roads, sites, 
   const ctx = canvas.getContext('2d')!;
   const pxPerM = pxSize / CHUNK;
   const { shade, slope } = shadeAndSlope(dem);
+  // Built-up land replaces woods and vines under it (the cover here is this render's own copy).
+  clearUnderBuiltUp(cover, plans, cx, cy);
 
   // --- Land cover fills, hillshade, lakes ---------------------------------
   const img = ctx.createImageData(pxSize, pxSize);

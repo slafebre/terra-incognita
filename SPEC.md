@@ -156,7 +156,7 @@ Grid overlay
 - A candidate becomes a site if its score (suitability × seeded random) beats every same-rank candidate within its spacing, and no higher-ranked site is within the keep-out distance.
 - These rules are local, so every worker agrees.
 - Measured density: villages about 0.065 per km² (France averages about 1 commune per 16 km²), hamlets about 0.5 per km², farms about 2.5 per km² in the lowlands.
-- Land within 4× a site's built-up radius is cleared of forest.
+- Settlements clear the land around them of forest for fields and pasture: out to 1,300 m from a town's centre, 560 m for a village (both centred on the crossroads), 200 m for a hamlet, 80 m for a farm; fully within 45 % of that, the edge made ragged by noise (±50 % of the distance), and not on locally steep ground (relative to the region), which keeps its woods. Built-up land itself (§3.6) clears woods, vines, marsh and heath exactly when drawn.
 - Hamlets and farms render as a built-up disc (15 m for a farm) until milestone 5. Villages and towns get street plans (§3.6), with the church at their centre.
 
 ### 3.5 Road network
@@ -217,6 +217,7 @@ An edge used by several ways takes the highest class.
 - **Pruning:** after growth, dead ends nothing hangs off are removed, leaves first and repeatedly, if shorter than 40–60 m in villages or 60–130 m in towns (longer in hill country, where slopes stop many branches early); in towns also stubs up to twice that which stopped alongside another street.
 - **Size:** village core 140–200 m, reach 1.7× that, 0.9–2 km of streets; town core 260–340 m, reach 650–850 m, 14–22 km of streets at most (measured: 8.5–9.5 km in lowland and hills, 3.5–5 km in the mountains, held back by lakes and slopes); both shrink by up to 40 % in the mountains.
 - **Tracks and footpaths through built-up land** (runs of at least 30 m) become residential streets there; the plan redraws those segments (built-up runs as streets, the rest keeping its class) and chunks drop the network's.
+- **Built-up land** clears the cover under it (woods, vines, marsh, heath; 6 m soft margin) before the chunk is drawn.
 - **Built-up land** is a strip 18–24 m each side of every street and of the road stretches near streets or the core, drawn opaque into a layer and laid down translucent once.
 - **The crossroads** (redrawn roads: the plan lists the keys of the network's segments it replaces and draws its own pieces instead; their far ends don't move). The roads ending at the centre are cut back and joined by short curved links round it: three or more roads make a rounded triangular green or a small square (24–34 m; in towns always, a 30–45 m market square), a road passing straight through may part round a long green (35–60 m, an Anger; more often in the lowlands). Each link carries the lesser class of its two roads, so a through road keeps its class along one side. Not on slopes over 10 % or where a link would be wet.
 - `dev/towns.ts` renders plans as SVG over the fine terrain.
@@ -304,7 +305,7 @@ test/                invariant tests (Vitest)
   - gradient limits hold per road class
   - no N or D dead-ends inside the finished set
   - every settlement is connected
-  - street plans (synthetic villages and towns): the same plan whatever order the roads come in, streets meet roads and each other only at junctions, every street connected, off water, within the plan's extent, redrawn roads keep their far ends, tracks through built-up land become streets
+  - street plans (synthetic villages and towns): the same plan whatever order the roads come in, streets meet roads and each other only at junctions, every street connected, off water, within the plan's extent, redrawn roads keep their far ends, tracks through built-up land become streets, woods cleared under built-up land
   - no building overlaps a road or water
   - chunk borders join (height and polyline continuity)
 - **Visual checks** in the browser at phone and desktop sizes. A hidden `?debug` flag shows chunk stages and timings for development (not a user-facing panel).

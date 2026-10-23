@@ -2,7 +2,8 @@ import { APRON, CELL, CHUNK, DEM_W } from '../lib/constants';
 import { clamp, gnoise, smoothstep } from '../lib/noise';
 import type { Lattice, SeedView } from './seeds';
 import { erodeSmax } from './terrain';
-import { SITE_RADIUS, type Site } from './settle';
+import { nearestVertex, vertexPos } from './lattice';
+import { VILLAGE, type Site } from './settle';
 
 /**
  * Land cover as continuous fields on the DEM vertex grid: a class is present
@@ -54,12 +55,21 @@ const SALTS = {
   heath: 0x4ea7b0,
   rock: 0x60c4a1,
   ice: 0x1ce0c0,
+  clear: 0x6c1ea2,
 };
 
-/** Fraction of land that's forest by region (lowland … alpine), as a field bias. */
-/** Land around a settlement is cleared out to this many times its built-up radius. */
-const CLEAR_FACTOR = 4;
+/**
+ * Settlements clear the land around them for fields and pasture, out to this far
+ * (m) from their centre per rank (town, village, hamlet, farm), fully within
+ * CLEAR_FULL of it, the edge made ragged by noise (± CLEAR_RAGGED of the distance).
+ */
+const CLEAR_R = [1300, 560, 200, 80];
+const CLEAR_FULL = 0.45;
+const CLEAR_RAGGED = 0.5;
+/** Locally steep ground (relative to the region) keeps its woods even near a settlement. */
+const CLEAR_STEEP = [0.5, 0.85];
 
+/** Fraction of land that's forest by region (lowland … alpine), as a field bias. */
 const FOREST_BIAS = [-0.02, -0.2, -0.2, -0.05, -0.3];
 
 function table(t: number[], r: number): number {
@@ -90,7 +100,7 @@ export function computeCover(cx: number, cy: number, view: SeedView, inp: CoverI
 
   // Noise fields vary slowly (finest octave 32 m): evaluate them every other vertex
   // (8 m, world-aligned since APRON is even) and interpolate in between.
-  const NOISE = [SALTS.ice, SALTS.rock, SALTS.forest2, SALTS.rock + 9, SALTS.forest, SALTS.conifer, SALTS.vine, SALTS.wet, SALTS.heath];
+  const NOISE = [SALTS.ice, SALTS.rock, SALTS.forest2, SALTS.rock + 9, SALTS.forest, SALTS.conifer, SALTS.vine, SALTS.wet, SALTS.heath, SALTS.clear];
   const NW = (DEM_W + 1) >> 1;
   const grid = new Float32Array(NOISE.length * NW * NW);
   for (let gj = 0; gj < NW; gj++)
@@ -109,6 +119,13 @@ export function computeCover(cx: number, cy: number, view: SeedView, inp: CoverI
     const bot = grid[b + NW] + (grid[b + NW + 1] - grid[b + NW]) * fx;
     return top + (bot - top) * fy;
   };
+
+  // Clearings are centred where a village's or town's roads meet (its lattice vertex,
+  // as its street plan is), a hamlet or farm on itself.
+  const clearings = sites.map((st) => {
+    const [x, y] = st.rank <= VILLAGE ? vertexPos(nearestVertex(st.x, st.y)) : [st.x, st.y];
+    return { x, y, r: CLEAR_R[st.rank] };
+  });
 
   for (let j = 0; j < DEM_W; j++)
     for (let i = 0; i < DEM_W; i++) {
@@ -150,15 +167,18 @@ export function computeCover(cx: number, cy: number, view: SeedView, inp: CoverI
         0.6 * (smoothstep(0.5, 1.0, s / erodeSmax(R)) - 0.5) +
         0.012 * clamp(tpi, -20, 20);
       forest = Math.min(forest, (treeline - z) / 80);
-      // Settlements clear the land around them for fields and pasture.
+      // Settlements clear the land around them for fields and pasture: a ragged
+      // clearing round each, leaving the locally steep ground wooded. (Their built-up
+      // land is cleared exactly when drawn, from the street plans.)
       const wx = cx * CHUNK + (i - APRON) * CELL;
       const wy = cy * CHUNK + (j - APRON) * CELL;
+      const ragged = 1 + CLEAR_RAGGED * noiseAt(9, i, j);
       let cleared = 0;
-      for (const st of sites) {
-        const r = SITE_RADIUS[st.rank];
-        const d = Math.hypot(wx - st.x, wy - st.y);
-        cleared = Math.max(cleared, smoothstep(r * CLEAR_FACTOR, r * 1.2, d));
+      for (const c of clearings) {
+        const d = Math.hypot(wx - c.x, wy - c.y) * ragged;
+        if (d < c.r) cleared = Math.max(cleared, smoothstep(c.r, c.r * CLEAR_FULL, d));
       }
+      cleared *= 1 - smoothstep(CLEAR_STEEP[0], CLEAR_STEEP[1], s / erodeSmax(R));
       forest -= 1.6 * cleared;
       if (wet) forest = -1;
 

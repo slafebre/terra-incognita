@@ -5,6 +5,9 @@ import { ROAD_C, ROAD_D, ROAD_T, type RoadClass, type RoadPatch, type SegmentPat
 import { TOWN, VILLAGE, type Rank, type Site } from '../src/gen/settle';
 import { PLAN_EXTENT, PLAN_MARGIN, planTown, type PlanInput, type TownPlan } from '../src/gen/town';
 import { rng } from '../src/lib/hash';
+import { APRON, CELL, CHUNK, DEM_W } from '../src/lib/constants';
+import { COVER, COVER_FIELDS, COVER_SCALE } from '../src/gen/landcover';
+import { clearUnderBuiltUp } from '../src/render/roads';
 
 /**
  * Street plans on synthetic land: gently tilted, bumpy ground with a stream and a
@@ -201,6 +204,34 @@ describe('street plans', () => {
       for (const r of plan.roads.filter((q) => q.cls === ROAD_T))
         for (let i = 0; i < r.xy.length; i += 2) expect(Math.hypot(r.xy[i] - plan.x, r.xy[i + 1] - plan.y)).toBeGreaterThan(40);
       expect(inp.roads.some((r) => r.key === 'arm3_0')).toBe(true);
+    }
+  });
+
+  it('clear woods under their built-up land', () => {
+    for (const { name, plan } of plans) {
+      const cx = Math.floor(plan.x / CHUNK);
+      const cy = Math.floor(plan.y / CHUNK);
+      const N = DEM_W * DEM_W;
+      const cover = new Int8Array(COVER_FIELDS * N).fill(COVER_SCALE);
+      clearUnderBuiltUp(cover, [plan], cx, cy);
+      const forestAt = (x: number, y: number) => {
+        const i = Math.round((x - cx * CHUNK) / CELL) + APRON;
+        const j = Math.round((y - cy * CHUNK) / CELL) + APRON;
+        return i < 0 || j < 0 || i >= DEM_W || j >= DEM_W ? undefined : cover[COVER.forest * N + j * DEM_W + i];
+      };
+      // On every street point in the chunk: no forest. Rock is left alone.
+      let on = 0;
+      for (const s of plan.streets)
+        for (let i = 0; i < s.xy.length; i += 2) {
+          const f = forestAt(s.xy[i], s.xy[i + 1]);
+          if (f === undefined) continue;
+          on++;
+          expect(f, name).toBeLessThanOrEqual(0);
+        }
+      expect(on, name).toBeGreaterThan(0);
+      expect(cover[COVER.rock * N]).toBe(COVER_SCALE);
+      // Some of the chunk keeps its woods (away from the strips).
+      expect(cover.subarray(COVER.forest * N, (COVER.forest + 1) * N).some((v) => v === COVER_SCALE), name).toBe(true);
     }
   });
 });
