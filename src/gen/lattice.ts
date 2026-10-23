@@ -790,6 +790,41 @@ export function latticeSegments(edges: RoadEdge[], cx: number, cy: number): Segm
     };
     return Math.min(pd(p[0], p[1], q), pd(p[2], p[3], q), pd(q[0], q[1], p), pd(q[2], q[3], p));
   };
+  // Ways near the chunk: everything within ROOM_REACH of a piece of it (up to
+  // PIECE_EDGES edges out), measured between edge midpoints.
+  const NEAR = PIECE_EDGES * 1.7 * LATTICE + ROOM_REACH + 1.7 * LATTICE;
+  const local = edges.filter((o) => {
+    const mx = (o.route[0] + o.route[2]) / 2 - (cx + 0.5) * CHUNK;
+    const my = (o.route[1] + o.route[3]) / 2 - (cy + 0.5) * CHUNK;
+    return Math.abs(mx) < CHUNK / 2 + NEAR && Math.abs(my) < CHUNK / 2 + NEAR;
+  });
+  /** Room either side of a run of edges (vertices `pts`, keys `own`): the nearest way not part of it nor meeting it, and the ways within ROOM_REACH. */
+  const surroundings = (pts: number[], own: Set<string>) => {
+    const n = pts.length / 2;
+    const ends = new Set<string>();
+    for (let i = 0; i < n; i++) ends.add(k2(pts[2 * i], pts[2 * i + 1]));
+    let room = Infinity;
+    const obstacles: number[] = [];
+    for (const o of local) {
+      if (own.has(o.id)) continue;
+      let r = o.route;
+      // A way meeting the run at a vertex: only its far half counts (near the
+      // junction itself they must be close).
+      const atA = ends.has(k2(r[0], r[1]));
+      const atB = ends.has(k2(r[2], r[3]));
+      if (atA && atB) continue;
+      if (atA) r = [(r[0] + r[2]) / 2, (r[1] + r[3]) / 2, r[2], r[3]];
+      else if (atB) r = [r[0], r[1], (r[0] + r[2]) / 2, (r[1] + r[3]) / 2];
+      for (let i = 1; i < n; i++) {
+        const sgm = [pts[2 * i - 2], pts[2 * i - 1], pts[2 * i], pts[2 * i + 1]];
+        if (Math.abs((r[0] + r[2]) / 2 - (sgm[0] + sgm[2]) / 2) > 600 || Math.abs((r[1] + r[3]) / 2 - (sgm[1] + sgm[3]) / 2) > 600) continue;
+        const d = segDist(sgm, r);
+        room = Math.min(room, d, ROOM_REACH);
+        if (d < ROOM_REACH && (obstacles.length < 4 || obstacles[obstacles.length - 4] !== r[0] || obstacles[obstacles.length - 3] !== r[1])) obstacles.push(...r);
+      }
+    }
+    return { room, obstacles };
+  };
   const out: SegmentTask[] = [];
   for (const e of edges) {
     const [ax, ay, bx, by] = e.route;
@@ -803,34 +838,12 @@ export function latticeSegments(edges: RoadEdge[], cx: number, cy: number): Segm
       by,
       pa: partner.get(`${e.id}@${k2(ax, ay)}`),
       pb: partner.get(`${e.id}@${k2(bx, by)}`),
+      ...surroundings(e.route, new Set([e.id])),
     };
     const pc = pieceOf(e);
     if (pc) {
       const n = pc.pts.length / 2;
-      const own = new Set(pc.keys);
-      const ends = new Set<string>();
-      for (let i = 0; i < n; i++) ends.add(k2(pc.pts[2 * i], pc.pts[2 * i + 1]));
-      // Room either side: the nearest way not part of the piece nor meeting it.
-      let room = Infinity;
-      const obstacles: number[] = [];
-      for (const o of edges) {
-        if (own.has(o.id)) continue;
-        let r = o.route;
-        // A way meeting the piece at a vertex: only its far half counts (near the
-        // junction itself they must be close).
-        const atA = ends.has(k2(r[0], r[1]));
-        const atB = ends.has(k2(r[2], r[3]));
-        if (atA && atB) continue;
-        if (atA) r = [(r[0] + r[2]) / 2, (r[1] + r[3]) / 2, r[2], r[3]];
-        else if (atB) r = [r[0], r[1], (r[0] + r[2]) / 2, (r[1] + r[3]) / 2];
-        for (let i = 1; i < n; i++) {
-          const sgm = [pc.pts[2 * i - 2], pc.pts[2 * i - 1], pc.pts[2 * i], pc.pts[2 * i + 1]];
-          if (Math.abs((r[0] + r[2]) / 2 - (sgm[0] + sgm[2]) / 2) > 600 || Math.abs((r[1] + r[3]) / 2 - (sgm[1] + sgm[3]) / 2) > 600) continue;
-          const d = segDist(sgm, r);
-          room = Math.min(room, d, ROOM_REACH);
-          if (d < ROOM_REACH && (obstacles.length < 4 || obstacles[obstacles.length - 4] !== r[0] || obstacles[obstacles.length - 3] !== r[1])) obstacles.push(...r);
-        }
-      }
+      const { room, obstacles } = surroundings(pc.pts, new Set(pc.keys));
       const first = byKey.get(pc.keys[0])!;
       const last = byKey.get(pc.keys[pc.keys.length - 1])!;
       task.piece = {
@@ -856,6 +869,13 @@ const PIECE_ANCHOR = 0.5;
 
 /** Snap radius (fine nodes) for vertices: onto gentler, dry ground nearby. */
 const VSNAP = 2;
+/** A vertex with no dry ground within VSNAP moves to the nearest within this (fine nodes): onto the shore. */
+const SHORE_SNAP = 8;
+/** A piece or edge with more than this (m) of its line in a lake is routed around it. */
+const WET_MIN = 4;
+/** Snapping: cost (in fine nodes of distance) of a node beside a lake — the map's shoreline,
+ * splined between nodes, reaches a few metres past the last lake node. */
+const SNAP_SHORE = 3;
 
 /**
  * One curve per lattice edge: cubic Hermite between its two (snapped) vertices.
@@ -863,28 +883,74 @@ const VSNAP = 2;
  * neighbours on either side (Catmull–Rom), the same for both edges — so curves join
  * smoothly; a sharp turn there becomes a hairpin bend. A road ending at a vertex,
  * or meeting a through road there, arrives straight.
+ *
+ * Lakes: the network can't see them (they come from the fine solves), so the
+ * drawing goes round them. A vertex under water moves to the shore; a piece whose
+ * line crosses a lake is routed on the fine terrain as one, like a steep piece; an
+ * edge still in the water after fitting is routed on its own. Where no way round
+ * fits, the route crosses at the narrowest place (a bridge or causeway).
  */
 export function routeCurves(tasks: SegmentTask[], p: RoadPatch): SegmentPath[] {
   const { w, h } = p;
+  const isLake = (k: number) => !Number.isNaN(p.lake[k]);
+  /** Dry node beside a lake. */
+  const onShore = (i: number, j: number) => {
+    const k = j * w + i;
+    return (i > 0 && isLake(k - 1)) || (i < w - 1 && isLake(k + 1)) || (j > 0 && isLake(k - w)) || (j < h - 1 && isLake(k + w));
+  };
+  /** Is world (x, y) in a lake (nearest node)? Outside the patch: no. */
+  const lakeAt = (x: number, y: number) => {
+    const i = Math.round(x / NODE) - p.gx;
+    const j = Math.round(y / NODE) - p.gy;
+    return i >= 0 && j >= 0 && i < w && j < h && isLake(j * w + i);
+  };
+  /** Length (m) of a polyline [x0, y0, …] in lakes, sampled every few metres. */
+  const wetLength = (pts: ArrayLike<number>) => {
+    let wet = 0;
+    for (let i = 2; i < pts.length; i += 2) {
+      const L = Math.hypot(pts[i] - pts[i - 2], pts[i + 1] - pts[i - 1]);
+      const m = Math.max(1, Math.ceil(L / 4));
+      for (let s = 0; s < m; s++) {
+        const u = (s + 0.5) / m;
+        if (lakeAt(pts[i - 2] + (pts[i] - pts[i - 2]) * u, pts[i - 1] + (pts[i + 1] - pts[i - 1]) * u)) wet += L / m;
+      }
+    }
+    return wet;
+  };
+  const snaps = new Map<string, [number, number]>();
   const snap = (x: number, y: number): [number, number] => {
+    const key = `${x},${y}`;
+    let hit = snaps.get(key);
+    if (!hit) snaps.set(key, (hit = snapRaw(x, y)));
+    return hit;
+  };
+  const snapRaw = (x: number, y: number): [number, number] => {
     const ci = Math.round(x / NODE) - p.gx;
     const cj = Math.round(y / NODE) - p.gy;
     let best: [number, number] = [x, y];
     let bs = Infinity;
-    for (let dj = -VSNAP; dj <= VSNAP; dj++)
-      for (let di = -VSNAP; di <= VSNAP; di++) {
-        const i = ci + di;
-        const j = cj + dj;
-        if (i < 1 || j < 1 || i >= w - 1 || j >= h - 1) continue;
-        const k = j * w + i;
-        if (!Number.isNaN(p.lake[k])) continue;
-        const slope = Math.hypot(p.zE[k + 1] - p.zE[k - 1], p.zE[k + w] - p.zE[k - w]) / (2 * NODE);
-        const s = 10 * slope + (p.A[k] > 0.3 ? 2 : 0) + 0.1 * Math.hypot(di, dj);
-        if (s < bs) {
-          bs = s;
-          best = [(p.gx + i) * NODE, (p.gy + j) * NODE];
+    // Gentle, dry ground near the vertex; or, under water, the nearest shore.
+    for (const [R, wd] of [
+      [VSNAP, 0.1],
+      [SHORE_SNAP, 1],
+    ]) {
+      for (let dj = -R; dj <= R; dj++)
+        for (let di = -R; di <= R; di++) {
+          const i = ci + di;
+          const j = cj + dj;
+          const d = Math.hypot(di, dj);
+          if ((R === SHORE_SNAP && d > R) || i < 1 || j < 1 || i >= w - 1 || j >= h - 1) continue;
+          const k = j * w + i;
+          if (isLake(k)) continue;
+          const slope = Math.hypot(p.zE[k + 1] - p.zE[k - 1], p.zE[k + w] - p.zE[k - w]) / (2 * NODE);
+          const s = 10 * slope + (p.A[k] > 0.3 ? 2 : 0) + wd * d + (onShore(i, j) ? SNAP_SHORE : 0);
+          if (s < bs) {
+            bs = s;
+            best = [(p.gx + i) * NODE, (p.gy + j) * NODE];
+          }
         }
-      }
+      if (bs < Infinity) break;
+    }
     return best;
   };
   /** Bilinear fine elevation at world (x, y). */
@@ -899,30 +965,40 @@ export function routeCurves(tasks: SegmentTask[], p: RoadPatch): SegmentPath[] {
     const z = p.zE;
     return (z[k] * (1 - fu) + z[k + 1] * fu) * (1 - fv) + (z[k + w] * (1 - fu) + z[k + w + 1] * fu) * fv;
   };
+  /**
+   * A run of edges (vertices `pts`) routed on the fine terrain, from its first vertex
+   * to its last (both snapped). `pa`/`pb`: the vertices beyond either end, if the road
+   * goes on there.
+   */
+  const routed = (key: string, cls: RoadClass, pts: number[], pa: [number, number] | undefined, pb: [number, number] | undefined, room: number, obstacles: number[]): SegmentPath => {
+    const n = pts.length / 2;
+    const [ax, ay] = snap(pts[0], pts[1]);
+    const [bx, by] = snap(pts[2 * n - 2], pts[2 * n - 1]);
+    // Directions at the ends: the shared Catmull–Rom direction there (next vertex
+    // minus previous), as the piece or edge on the other side also uses.
+    const inDir = pa ? [pts[2] - pa[0], pts[3] - pa[1]] : [bx - ax, by - ay];
+    const outDir = pb ? [pb[0] - pts[2 * n - 4], pb[1] - pts[2 * n - 3]] : [bx - ax, by - ay];
+    // Each keeps to under half the way to its neighbour: two can't meet.
+    const band = Math.min(MICRO_BAND, MICRO_ROOM * Math.min(room, ROOM_REACH));
+    const xy = microRoute(ax, ay, bx, by, inDir, outDir, MAX_GRADE[cls], p, zAt, obstacles, band);
+    return { key, cls, xy: Float32Array.from(xy), micro: true };
+  };
   const out: SegmentPath[] = [];
   for (const t of tasks) {
-    // A steep piece: drawn once, as a serpentine, by the chunk owning its middle edge.
+    // A piece too steep for its class, or crossing a lake: drawn once, routed on the
+    // fine terrain, by the chunk owning its middle edge.
     if (t.piece) {
       const pc = t.piece;
-      const n = pc.pts.length / 2;
-      const steep = serpentineFrame(pc.pts, MAX_GRADE[t.cls], zAt);
-      if (steep) {
-        if (pc.owner) {
-          const [ax, ay] = snap(pc.pts[0], pc.pts[1]);
-          const [bx, by] = snap(pc.pts[2 * n - 2], pc.pts[2 * n - 1]);
-          // Directions at the ends: the shared Catmull–Rom direction there (next vertex
-          // minus previous), as the piece or edge on the other side also uses.
-          const inDir = pc.pa ? [pc.pts[2] - pc.pa[0], pc.pts[3] - pc.pa[1]] : [bx - ax, by - ay];
-          const outDir = pc.pb ? [pc.pb[0] - pc.pts[2 * n - 4], pc.pb[1] - pc.pts[2 * n - 3]] : [bx - ax, by - ay];
-          // Each serpentine keeps to under half the way to its neighbour: two can't meet.
-          const band = Math.min(MICRO_BAND, MICRO_ROOM * Math.min(pc.room, ROOM_REACH));
-          const xy = microRoute(ax, ay, bx, by, inDir, outDir, MAX_GRADE[t.cls], p, zAt, pc.obstacles, band);
-          out.push({ key: pc.key, cls: t.cls, xy: Float32Array.from(xy), micro: true });
-        }
+      if (serpentineFrame(pc.pts, MAX_GRADE[t.cls], zAt) || wetLength(pc.pts) > WET_MIN) {
+        if (pc.owner) out.push(routed(pc.key, t.cls, pc.pts, pc.pa, pc.pb, pc.room, pc.obstacles));
         continue;
       }
     }
-    out.push(curveOf(t));
+    const c = curveOf(t);
+    // Still in a lake after fitting (the band is narrow): only this chunk draws the
+    // edge, so it can go round on its own.
+    if (wetLength(c.xy) > WET_MIN) out.push(routed(t.key, t.cls, [t.ax, t.ay, t.bx, t.by], t.pa, t.pb, t.room, t.obstacles));
+    else out.push(c);
   }
   return out;
 
@@ -963,7 +1039,7 @@ export function routeCurves(tasks: SegmentTask[], p: RoadPatch): SegmentPath[] {
       const j = Math.round(y / NODE) - p.gy;
       if (i < 0 || j < 0 || i >= w || j >= h) return 0;
       const k = j * w + i;
-      return !Number.isNaN(p.lake[k]) ? FIT_WATER : p.A[k] > 1 ? FIT_STREAM : 0;
+      return isLake(k) ? FIT_WATER : onShore(i, j) ? FIT_SHORE : p.A[k] > 1 ? FIT_STREAM : 0;
     });
     const xy = new Float32Array(2 * (n + 1));
     for (let s = 0; s <= n; s++) {
@@ -1021,8 +1097,9 @@ function serpentineFrame(
 const FIT_STEP = 10;
 const FIT_BAND = 32;
 const FIT_OFFSET = 8;
-/** Per-sample penalties (m-equivalent) for standing in a lake or on a stream bed. */
+/** Per-sample penalties (m-equivalent) for standing in a lake, beside one, or on a stream bed. */
 const FIT_WATER = 400;
+const FIT_SHORE = 60;
 const FIT_STREAM = 6;
 /** Weights: steepness beyond the class limit, sideways change (smoothness), shift itself. */
 const FIT_GRADE = 4;
@@ -1134,6 +1211,10 @@ const MICRO_TURN = 20;
 const MICRO_STEEP = 25;
 const MICRO_ENDS = 3;
 const MICRO_STREAM = 15;
+/** Water: per m of lake (a bridge or causeway), plus per crossing; per m on a dry node beside a lake. */
+const MICRO_WATER = 12;
+const MICRO_BRIDGE = 150;
+const MICRO_SHORE = 3;
 const MDIST = DX.map((dx, i) => Math.hypot(dx, DY[i]) * NODE);
 
 /**
@@ -1141,7 +1222,8 @@ const MDIST = DX.map((dx, i) => Math.hypot(dx, DY[i]) * NODE);
  * 45° of turn per step, so a hairpin is a turn of some 20 m). The gradient is held near
  * the class limit, so where the slope is steep the road zig-zags across it, its legs
  * following the real contours. It stays within a band around the piece, clear of the
- * other ways near it, out of lakes. A to B are the piece's (snapped) ends.
+ * other ways near it, and goes round lakes — or, where the way round is too long or
+ * leaves the band, crosses at a narrow place. A to B are the piece's (snapped) ends.
  */
 function microRoute(
   ax: number,
@@ -1169,7 +1251,7 @@ function microRoute(
   const bh = j1 - j0 + 1;
   const straight = () => [ax, ay, bx, by];
   if (bw < 2 || bh < 2) return straight();
-  // Allowed nodes: in the band, dry, clear of other ways (near the ends anything goes).
+  // Allowed nodes: in the band, clear of other ways (near the ends anything goes).
   const ok = new Uint8Array(bw * bh);
   const segDistTo = (x: number, y: number, s: number[], o: number) => {
     const dx = s[o + 2] - s[o];
@@ -1182,8 +1264,7 @@ function microRoute(
     for (let li = 0; li < bw; li++) {
       const x = (p.gx + li + i0) * NODE;
       const y = (p.gy + lj + j0) * NODE;
-      const k = (lj + j0) * w + li + i0;
-      if (segDistTo(x, y, ab, 0) > Math.max(band, MICRO_FREE) || !Number.isNaN(p.lake[k])) continue;
+      if (segDistTo(x, y, ab, 0) > Math.max(band, MICRO_FREE)) continue;
       const nearEnd = Math.hypot(x - ax, y - ay) < MICRO_FREE || Math.hypot(x - bx, y - by) < MICRO_FREE;
       let clear = true;
       if (!nearEnd) for (let o = 0; o + 3 < obstacles.length && clear; o += 4) if (segDistTo(x, y, obstacles, o) < MICRO_CLEAR) clear = false;
@@ -1197,6 +1278,8 @@ function microRoute(
   const hIn = dirOf(inDir[0], inDir[1]);
   const hOut = dirOf(outDir[0], outDir[1]);
   const turn = (a: number, b: number) => Math.min((a - b + 8) & 7, (b - a + 8) & 7);
+  const wet = (k: number) => !Number.isNaN(p.lake[k]);
+  const shore = (k: number) => wet(k - 1) || wet(k + 1) || wet(k - w) || wet(k + w);
   const S = bw * bh * 8;
   const cost = new Float64Array(S).fill(Infinity);
   const from = new Int32Array(S).fill(-1);
@@ -1230,7 +1313,9 @@ function microRoute(
       const g = Math.abs(p.zE[q] - p.zE[k]) / dist;
       let c = cost[st] + dist * (1 + 0.5 * (g / gmax) ** 2) + MICRO_TURN * Math.abs(t);
       if (g > gmax) c += dist * MICRO_STEEP * (g / gmax - 1);
-      if (p.A[q] > 1 && p.A[k] <= 1) c += MICRO_STREAM;
+      if (wet(q)) c += dist * MICRO_WATER + (wet(k) ? 0 : MICRO_BRIDGE);
+      else if (shore(q)) c += dist * MICRO_SHORE;
+      else if (p.A[q] > 1 && p.A[k] <= 1) c += MICRO_STREAM;
       if (nc === lb) c += MICRO_ENDS * turn(d, hOut);
       const ns = (nc << 3) | d;
       if (c < cost[ns]) {
@@ -1250,6 +1335,7 @@ function microRoute(
     const lj = (c - li) / bw;
     pts.push((p.gx + li + i0) * NODE, (p.gy + lj + j0) * NODE);
   }
+  const wetCell = cells.map((c) => wet((Math.floor(c / bw) + j0) * w + (c % bw) + i0));
   pts[0] = ax;
   pts[1] = ay;
   pts[pts.length - 2] = bx;
@@ -1274,11 +1360,15 @@ function microRoute(
         const u = (k2 - i) / (j - i);
         if (Math.hypot(pts[2 * k2] - (x0 + (x1 - x0) * u), pts[2 * k2 + 1] - (y0 + (y1 - y0) * u)) > 10) good = false;
       }
-      // …and within the limit all along.
+      // …and within the limit all along, and not across water the path went round.
+      const dry = !wetCell.slice(i, j + 1).some((x) => x);
       let zp = zAt(x0, y0);
       for (let s2 = 1; s2 <= m && good; s2++) {
-        const z = zAt(x0 + ((x1 - x0) * s2) / m, y0 + ((y1 - y0) * s2) / m);
+        const sx = x0 + ((x1 - x0) * s2) / m;
+        const sy = y0 + ((y1 - y0) * s2) / m;
+        const z = zAt(sx, sy);
         if (Math.abs(z - zp) / (len / m) > gmax * 1.1) good = false;
+        if (dry && wet((Math.round(sy / NODE) - p.gy) * w + Math.round(sx / NODE) - p.gx)) good = false;
         zp = z;
       }
       if (good) break;

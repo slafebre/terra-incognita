@@ -71,10 +71,14 @@ export interface SegmentTask {
   /** The edges it continues into smoothly at either end (their far vertices), if any. */
   pa?: [number, number];
   pb?: [number, number];
+  /** Distance to the nearest other way (m), and the ways near the edge (as for `piece`), for a detour around a lake. */
+  room: number;
+  obstacles: number[];
   /**
    * The run of edges of one road this edge belongs to (vertices in canonical order),
-   * if short enough: drawn as one serpentine when too steep, by the chunk owning its
-   * middle edge (`owner`). `room`: distance to the nearest other way (m).
+   * if short enough: routed on the fine terrain as one when too steep or crossing a
+   * lake, by the chunk owning its middle edge (`owner`). `room`: distance to the
+   * nearest other way (m).
    */
   piece?: {
     key: string;

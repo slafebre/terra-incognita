@@ -192,7 +192,7 @@ export function renderChunk({ cx, cy, dem, cover, water, streams, roads, sites, 
 
   drawStreams(ctx, streams, pxPerM, dpr);
   drawSites(ctx, sites, cx, cy, pxPerM);
-  drawRoads(ctx, roads, cx, cy, pxPerM, dpr);
+  drawRoads(ctx, roads, cx, cy, pxPerM, dpr, water);
   drawChurches(ctx, sites, cx, cy, pxPerM, dpr);
   return canvas;
 }
