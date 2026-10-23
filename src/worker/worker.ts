@@ -1,5 +1,4 @@
 /// <reference lib="webworker" />
-import { setNetworkMode } from '../gen/network';
 import { setRegionOverride } from '../gen/terrain';
 import type { WorkerConfig, WorkerRequest, WorkerResponse } from './protocol';
 import { runTask } from './tasks';
@@ -9,7 +8,6 @@ declare const self: DedicatedWorkerGlobalScope;
 self.onmessage = (e: MessageEvent<WorkerRequest | WorkerConfig>) => {
   if ('config' in e.data) {
     setRegionOverride(e.data.config.regionOverride);
-    setNetworkMode(e.data.config.network);
     return;
   }
   let msg: WorkerResponse;

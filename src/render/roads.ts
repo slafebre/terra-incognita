@@ -1,6 +1,6 @@
 import { CHUNK } from '../lib/constants';
 import { smoothPolyline } from '../lib/polyline';
-import { mergeApproaches, ROAD_C, ROAD_D, ROAD_N, ROAD_P, ROAD_T, type SegmentPath } from '../gen/roads';
+import { ROAD_C, ROAD_D, ROAD_N, ROAD_P, ROAD_T, type SegmentPath } from '../gen/roads';
 import { HAMLET, SITE_RADIUS, type Site } from '../gen/settle';
 import { STYLE } from './style';
 
@@ -57,8 +57,7 @@ export function drawRoads(ctx: Ctx, roads: SegmentPath[], cx: number, cy: number
   const paths = [new Path2D(), new Path2D(), new Path2D(), new Path2D(), new Path2D()];
   const ox = cx * CHUNK;
   const oy = cy * CHUNK;
-  const merged = [...mergeApproaches(roads.filter((r) => !r.curve)), ...roads.filter((r) => r.curve)];
-  for (const seg of merged) {
+  for (const seg of roads) {
     const n = seg.xy.length / 2;
     if (n < 2) continue;
     const xs: number[] = [];

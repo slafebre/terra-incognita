@@ -1,10 +1,9 @@
 // Dev tool: road network defects per region, over several random areas.
 //   npx vite-node dev/roadstats.ts [areas per region] [R,R,...]
-// Counts small closed loops (eyes, pears, knots), crossings away from junctions,
-// and length running alongside another road. Runs the real pipeline in-process.
-// SHEET=<prefix> writes a contact sheet of the loops, DUMP=<prefix> each area.
+// Runs the real pipeline in-process on seeded areas and reports road defects;
+// see the README for the options.
 import { ChunkManager } from '../src/chunks/manager';
-import { mergeApproaches, type RoadEdge, type SegmentPath } from '../src/gen/roads';
+import type { RoadEdge, SegmentPath } from '../src/gen/roads';
 import type { Site } from '../src/gen/settle';
 import { DEBUG_PATHS, debugPaths, edgeGrade, nearestVertex, neighbours, vertexPos } from '../src/gen/lattice';
 import { setRegionOverride, Terrain, upliftOf } from '../src/gen/terrain';
@@ -13,7 +12,6 @@ import { APRON, CELL, CHUNK, DEM_W } from '../src/lib/constants';
 import type { TaskRequest, TaskResult } from '../src/worker/protocol';
 import { runTask } from '../src/worker/tasks';
 import { rng } from '../src/lib/hash';
-import { setNetworkMode } from '../src/gen/network';
 
 declare const process: { argv: string[]; env: Record<string, string | undefined> };
 const FS = 'node:fs';
@@ -35,12 +33,8 @@ let lastSites: Site[] = [];
 let areaTerrain: Terrain | undefined;
 let lastEdges: RoadEdge[] = [];
 
-/**
- * Dead ends inside the area: drawn segment ends that no other segment shares and
- * that aren't at a site; and coarse route ends that are neither a site nor on
- * another route (the network's own fault, before fine routing).
- */
-function deadEnds(segs: SegmentPath[]): { fine: { x: number; y: number }[]; coarse: { x: number; y: number; id: string }[] } {
+/** Dead ends inside the area: drawn road ends that no other road shares and that aren't at a site. */
+function deadEnds(segs: SegmentPath[]): { fine: { x: number; y: number }[] } {
   const inside = (x: number, y: number) => x >= area.x0 && x < area.x1 && y >= area.y0 && y < area.y1;
   const atSite = (x: number, y: number, r: number) => lastSites.some((t) => Math.hypot(t.x - x, t.y - y) < r);
   const deg = new Map<string, number>();
@@ -55,35 +49,16 @@ function deadEnds(segs: SegmentPath[]): { fine: { x: number; y: number }[]; coar
     const [x, y] = k.split(',').map(Number);
     if (inside(x, y) && !atSite(x, y, 60)) fine.push({ x, y });
   }
-  const nodes = new Set<string>();
-  for (const e of lastEdges) for (let i = 0; i < e.route.length; i += 2) nodes.add(`${e.route[i]},${e.route[i + 1]}`);
-  const useCount = new Map<string, number>();
-  for (const e of lastEdges)
-    for (let i = 0; i < e.route.length; i += 2) {
-      const k = `${e.route[i]},${e.route[i + 1]}`;
-      useCount.set(k, (useCount.get(k) ?? 0) + 1);
-    }
-  const coarse: { x: number; y: number; id: string }[] = [];
-  for (const e of lastEdges)
-    for (const i of [0, e.route.length - 2]) {
-      const x = e.route[i];
-      const y = e.route[i + 1];
-      if (!inside(x, y) || atSite(x, y, 1)) continue;
-      if ((useCount.get(`${x},${y}`) ?? 0) < 2) coarse.push({ x, y, id: e.id });
-    }
-  return { fine, coarse };
+  return { fine };
 }
 
 /** Terrain slope (m/m) at world (x, y), from the last area's DEMs. */
 let slopeAt: (x: number, y: number) => number = () => NaN;
 /** Fine elevation (m) at world (x, y), from the last area's DEMs. */
 let elevAt: (x: number, y: number) => number = () => NaN;
-/** Water depth (m, ≤ 0 = dry) at world (x, y). */
-let waterAt: (x: number, y: number) => number = () => NaN;
 
 /** Base seed: areas are reproducible (Math.random drives every fresh seed), so code versions compare on the same terrain. */
 const SEED = Number(process.env.SEED ?? 1);
-setNetworkMode(process.env.NET ?? 'lattice');
 let areaNo = 0;
 
 async function segments(R: number): Promise<SegmentPath[]> {
@@ -142,13 +117,6 @@ async function segments(R: number): Promise<SegmentPath[]> {
     const k = j * DEM_W + i;
     const d = c.dem;
     return (d[k] * (1 - fu) + d[k + 1] * fu) * (1 - fv) + (d[k + DEM_W] * (1 - fu) + d[k + DEM_W + 1] * fu) * fv;
-  };
-  waterAt = (x, y) => {
-    const c = m.chunks.get(`${Math.floor(x / CHUNK)},${Math.floor(y / CHUNK)}`);
-    if (!c?.water) return NaN;
-    const i = APRON + Math.round((x - c.cx * CHUNK) / CELL);
-    const j = APRON + Math.round((y - c.cy * CHUNK) / CELL);
-    return c.water[j * DEM_W + i];
   };
   areaTerrain = new Terrain(new SeedView(m.seeds.payloadFor({ x0: view.x0 - 600, y0: view.y0 - 600, x1: view.x1 + 600, y1: view.y1 + 600 })));
   lastSites = [];
@@ -226,7 +194,6 @@ function cross(ax: number, ay: number, bx: number, by: number, cx: number, cy: n
   return t > 0 && t < 1 && u > 0 && u < 1 ? [ax + t * rx, ay + t * ry] : null;
 }
 
-const breakdown = new Map<string, number>();
 const marks: { x: number; y: number; kind: 'cross' | 'along' | 'sep' }[] = [];
 
 function stats(segs: SegmentPath[]): { km: number; crossings: number; alongside: number } {
@@ -299,19 +266,14 @@ function stats(segs: SegmentPath[]): { km: number; crossings: number; alongside:
         const t = segs[other];
         const e = (q: SegmentPath) => [[q.xy[0], q.xy[1]], [q.xy[q.xy.length - 2], q.xy[q.xy.length - 1]]];
         const fork = e(s).some(([ax, ay]) => e(t).some(([bx, by]) => Math.hypot(ax - bx, ay - by) < 1));
-        const k = `${'NDC'[Math.min(s.cls, t.cls)]}${'NDC'[Math.max(s.cls, t.cls)]}${fork ? ' fork' : ' sep'}`;
         marks.push({ x, y, kind: fork ? 'along' : 'sep' });
-        breakdown.set(k, (breakdown.get(k) ?? 0) + Math.hypot(x - s.xy[2 * i - 2], y - s.xy[2 * i - 1]));
       }
     }
   });
   return { km: len / 1000, crossings, alongside: along / 1000 };
 }
 
-const detour = [[0, 0], [0, 0], [0, 0]];
-const flat: string[] = [];
-const loops = [[0, 0], [0, 0], [0, 0]];
-let loopsN = 0, areaKm2 = 0, inKm = 0, loopsRaw = 0, deadFine = 0, deadCoarse = 0;
+let loopsN = 0, areaKm2 = 0, inKm = 0, deadFine = 0;
 const siteCount = [0, 0, 0, 0];
 const gradeLen = [[0, 0, 0], [0, 0, 0], [0, 0, 0], [0, 0, 0], [0, 0, 0]];
 const crossKinds = new Map<string, number>();
@@ -319,9 +281,7 @@ const unreached = [0, 0, 0, 0];
 for (const R of REGIONS) {
   let km = 0, crossings = 0, alongside = 0;
   for (let a = 0; a < AREAS; a++) {
-    const raw = await segments(R);
-    loopsRaw += smallLoops(raw).length;
-    const segs = mergeApproaches(raw);
+    const segs = await segments(R);
     const s = stats(segs);
     const lp = smallLoops(segs);
     const de = deadEnds(segs);
@@ -470,14 +430,7 @@ for (const R of REGIONS) {
         }
       }
     }
-    for (const g of raw) {
-      const n = g.xy.length;
-      const chord = Math.hypot(g.xy[n - 2] - g.xy[0], g.xy[n - 1] - g.xy[1]);
-      if (chord > 700) console.log(`  LONG segment cls ${g.cls} chord ${chord.toFixed(0)} m ${g.key}`);
-    }
     deadFine += de.fine.length;
-    deadCoarse += de.coarse.length;
-    if (process.env.DEADLOG) for (const c of de.coarse.slice(0, 5)) console.log('  coarse dead end', c.id, Math.round(c.x), Math.round(c.y));
     if (process.env.DEADLOG)
       for (const f of de.fine.slice(0, 6)) {
         console.log(`  drawn dead end at ${f.x},${f.y}`);
@@ -501,41 +454,14 @@ for (const R of REGIONS) {
         const x = g.xy[2 * i], y = g.xy[2 * i + 1];
         if (x >= area.x0 && x < area.x1 && y >= area.y0 && y < area.y1) inKm += Math.hypot(x - g.xy[2 * i - 2], y - g.xy[2 * i - 1]) / 1000;
       }
-    for (const g of segs) {
-      const n = g.xy.length / 2;
-      const chord = Math.hypot(g.xy[2 * n - 2] - g.xy[0], g.xy[2 * n - 1] - g.xy[1]);
-      let len = 0, sl = 0, ns = 0;
-      for (let i = 1; i < n; i++) len += Math.hypot(g.xy[2 * i] - g.xy[2 * i - 2], g.xy[2 * i + 1] - g.xy[2 * i - 1]);
-      for (let i = 0; i < n; i++) {
-        const v = slopeAt(g.xy[2 * i], g.xy[2 * i + 1]);
-        if (!Number.isNaN(v)) (sl += v), ns++;
-      }
-      if (!ns || chord < 100) continue;
-      const band = sl / ns < 0.06 ? 0 : sl / ns < 0.15 ? 1 : 2;
-      detour[band][0] += len;
-      detour[band][1] += Math.max(0, len - 1.25 * chord);
-      let wet = 0;
-      for (let t = 0; t <= 20; t++) if (waterAt(g.xy[0] + ((g.xy[2 * n - 2] - g.xy[0]) * t) / 20, g.xy[1] + ((g.xy[2 * n - 1] - g.xy[1]) * t) / 20) > 0) wet++;
-      if (len > 1.6 * chord) {
-        loops[band][wet ? 1 : 0]++;
-        if (band === 0 || !wet) flat.push(`${g.key} cls ${g.cls} chord ${chord.toFixed(0)} len ${len.toFixed(0)} slope ${(sl / ns).toFixed(3)} wet ${wet}/21`);
-      }
-    }
     if (process.env.DUMP) svg(segs, `${process.env.DUMP}-R${R}-${a}.svg`);
     if (process.env.SHEET) sheet(segs, lp, `${process.env.SHEET}-R${R}-${a}.svg`);
     km += s.km;
     crossings += s.crossings;
     alongside += s.alongside;
   }
-  console.log([...breakdown].sort((a, b) => b[1] - a[1]).map(([k, v]) => `${k} ${(v / 1000).toFixed(1)}`).join(', '));
-  breakdown.clear();
-  console.log('excess length (> 1.25 × chord) by terrain slope <0.06 / <0.15 / steeper: ' + detour.map(([l, e]) => `${((100 * e) / l).toFixed(1)}% of ${(l / 1000).toFixed(0)} km`).join(' / '));
-  console.log('detours > 1.6 × chord [dry, chord over water] by slope band: ' + JSON.stringify(loops));
-  loops.forEach((d) => d.fill(0));
-  for (const f of flat.slice(0, 12)) console.log('  flat detour: ' + f);
-  detour.forEach((d) => d.fill(0));
-  console.log(`SMALL LOOPS R=${R}: ${loopsN} in ${areaKm2} km² with ${inKm.toFixed(0)} km road → ${((100 * loopsN) / inKm).toFixed(1)} per 100 km (unmerged ${((100 * loopsRaw) / inKm).toFixed(1)})`);
-  console.log(`DEAD ENDS R=${R}: drawn ${deadFine}, in the network ${deadCoarse}`);
+  console.log(`SMALL LOOPS R=${R}: ${loopsN} in ${areaKm2} km² with ${inKm.toFixed(0)} km road → ${((100 * loopsN) / inKm).toFixed(1)} per 100 km`);
+  console.log(`DEAD ENDS R=${R}: ${deadFine} (road ends not at a settlement or farm)`);
   console.log(`UNREACHED R=${R} town/village/hamlet/farm: ${unreached.map((u, i) => `${u}/${siteCount[i]}`).join('  ')}`);
   console.log(`GRADE R=${R} share of road over its limit / over 1.5× limit: ` + ['N', 'D', 'C', 'T', 'P'].map((n, i) => `${n} ${((100 * gradeLen[i][1]) / (gradeLen[i][0] || 1)).toFixed(0)}% / ${((100 * gradeLen[i][2]) / (gradeLen[i][0] || 1)).toFixed(0)}% of ${(gradeLen[i][0] / 1000).toFixed(0)} km`).join('  '));
   for (const gl of gradeLen) gl.fill(0);
@@ -544,10 +470,7 @@ for (const R of REGIONS) {
   siteCount.fill(0);
   unreached.fill(0);
   deadFine = 0;
-  deadCoarse = 0;
-  loopsRaw = 0;
   loopsN = 0; areaKm2 = 0; inKm = 0;
-  flat.length = 0;
   console.log(`R=${R}  road ${km.toFixed(1)} km  crossings ${crossings} (${(crossings / km).toFixed(2)}/km)  alongside ${alongside.toFixed(2)} km (${((100 * alongside) / km).toFixed(1)}%)`);
 }
 

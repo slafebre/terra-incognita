@@ -29,9 +29,10 @@ import type { Terrain } from './terrain';
  * position (never far enough to make edges cross). Roads can only meet at vertices,
  * so they cannot overlap, braid or cross without a junction.
  *
- *  1. Edge costs per road class: length, gradient against the class's limit (steep
- *     edges very dear: roads zig-zag up the lattice instead), cheaper on valley
- *     floors, plus a fixed tie-break so best paths are unique.
+ *  1. Edge costs per road class: length, a soft penalty for slope against the
+ *     class's limit (judged on the coarse surface over 500 m: at the scale of one
+ *     edge it does not predict the map's slopes), cheaper on valley floors, a small
+ *     bridge charge across streams, plus a fixed tie-break so best paths are unique.
  *  2. Main roads: for each town pair (N) and village pair (D) of the relative-
  *     neighbourhood graphs, the cheapest path inside a fixed corridor around the
  *     pair, turns costing a little. The corridor makes it the same in every cell.
@@ -45,7 +46,8 @@ import type { Terrain } from './terrain';
  *
  * Output: every used lattice edge, owned by the cell holding its midpoint. Geometry
  * comes later (routeCurves): one smooth curve per edge, through the two vertices,
- * with directions at each vertex shared by the roads that continue through it.
+ * with directions at each vertex shared by the roads that continue through it, then
+ * shifted up to 32 m sideways to fit the fine terrain.
  */
 
 export const LATTICE = 150;
@@ -608,7 +610,6 @@ export function latticeSegments(edges: RoadEdge[], cx: number, cy: number): Segm
       ay,
       bx,
       by,
-      curve: true,
       pa: partner.get(`${e.id}@${k2(ax, ay)}`),
       pb: partner.get(`${e.id}@${k2(bx, by)}`),
     });
@@ -705,7 +706,7 @@ export function routeCurves(tasks: SegmentTask[], p: RoadPatch): SegmentPath[] {
       xy[2 * s] = xs[s];
       xy[2 * s + 1] = ys[s];
     }
-    return { key: t.key, cls: t.cls, xy, curve: true };
+    return { key: t.key, cls: t.cls, xy };
   });
 }
 

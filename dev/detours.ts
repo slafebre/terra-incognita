@@ -22,7 +22,7 @@ for (let n = 0; n < N; n++) {
   const store = new SeedStore();
   const x0 = gx * NET_CELL, y0 = gy * NET_CELL;
   const c = { x0: x0 - NET_REACH, y0: y0 - NET_REACH, x1: x0 + NET_CELL + NET_REACH, y1: y0 + NET_CELL + NET_REACH };
-  const view = new SeedView(store.payloadFor({ x0: x0 / 512, y0: y0 / 512, x1: x0 / 512 + 16, y1: y0 / 512 + 16 }, c));
+  const view = new SeedView(store.payloadFor({ x0, y0, x1: x0 + 16, y1: y0 + 16 }, c));
   const t = new Terrain(view);
   const field = new CoarseField(t, view);
   debugPaths(true);

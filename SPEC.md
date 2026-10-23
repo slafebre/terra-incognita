@@ -1,6 +1,6 @@
 # Topo — infinite generated topographic map
 
-Status: milestones 1–3 implemented; milestone 4 (settlements & roads) in progress, 2026-10-19.
+Status: milestones 1–3 implemented; milestone 4 (settlements & roads) in progress, 2026-10-23.
 
 ## 1. Product requirements (agreed)
 
@@ -44,8 +44,8 @@ Grid overlay
 |---|---|---|
 | `pre` | Uplift surface `zPre` and region R on a 16 m node grid. Batched 8 chunks per task. | Chunk is within generation rectangle + 1 chunk + 3 chunks. |
 | `hydro` | Window solve centred on the chunk (§3.3). Keeps the chunk ± 16 nodes. | Every chunk within ±3 chunks has `pre`. Solves are independent, so they run fully in parallel. |
-| `net` | Per 8.2 km net cell: settlement sites and road edges with coarse routes (§3.4–3.5). | Cell is within ~9.5 km of the roads rectangle. |
-| `roads` | Fine road segments whose midpoint lies in the chunk. | The chunk and its 8 neighbours have `hydro`, and the net cells within 9.5 km exist. |
+| `net` | Per 8.2 km net cell: settlement sites, and the lattice edges carrying roads, tracks and footpaths (§3.4–3.5). | Cell is within 1 km of the roads rectangle. |
+| `roads` | Drawn curves for the lattice edges whose midpoint lies in the chunk, fitted to the fine terrain. | The chunk and its 8 neighbours have `hydro`, and the net cells within 1 km exist. |
 | `dem` | 4 m DEM, lake depth field, land cover, stream polylines, built from a blend of the 3×3 surrounding solves. | The chunk and its 8 neighbours have `hydro`, and the nearby net cells exist. |
 | `render` | Raster (land cover, hillshade, contours, water, settlements, roads). | DEM exists and the 3×3 chunks have `roads`. Re-run when the zoom bucket changes. |
 
@@ -130,7 +130,7 @@ Grid overlay
 **Suitability.** Computed from the coarse eroded surface, using the nearest 256 m tile:
 - Flatness relative to the region (tolerance 0.08 in lowland up to 0.3 in alpine terrain).
 - Valley position: hilltops and ridges are penalised.
-- River proximity: towns want real rivers, villages and hamlets are happy with streams.
+- River proximity: towns want real rivers, villages and hamlets are happy with streams; farms don't care.
 - Altitude: nothing above about 1,850 m.
 
 **Candidates.** Each rank has candidates on a seeded, jittered lattice:
@@ -140,53 +140,58 @@ Grid overlay
 | Town | 3 km | 6.5 km | – | 0.30 |
 | Village | 0.9 km | 1.9–3.4 km (by region) | 1.7 km | 0.15 |
 | Hamlet | 0.35 km | 0.65–1.1 km | 0.55 km | 0.06 |
+| Farm | 0.2 km | 0.28–0.6 km | built-up radius + 250 m | 0.08 |
 
 - A candidate becomes a site if its score (suitability × seeded random) beats every same-rank candidate within its spacing, and no higher-ranked site is within the keep-out distance.
 - These rules are local, so every worker agrees.
-- Measured density: villages about 0.065 per km² (France averages about 1 commune per 16 km²), hamlets about 0.5 per km².
+- Measured density: villages about 0.065 per km² (France averages about 1 commune per 16 km²), hamlets about 0.5 per km², farms about 2.5 per km² in the lowlands.
 - Land within 4× a site's built-up radius is cleared of forest.
-- Until milestone 5, sites render as a built-up tint plus a church symbol.
+- Until milestone 5, sites render as a built-up tint (15 m for a farm) plus a church symbol for villages and towns.
 
 ### 3.5 Road network
 
-*(Milestone 4, as implemented in `src/gen/roads.ts`.)*
+*(Milestone 4, as implemented in `src/gen/lattice.ts`; shared classes and types in `src/gen/roads.ts`. Two earlier designs — waypoint routes with a fine A* per segment, and a mesh of independently routed links — produced loops, braids and junction-less crossings, and were replaced.)*
 
-**Net cells.** Topology and coarse routes are computed per 8.2 km net cell, using coarse terrain up to 44 km around the cell. Coarse seeds are kept within viewport + 4.5 km + 52 km.
+**One shared graph.** Every road, track and footpath is made of edges of one lattice: a triangular lattice with a vertex every 150 m, each jittered by up to 33 m from a hash of its position (well short of the 0.29 × spacing at which a triangle could flip). The lattice has no crossing edges, so ways can only meet at vertices: they cannot overlap, braid, or cross without a junction. Each net cell (8.2 km) decides which edges carry which kind of way; an edge is owned by the cell holding its midpoint.
 
-| Class | Connects | Max length | Max gradient | Symbol |
-|---|---|---|---|---|
-| N | towns ↔ towns (relative-neighbourhood graph) | 9 km | 7 % | red, cased |
-| D | villages ↔ villages / towns (relative-neighbourhood graph) | 4.5 km | 10 % | yellow, cased |
-| C | each hamlet → the nearest of: a D-road waypoint, a village or town, or a hamlet closer to that network | 1.6 km (3.2 km fallback) | 15 % | white, cased |
+| Class | What | Max gradient | Symbol |
+|---|---|---|---|
+| N | town ↔ town (relative-neighbourhood graph, ≤ 9 km) | 7 % | red, cased |
+| D | village ↔ village or town (relative-neighbourhood graph, ≤ 4.5 km) | 10 % | yellow, cased |
+| C | hamlet and farm roads, shortcuts | 15 % | white, cased |
+| Track | farm and forest access | 22 % | thin solid line |
+| Footpath | shortcuts too steep for a road | 45 % | thin dashed line |
 
-- Every road ends at a site or exactly on the network. A C road stops at its first contact with a D road (or with the road of the hamlet it heads for): on one of its waypoints, or one coarse node beside it, joining across. There are no dead ends, and C roads form trees draining into the network instead of running alongside other roads.
-- Each cell routes all D roads near it, not only those it owns, so cells agree on where the junction waypoints are.
-- **Shortcuts** (C class) densify the network. Any two points of it — waypoints or sites — 0.5–2 km apart become a candidate when the network joins them only by a long way round: more than 2× their distance, and closing a loop of at least 1.8 km. A candidate is dropped if:
-  - its mean gradient is over 8 %;
-  - the straight line or the routed road crosses a road (that would be a crossing without a junction);
-  - its route is more than 1.5× the distance;
-  - more than half of it (away from its ends) runs on or beside the network.
+**Edge costs** (per class, symmetric):
+- Length, times a soft slope penalty 1 + 1.5·(g / limit)², capped at 6×. The slope g is read from the coarse surface over 500 m along the edge, not between its own two vertices: at the scale of one edge the coarse surface does not predict the map's slopes (correlation about 0 with the fine terrain), because the erosion that makes them only runs near the view. Judged per edge, it sent main roads on kilometre-long detours around slopes that are gentle on the map.
+- Valley floors (draining 0.3–4 km² or more) cost up to 30 % less.
+- Crossing a stream (much more drainage under the edge's middle than at its ends) adds a bridge charge of 40 m, more for a river.
+- A fixed tie-break of up to 1 %, so best paths are unique.
 
-  Candidates are taken in order of the way round they save; one that crosses an accepted shortcut, or starts and ends within 500 m of one, is dropped. Each shortcut is owned by the cell holding its first endpoint, and decided on the network computed above (never on other cells' shortcuts).
-- A route that starts or ends on a grid node starts or ends exactly there; only sites may use any of the 4 nodes around them.
+**Stages.** Each stage grows from the previous one, so a cell needs each stage known a bit further out than the next: main roads up to ~11 km around it, hamlet roads ~7 km, farm roads ~2.4 km, tracks ~1.2 km.
+1. **Main roads.** For each town pair (N) and village pair (D), the cheapest path inside a fixed corridor (|pa| + |pb| ≤ 1.3·d + 1 km), with a small cost for turning. The corridor makes the path a function of the pair alone, so every cell finds the same one.
+2. **Hamlet roads.** One cheapest-path forest grown out from the main network; each hamlet's road follows it back, so roads from nearby hamlets merge like streams.
+3. **Shortcuts.** Neighbouring settlements (Gabriel pairs, 0.4–2 km apart) that the roads so far join only by a way round longer than 2× their distance get a corridor path as a C road; where its edges would be steeper than 1.3× the road limit, a footpath instead. Decided on main and hamlet roads only, so every cell decides each pair alike.
+4. **Farm roads.** Grown like hamlet roads, from all roads so far.
+5. **Tracks.** Scattered points (14 % of vertices, by hash) with no road within 200 m, below 2,300 m and not on a cliff, get a track back to the network, grown as one forest so nearby tracks merge.
 
-**Coarse routing.** A* on 256 m nodes, 16 directions:
-- Cost is distance × (1 + 4·(g/0.1)²), the same for every class so roads heading the same way pick the same corridor. Steep coarse slopes cost 8× more.
-- Valley floors (on or beside a stream draining 0.3–4 km² or more) cost up to 35 % less, so roads follow valleys rather than climbing over the spurs between them. A big river (> 15 km²) costs a bridge, half on each bank.
-- Costs are symmetric, and each edge carries a fixed tie-break of up to 1 %. The best path between two nodes is then unique, so roads through the same nodes share the stretch between them instead of splitting into parallel tracks on flat ground.
-- A route may start and end on any of the 4 nodes around a site. Waypoints are the site and the grid nodes.
+An edge used by several ways takes the highest class.
 
-**Fine routing.** Each segment between consecutive waypoints is owned by the chunk containing its midpoint, and routed by A* over (16 m node, heading):
-- Turns are limited to 45° per step, with a turn cost by class, so hairpins sweep round rather than spike.
-- Gradient above the class limit is heavily penalised. Water costs 60× distance (a way round is wanted) and crossing a stream costs a bridge. All costs are symmetric.
-- Waypoints are snapped locally to buildable ground.
-- **Approach trees:** within ~130 m of a waypoint (less on short segments), a segment follows the cheapest-path tree grown from that waypoint. Segments that leave a waypoint the same way share its branches and fork further out, like real junctions.
-- After A*, the path is string-pulled (straight wherever gentle enough, moving it at most 8 m), then resampled.
-- Node data comes from each node's own-chunk solve (not the blend), so roads only depend on hydro within ±1 chunk.
+**Geometry** (per chunk, in the `roads` stage):
+- Vertices are snapped within 32 m to gentler, dry ground on the fine terrain.
+- Each edge is one cubic Hermite curve between its vertices. At each vertex its edges are paired greedily (highest class, then straightest); a pair continues smoothly with a shared Catmull–Rom direction, never shorter than a quarter of the shorter leg, so a sharp turn becomes a rounded hairpin. A side road meeting a through road arrives straight.
+- The curve is then fitted to the fine terrain: samples every 10 m may move up to 32 m sideways, fading to nothing at both vertices. Dynamic programming over the offsets picks a line that is gentle, smooth, near the edge, out of lakes and off stream beds; the chosen shifts are then smoothed.
+- All of this uses only the edge, its neighbours at both ends and the terrain near it, so every chunk draws an edge identically.
 
-**Rendering.** Segments sharing a waypoint that stay within 24 m of each other leaving it are drawn on one line until they part, for up to 240 m and 40 % of the segment's length. This uses only the segments at that waypoint, so every chunk draws a junction the same way. Each segment is then Gaussian-smoothed with endpoints fixed (more passes for N and D roads). All casings are drawn first, then fills from C up to N.
+**Rendering.** Footpaths and tracks first, uncased, under the roads; then all road casings; then road fills from C up to N.
 
-**Open.** Bridges and tunnels as symbols, sharing corridors between N and D roads, and farm and field tracks for land away from settlements (milestones 5–6).
+**Measured** (seeded test areas): small closed loops 3–8 per 100 km of road, junction-less crossings ≤ 0.05 per km, almost nothing running alongside another road, every settlement and farm reached. Total ways about 3 km per km² in the lowlands. Net cells take about 1–1.5 s each.
+
+**Open.**
+- Roads in hilly terrain are often steeper than their class allows on the fine terrain: the network cannot see those slopes, and switchbacks are not drawn yet.
+- Lakes are not known to the network; only small ones are avoided, by the fitting.
+- Footpaths to summits and passes, bridges and tunnels as symbols.
+- Making the coarse surface match the fine one (it is ~40–200 m lower and poorly correlated in hills) would help both roads and settlement placement.
 
 ### 3.6 Built-up areas
 
@@ -259,7 +264,7 @@ src/
   chunks/            ChunkManager, scheduler, retention, stage graph
   worker/            worker entry, message protocol
   gen/region.ts      gen/terrain.ts  gen/hydro.ts  gen/landuse.ts
-  gen/settle.ts      gen/network.ts  gen/builtup.ts gen/symbols.ts
+  gen/settle.ts      gen/lattice.ts  gen/builtup.ts gen/symbols.ts
   render/            per-layer chunk renderers, style.ts
   lib/               rng, noise, poisson, astar, marching squares, geometry
 test/                invariant tests (Vitest)
