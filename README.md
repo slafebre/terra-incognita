@@ -21,5 +21,7 @@ Dev tools:
 - `npx vite-node dev/seams.ts [firstSeed] [runs] [R]` runs the pipeline test's seam check with seeded `Math.random` (optionally with the region forced to R), so a bad run can be reproduced; prints the worst chunk border lines of runs above 1.3×.
 - `npx vite-node dev/roadstats.ts [areas] [R,R,…]` runs the whole pipeline on seeded, reproducible areas (`SEED=n`) and reports per region type: small closed loops, crossings away from junctions, length running alongside another road, dead ends, unreached settlements, and the share of each class steeper than its limit on the fine terrain. Options: `SHEET=<prefix>` (SVG contact sheet of the loops), `DUMP=<prefix>` (SVG of each area), `DEAD=<prefix>` (sheet of dead ends), `DETOURS=1` (main-road detours with coarse vs fine gradient), `GRADECMP=1` (coarse vs fine heights and gradients), `LOOP_HA` (loop size threshold, ha).
 - `npx vite-node dev/detours.ts [R] [cells]` finds main-road detours in net cells alone and compares the direct lattice edge's cost with the detour's.
+- `npx vite-node dev/terraincmp.ts [areas] [R,R,…]` runs the pipeline on seeded areas and compares the coarse surface (what roads and settlements plan on) with the map's: heights and slopes over 256/512 m (with the best a 256 m sampling could do), height differences by drainage area, and the share of filled flats.
+- `npx vite-node dev/tilespread.ts [R,R,…]` measures how much overlapping coarse tiles disagree, by drainage area.
 
 Controls: drag or arrow keys/WASD to pan, pinch, ctrl/⌘+wheel, trackpad pinch or +/- to zoom (0.5×–2×).

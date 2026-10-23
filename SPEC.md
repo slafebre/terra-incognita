@@ -42,7 +42,7 @@ Grid overlay
 
 | Stage | Output | Runs when |
 |---|---|---|
-| `pre` | Uplift surface `zPre` and region R on a 16 m node grid. Batched 8 chunks per task. | Chunk is within generation rectangle + 1 chunk + 3 chunks. |
+| `pre` | The surface window solves erode (`zPre`: the coarse eroded surface plus terrain detail from 64 to 512 m, §3.3) and region R, on a 16 m node grid. Batched 8 chunks per task. | Chunk is within generation rectangle + 1 chunk + 3 chunks. |
 | `hydro` | Window solve centred on the chunk (§3.3). Keeps the chunk ± 16 nodes. | Every chunk within ±3 chunks has `pre`. Solves are independent, so they run fully in parallel. |
 | `net` | Per 8.2 km net cell: settlement sites, and the lattice edges carrying roads, tracks and footpaths (§3.4–3.5). | Cell is within 1 km of the roads rectangle. |
 | `roads` | Drawn curves for the lattice edges whose midpoint lies in the chunk, fitted to the fine terrain. | The chunk and its 8 neighbours have `hydro`, and the net cells within 1 km exist. |
@@ -58,9 +58,9 @@ Grid overlay
 *(Revised during milestone 1. The first draft proposed conditional extrapolation plus membrane correction along borders. Forgettable lattice seeds turned out simpler and give exact continuity.)*
 
 - All terrain noise is gradient noise on lattices from 16 km down to 8 m. A lattice point's random gradient comes from a **seed created lazily the first time land needs it**, using `Math.random`. There is no world seed.
-  - Fine lattices (spacing ≤ 512 m) use one seed per chunk: a lattice point takes its randomness from the chunk it lies in.
+  - Fine lattices (spacing ≤ 512 m) use one seed per chunk: a lattice point takes its randomness from the chunk it lies in. The 512 m terrain octave is the exception (below).
   - Each fine terrain octave's lattice is **offset** by its own fraction of its spacing (golden-ratio steps). Gradient noise has different curvature along its lattice lines, and ridged noise most of all. Lattices aligned with the chunk grid showed every chunk border at up to 2.4× the curvature of elsewhere (1.4× through chunk middles). A shifted lattice point still lies within one spacing of every sample that uses it, so the seed dependency stays within ±1 chunk.
-  - Coarse lattices (1–16 km) store one seed per lattice point.
+  - Coarse lattices (512 m–16 km) store one seed per lattice point and are kept far beyond the view (64 km). The 512 m terrain octave uses its coarse lattice, so the coarse surface (§3.3) can resolve it anywhere; per-chunk randomness at 512 m (lakes, land cover) still uses the fine one.
 - **Retention invariant:** a seed is dropped only once no retained chunk can depend on it (forget rectangle, plus the lattice spacing, the maximum domain warp, and a margin). Retained land is therefore always exactly consistent: neighbouring chunks agree bit-for-bit on shared edges.
 - Once every chunk that used a seed has been forgotten, the seed goes too. Revisiting the area creates new seeds, so the terrain comes back different. Large features (16 km lattice) survive longest: they are forgotten only about 4.5 km + 16 km away.
 - **Region field.** R = logistic(16 km + 8 km noise). Kinds: lowland < 0.25 < hills < 0.52 < low mountains < 0.8 < alpine. Region parameters (base elevation, amplitude, octave gain) are Catmull-Rom interpolated from R. Clamps and piecewise-linear curves are avoided because they crease the terrain.
@@ -76,14 +76,18 @@ Grid overlay
 
 *(Revised twice in milestone 2. This is the design as implemented, in `src/gen/hydro.ts`. An earlier design froze each solve's result and made later solves respect it. It produced rectangular seams wherever overlapping solves disagreed, and was replaced by blending.)*
 
-**Grid and uplift**
-- Nodes are 16 m apart. `zPre` is the terrain without octaves < 64 m, plus regional **uplift**: 0 m in lowland, 120 m in hills, 450 m in low mountains, up to 1,600 m in alpine areas.
-- The eroded landscape therefore approaches the steady state of its drainage network.
+**Coarse surface** (what roads and settlements plan on)
+- Coarse solves (128 m nodes, same erosion law) run on a **fixed lattice of overlapping 20 km tiles** at a 10 km stride, blended bilinearly between tile centres and read through a cubic B-spline (bilinear left the D8 valleys as straight creases that the fine solves then followed).
+- Each tile erodes the terrain with octaves down to 512 m plus regional **uplift** (0 m in lowland, 120 m in hills, 450 m in low mountains, up to 1,600 m in alpine areas), so it approaches the steady state of its drainage network.
+  - Tile edges drain at `max(min(zPre, base level), zPre − maxIncision(R))`.
+  - Routing as in window solves: priority-flood, then a lower neighbour weighted by slope², with randomness bound to the node's position.
+  - Filled depressions become floors graded at min(S, 0.3 %) rather than dead flats.
+  - The same hillslope limiter as window solves (no node more than 1.15·Smax·d above any neighbour), as raster sweeps; without it window solves cut 40–50 m off the coarse surface.
+- This makes the coarse surface a pure function of the coarse seeds. Each worker caches tiles, keyed by tile and a hash of the seeds they depend on.
+- **Known limitation.** Every tile drains to its own edges, so overlapping tiles disagree (~50 m in lowlands, 120–190 m in hills and mountains, `dev/tilespread.ts`). Where they disagree along a valley floor, the blend can hold a closed basin, which window solves fill (about 5 % of mountain land). Taking tile edges from a 1 km regional solve, with a second local pass, made tiles agree much better but drained the land through too few outlets (plateaus, half the relief) at ~5× the cost.
 
-**Coarse base level**
-- Coarse solves (256 m nodes, same erosion law) run on a **fixed lattice of overlapping 20 km tiles** at a 10 km stride, blended bilinearly.
-- This makes the base level a pure function of the coarse seeds (kept within viewport + 4.5 km + 24 km).
-- Each worker caches tiles, keyed by tile and a hash of the seeds they depend on.
+**Fine surface**
+- Nodes are 16 m apart. `zPre` = the coarse surface + the terrain detail between 64 and 512 m (terrain with octaves ≥ 64 m minus terrain with octaves ≥ 512 m). Window solves thus refine the coarse valley network instead of growing their own, and the map agrees with the coarse surface: slopes over 512 m correlate 0.92–0.94 (the best a 256 m sampling of the map could do is 0.95–0.98), heights within ~5–20 m on average (`dev/terraincmp.ts`). Before, window solves eroded the uplifted terrain themselves and the correlation was ~0.5.
 
 **Window solve (one per chunk, ±3 chunks, 224² nodes)**
 1. **Outlets.**
@@ -95,7 +99,7 @@ Grid overlay
 3. **Four erosion passes** of route → accumulate → carve:
    - Later passes use steepest descent on the carved surface, keeping the current receiver unless another neighbour is more than 1.5× steeper.
    - Carving: `zE = max(zE(rec) + ε·d, min(zPre, zE(rec) + S·d))`, with `S = clamp(k(R)·A^-½, 3e-4, Smax(R))`.
-   - `k` ranges from 0.012 (lowland) to 0.15 (alpine). `Smax` ranges from 0.18 to 1.1.
+   - `k` ranges from 0.012 (lowland) to 0.15 (alpine). `Smax` ranges from 0.18 to 0.75.
 4. **Lakes.**
    - *Dammed lakes:* every chunk has a seeded 5–12% chance of a dam (1.5–25 m by region) at a place-bound site. The lake floods upstream unless it would leak.
    - *Natural lakes:* filled depressions of at least 25 nodes and 1.5 m deep.
@@ -113,7 +117,7 @@ Grid overlay
 
 **DEM (4 m)**
 - Cubic B-spline of the blended eroded nodes.
-- Plus fine terrain detail where the land wasn't carved, and up to 60% of it on steep eroded slopes.
+- Plus fine terrain detail (below 64 m) where the land wasn't carved, and up to 35% of it on steep eroded slopes.
 - Lakes are flat at their level. Shorelines come from `min(level − ground, splined lake mask)`.
 
 **Streams**
@@ -129,7 +133,7 @@ Grid overlay
 
 *(Milestone 4, as implemented in `src/gen/settle.ts`. Everything is a pure function of the long-lived coarse seeds.)*
 
-**Suitability.** Computed from the coarse eroded surface, using the nearest 256 m tile:
+**Suitability.** Computed from the coarse eroded surface, using the nearest 128 m tile:
 - Flatness relative to the region (tolerance 0.08 in lowland up to 0.3 in alpine terrain).
 - Valley position: hilltops and ridges are penalised.
 - River proximity: towns want real rivers, villages and hamlets are happy with streams; farms don't care.
@@ -165,7 +169,7 @@ Grid overlay
 | Footpath | shortcuts too steep for a road | 45 % | thin dashed line |
 
 **Edge costs** (per class, symmetric):
-- Length, times a soft slope penalty 1 + 1.5·(g / limit)², capped at 6×. The slope g is read from the coarse surface over 500 m along the edge, not between its own two vertices: at the scale of one edge the coarse surface does not predict the map's slopes (correlation about 0 with the fine terrain), because the erosion that makes them only runs near the view. Judged per edge, it sent main roads on kilometre-long detours around slopes that are gentle on the map.
+- Length, times a soft slope penalty 1 + 1.5·(g / limit)², capped at 6×. The slope g is read from the coarse surface over 500 m along the edge, not between its own two vertices: the coarse surface follows the map closely at 256–512 m, but not at the scale of one edge (150 m), where the map's finer gullies take over. Judged per edge (when the two surfaces still disagreed), it sent main roads on kilometre-long detours around slopes that are gentle on the map.
 - Valley floors (draining 0.3–4 km² or more) cost up to 30 % less.
 - Crossing a stream (much more drainage under the edge's middle than at its ends) adds a bridge charge of 40 m, more for a river.
 - A fixed tie-break of up to 1 %, so best paths are unique.
@@ -188,14 +192,14 @@ An edge used by several ways takes the highest class.
 
 **Rendering.** Footpaths and tracks first, uncased, under the roads; then all road casings; then road fills from C up to N.
 
-**Measured** (seeded test areas): small closed loops 3–8 per 100 km of road, junction-less crossings ≤ 0.05 per km, almost nothing running alongside another road, every settlement and farm reached. Total ways about 3 km per km² in the lowlands. Net cells take about 1–1.5 s each.
+**Measured** (seeded test areas): small closed loops 3–8 per 100 km of road, junction-less crossings ≤ 0.05 per km, almost nothing running alongside another road, every settlement and farm reached. Total ways about 3 km per km² in the lowlands.
 
 **Open.**
 - Roads in mountains are still often steeper than their class allows on the fine terrain: the network cannot see those slopes, and steep pieces rarely have the room or length for a full serpentine.
-- Net cells take about 1–1.6 s each (up to ~2.8 s for a worker's first, before its path cache is warm).
+- Net cells take about 2–2.5 s each (up to ~6 s for a worker's first, before its coarse tiles and path cache are warm).
 - Lakes are not known to the network; only small ones are avoided, by the fitting.
 - Footpaths to summits and passes, bridges and tunnels as symbols.
-- Making the coarse surface match the fine one (it is ~40–200 m lower and poorly correlated in hills) would help both roads and settlement placement.
+- With the coarse surface now matching the map, a third of minor-road length in hills and half in mountains is still steeper than its limit: genuine climbs the network takes, for switchbacks to handle.
 
 ### 3.6 Built-up areas
 

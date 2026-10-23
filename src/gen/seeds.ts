@@ -7,15 +7,20 @@ import { freshSeed, hash3 } from '../lib/hash';
  * All terrain noise is lattice noise whose random values come from seeds that
  * are created lazily when land is first needed and dropped when it is forgotten.
  * Fine lattices (spacing <= CHUNK) take their randomness from one seed per chunk;
- * coarse lattices store one seed per lattice point.
+ * coarse lattices (COARSE_SPACINGS) store one seed per lattice point.
  *
  * Invariant: a seed is retained for as long as any retained chunk could depend on
  * it, so retained land is always mutually consistent. Once everything that used
  * a seed is forgotten, the seed goes too, and the land regenerates differently.
  */
 
-/** Lattice spacings (m) above CHUNK that store their own per-point seeds. */
-export const COARSE_SPACINGS = [16384, 8192, 4096, 2048, 1024] as const;
+/**
+ * Lattice spacings (m) that store their own per-point seeds, kept far beyond the
+ * view. 512 (= CHUNK) is here too: the terrain octave of that spacing must be known
+ * wherever coarse terrain is (the coarse field resolves it). `lattice(512)` remains the
+ * per-chunk lattice; the coarse one is `coarse(512)`.
+ */
+export const COARSE_SPACINGS = [16384, 8192, 4096, 2048, 1024, 512] as const;
 /** Upper bound on domain-warp displacement applied to coarse lookups (m). */
 export const MAX_WARP = 600;
 /**
@@ -177,12 +182,15 @@ class FineLattice implements Lattice {
   }
 }
 
+/** Coarse lattice: one stored seed per point. Offsets as for FineLattice (0 <= ox, oy < S). */
 class CoarseLattice implements Lattice {
   readonly cell = newCellCache();
   readonly S: number;
-  readonly ox = 0;
-  readonly oy = 0;
-  constructor(private readonly b: CoarseBlock) {
+  constructor(
+    private readonly b: CoarseBlock,
+    readonly ox = 0,
+    readonly oy = 0,
+  ) {
     this.S = b.S;
   }
   seed(ix: number, iy: number): number {
@@ -197,27 +205,47 @@ class CoarseLattice implements Lattice {
 /** Worker-side read-only view on a payload. */
 export class SeedView {
   private readonly lattices = new Map<number, Lattice>();
+  private readonly coarseLattices = new Map<number, Lattice>();
   private readonly shiftedLattices = new Map<string, Lattice>();
+  private readonly blocks = new Map<number, CoarseBlock>();
   constructor(private readonly p: SeedPayload) {
-    for (const b of p.coarse) this.lattices.set(b.S, new CoarseLattice(b));
+    for (const b of p.coarse) {
+      this.blocks.set(b.S, b);
+      this.coarseLattices.set(b.S, new CoarseLattice(b));
+    }
+    for (const b of p.coarse) if (b.S > CHUNK) this.lattices.set(b.S, this.coarseLattices.get(b.S)!);
     for (let S = CHUNK; S >= 1; S /= 2) this.lattices.set(S, new FineLattice(S, p));
   }
+
+  /** Lattice of spacing S: per-chunk randomness up to CHUNK, per-point seeds above. */
   lattice(S: number): Lattice {
     const l = this.lattices.get(S);
     if (!l) throw new Error(`no lattice with spacing ${S}`);
     return l;
   }
 
+  /** Lattice with stored per-point seeds (any of COARSE_SPACINGS). */
+  coarse(S: number): Lattice {
+    const l = this.coarseLattices.get(S);
+    if (!l) throw new Error(`no coarse lattice with spacing ${S}`);
+    return l;
+  }
+
   /**
-   * Fine lattice (S <= CHUNK) shifted by (ox, oy) metres, 0 <= ox, oy < S. Noise on
-   * lattices aligned with the chunk grid has different curvature along lattice
-   * lines, which would show every chunk border as a faint seam.
+   * Lattice of spacing S shifted by (ox, oy) metres, 0 <= ox, oy < S: per-chunk
+   * randomness for S <= CHUNK, or stored seeds with `coarse`. Noise on lattices aligned
+   * with the chunk grid has different curvature along lattice lines, which would
+   * show every chunk border as a faint seam.
    */
-  shifted(S: number, ox: number, oy: number): Lattice {
-    if (S > CHUNK || ox < 0 || oy < 0 || ox >= S || oy >= S) throw new Error(`bad shifted lattice ${S} ${ox} ${oy}`);
-    const k = `${S}:${ox}:${oy}`;
+  shifted(S: number, ox: number, oy: number, coarse = false): Lattice {
+    if ((!coarse && S > CHUNK) || ox < 0 || oy < 0 || ox >= S || oy >= S) throw new Error(`bad shifted lattice ${S} ${ox} ${oy}`);
+    const k = `${S}:${ox}:${oy}:${coarse}`;
     let l = this.shiftedLattices.get(k);
-    if (!l) this.shiftedLattices.set(k, (l = new FineLattice(S, this.p, ox, oy)));
+    if (!l) {
+      const b = this.blocks.get(S);
+      if (coarse && !b) throw new Error(`no coarse lattice with spacing ${S}`);
+      this.shiftedLattices.set(k, (l = coarse ? new CoarseLattice(b!, ox, oy) : new FineLattice(S, this.p, ox, oy)));
+    }
     return l;
   }
 }

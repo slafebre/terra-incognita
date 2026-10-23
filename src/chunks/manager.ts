@@ -383,7 +383,12 @@ export class ChunkManager {
           }),
           { x0: Infinity, y0: Infinity, x1: -Infinity, y1: -Infinity },
         );
-        task = { kind, chunks: cands.map((k) => [k.chunk.cx, k.chunk.cy]), seeds: this.seeds.payloadFor(expand(r, 16)) };
+        task = {
+          kind,
+          chunks: cands.map((k) => [k.chunk.cx, k.chunk.cy]),
+          // zPre starts from the coarse field, which reads tiles far around.
+          seeds: this.seeds.payloadFor(expand(r, 16), expand(r, COARSE_RADIUS_M)),
+        };
         break;
       }
       case 'hydro': {
@@ -571,6 +576,7 @@ export class ChunkManager {
     const N = W * W;
     const p: DemPatch = {
       zPre: new Float32Array(N),
+      off: new Float32Array(N),
       zE: new Float32Array(N),
       A: new Float32Array(N),
       rec: new Int8Array(N),
@@ -591,6 +597,7 @@ export class ChunkManager {
         const own = this.get(ocx, ocy)!;
         const pk = (gy - ocy * NODES) * NODES + (gx - ocx * NODES);
         p.zPre[o] = own.pre!.zPre[pk];
+        p.off[o] = own.pre!.off[pk];
         p.R[o] = own.pre!.R[pk];
         const ok = coreIdx(own, gx, gy);
         p.A[o] = own.hydro!.A[ok];

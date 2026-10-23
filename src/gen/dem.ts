@@ -16,6 +16,8 @@ export const DEM_PATCH = NODES + 2 * DEM_PAD;
 /** Hydro data for chunk ± DEM_PAD nodes (row-major DEM_PATCH²). */
 export interface DemPatch {
   zPre: Float32Array;
+  /** See PreResult.off. */
+  off: Float32Array;
   zE: Float32Array;
   A: Float32Array;
   rec: Int8Array;
@@ -116,12 +118,14 @@ export function generateDem(cx: number, cy: number, view: SeedView, p: DemPatch,
   const zEs = new Float32Array(DEM_W * DEM_W);
   const zPs = new Float32Array(DEM_W * DEM_W);
   const Us = new Float32Array(DEM_W * DEM_W);
+  const offs = new Float32Array(DEM_W * DEM_W);
   for (let j = 0; j < DEM_W; j++)
     for (let i = 0; i < DEM_W; i++) {
       const o = j * DEM_W + i;
       zEs[o] = spline(p.zE, i, j);
       zPs[o] = spline(p.zPre, i, j);
       Us[o] = spline(U, i, j);
+      offs[o] = spline(p.off, i, j);
     }
 
   // Pass 2: add fine detail back. Carved land loses it (smooth valleys), but steep
@@ -132,8 +136,9 @@ export function generateDem(cx: number, cy: number, view: SeedView, p: DemPatch,
       const carved = zPs[o] - zEs[o];
       const slope = spline(nodeSlope, i, j);
       const mask = Math.max(1 - smoothstep(0.5, 6, carved), STEEP_DETAIL * smoothstep(0.25, 0.7, slope));
-      // Fine detail = full terrain minus the (uplifted) surface the hydrology saw.
-      const detail = full[o] + Us[o] - zPs[o];
+      // Fine detail = full terrain minus the (uplifted) terrain truncated where the
+      // hydrology's surface stops.
+      const detail = full[o] + Us[o] - (zPs[o] - offs[o]);
       let z = zEs[o] + detail * mask;
 
       // Lake level from the four surrounding nodes (dilates lakes by up to one node).
@@ -143,7 +148,7 @@ export function generateDem(cx: number, cy: number, view: SeedView, p: DemPatch,
       if (level > -Infinity) {
         // Shoreline: where the ground rises above the level, or where the smoothed
         // lake mask ends (avoids blocky node-grid edges), whichever comes first.
-        const ground = Math.min(full[o] + Us[o], z);
+        const ground = Math.min(full[o] + Us[o] + offs[o], z);
         water[o] = Math.min(level - ground, (spline(lakeMask, i, j) - 0.3) * 40);
         if (z < level && water[o] > 0) z = level;
         else if (z < level) z = level + 0.05;

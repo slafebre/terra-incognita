@@ -2,7 +2,7 @@ import { CHUNK } from '../lib/constants';
 import { hash3, rng } from '../lib/hash';
 import { MinHeap } from '../lib/heap';
 import { COARSE_SPACINGS, MAX_WARP, type SeedView } from './seeds';
-import { baseField, erodeK, erodeSmax, maxIncisionOf, Terrain, upliftOf } from './terrain';
+import { baseField, erodeK, erodeSmax, maxIncisionOf, regionOverrideKey, Terrain, upliftOf } from './terrain';
 
 /**
  * Hydrology and fluvial erosion — a pure function of the seeds.
@@ -73,13 +73,28 @@ export function blendWeight(c: number, g: number): number {
 export interface PreResult {
   zPre: Float32Array;
   R: Float32Array;
+  /**
+   * zPre minus the uplifted terrain truncated at MIN_PRE_S (smooth). The DEM adds back
+   * the detail below MIN_PRE_S as full terrain + uplift − (zPre − off).
+   */
+  off: Float32Array;
 }
 
-/** Uplift surface and region for chunk (cx, cy) at node resolution. */
+/** Octaves at or above this spacing are the coarse solve's; the fine solve adds the rest. */
+const COARSE_MIN_S = 512;
+
+/**
+ * Surface the fine solve erodes, for chunk (cx, cy) at node resolution: the coarse
+ * eroded surface plus the terrain detail between MIN_PRE_S and COARSE_MIN_S. Fine
+ * solves therefore refine the coarse valley network instead of growing their own,
+ * and the displayed terrain agrees with the coarse field roads and settlements plan on.
+ */
 export function generatePre(cx: number, cy: number, view: SeedView): PreResult {
   const t = new Terrain(view);
+  const field = new CoarseField(t, view);
   const zPre = new Float32Array(NODES * NODES);
   const R = new Float32Array(NODES * NODES);
+  const off = new Float32Array(NODES * NODES);
   const f = new Float64Array(4);
   for (let j = 0; j < NODES; j++)
     for (let i = 0; i < NODES; i++) {
@@ -88,9 +103,12 @@ export function generatePre(cx: number, cy: number, view: SeedView): PreResult {
       t.fields(x, y, f);
       const k = j * NODES + i;
       R[k] = f[0];
-      zPre[k] = t.elevationWith(x, y, f[0], f[1], f[2], f[3], MIN_PRE_S) + upliftOf(f[0]);
+      const mid = t.elevationWith(x, y, f[0], f[1], f[2], f[3], MIN_PRE_S);
+      const low = t.elevationWith(x, y, f[0], f[1], f[2], f[3], COARSE_MIN_S);
+      zPre[k] = field.z(x, y) + mid - low;
+      off[k] = zPre[k] - (mid + upliftOf(f[0]));
     }
-  return { zPre, R };
+  return { zPre, R, off };
 }
 
 export function channelSlope(A: number, R: number): number {
@@ -102,18 +120,30 @@ export function channelSlope(A: number, R: number): number {
 // ---------------------------------------------------------------------------
 // Coarse estimate
 
-export const COARSE = 256;
+export const COARSE = 128;
 /**
  * Coarse solves run on a fixed lattice of overlapping tiles (TILE_N nodes, centres
  * TILE_STRIDE apart) and are blended bilinearly between tile centres. The coarse
  * base level is thus a pure function of the (long-retained) coarse seeds, and every
  * fine solve sees the same values — no per-window disagreement about base level.
+ *
+ * Known limitation: every tile drains to its own edges, so overlapping tiles
+ * disagree (dev/tilespread.ts: ~50 m in lowlands, 120–190 m in hills and mountains),
+ * and where they disagree on a valley floor the blend can hold a closed basin, which
+ * window solves fill (flats). Taking tile edges from a coarser regional solve was
+ * tried: tiles agree better, but draining through fewer outlets lifts much of the
+ * land onto the uneroded surface (plateaus), and it costs ~5× more.
  */
-export const TILE_STRIDE = 40;
+export const TILE_STRIDE = 80;
 const TILE_N = 2 * TILE_STRIDE + 1;
 /** World distance from a point to the far edge of any tile that can influence it. */
 export const COARSE_REACH = 2 * TILE_STRIDE * COARSE;
 const COARSE_AREA = (COARSE * COARSE) / 1e6;
+const SCALE = COARSE / NODE;
+/** Slow terrain fields are evaluated every this many nodes (TILE_N − 1 must divide). */
+const FIELD_NODES = 4;
+/** Steepest gradient given to filled coarse depressions (m per m). */
+const FLOOR_S = 0.003;
 
 export interface Coarse {
   ox: number; // world x of node 0
@@ -124,11 +154,13 @@ export interface Coarse {
   rec: Int8Array;
 }
 
-function coarseTile(t: Terrain, tx: number, ty: number): Coarse {
+function coarseTile(t: Terrain, view: SeedView, tx: number, ty: number): Coarse {
   const n = TILE_N;
   const ox = tx * TILE_STRIDE * COARSE;
   const oy = ty * TILE_STRIDE * COARSE;
   const N = n * n;
+  // Flow randomness from the coarse seeds of the smallest resolved octave.
+  const seeds = view.coarse(COARSE_MIN_S);
   const zPre = new Float32Array(N);
   const R = new Float32Array(N);
   const zE = new Float32Array(N);
@@ -139,14 +171,26 @@ function coarseTile(t: Terrain, tx: number, ty: number): Coarse {
   const f = new Float64Array(4);
   const heap = new MinHeap(4 * n);
 
+  // Slow fields (region, base level, warp) vary over kilometres: evaluate them every
+  // FIELD_NODES nodes and interpolate, as terrainGrid does.
+  const fw = (n - 1) / FIELD_NODES + 1;
+  const fg = new Float64Array(fw * fw * 4);
+  for (let b = 0; b < fw; b++)
+    for (let a = 0; a < fw; a++) t.fields(ox + a * FIELD_NODES * COARSE, oy + b * FIELD_NODES * COARSE, fg, (b * fw + a) * 4);
   for (let j = 0; j < n; j++)
     for (let i = 0; i < n; i++) {
       const k = j * n + i;
       const x = ox + i * COARSE;
       const y = oy + j * COARSE;
-      t.fields(x, y, f);
+      const a = Math.min(fw - 2, Math.floor(i / FIELD_NODES));
+      const b = Math.min(fw - 2, Math.floor(j / FIELD_NODES));
+      const u = i / FIELD_NODES - a;
+      const v = j / FIELD_NODES - b;
+      const g = (b * fw + a) * 4;
+      for (let c = 0; c < 4; c++)
+        f[c] = (fg[g + c] * (1 - u) + fg[g + 4 + c] * u) * (1 - v) + (fg[g + fw * 4 + c] * (1 - u) + fg[g + fw * 4 + 4 + c] * u) * v;
       R[k] = f[0];
-      zPre[k] = t.elevationWith(x, y, f[0], f[1], f[2], f[3], 1024) + upliftOf(f[0]);
+      zPre[k] = t.elevationWith(x, y, f[0], f[1], f[2], f[3], COARSE_MIN_S) + upliftOf(f[0]);
       if (i === 0 || j === 0 || i === n - 1 || j === n - 1) {
         const key = Math.max(Math.min(zPre[k], baseField(f[0], f[1])), zPre[k] - maxIncisionOf(f[0]));
         zE[k] = key;
@@ -172,7 +216,42 @@ function coarseTile(t: Terrain, tx: number, ty: number): Coarse {
       if (seen[q]) continue;
       seen[q] = 1;
       rec[q] = (d + 4) & 7; // points back to c
-      heap.push(q, Math.max(zPre[q], kk + EPS * DIST[d] * (COARSE / NODE)));
+      heap.push(q, Math.max(zPre[q], kk + EPS * DIST[d] * SCALE));
+    }
+  }
+  // Stochastic steepest descent on the filled surface, as in window solves: flood
+  // order alone draws valleys as straight grid lines. Lower neighbours were popped
+  // earlier, so `order` stays receivers-first. Randomness is bound to the node's
+  // world position, so overlapping tiles agree.
+  const wts = new Float64Array(8);
+  for (let o = 0; o < m; o++) {
+    const c = order[o];
+    if (rec[c] === REC_EXIT) continue;
+    const ci = c % n;
+    const cj = (c - ci) / n;
+    let total = 0;
+    for (let d = 0; d < 8; d++) {
+      wts[d] = 0;
+      const i = ci + DX[d];
+      const j = cj + DY[d];
+      if (i < 0 || j < 0 || i >= n || j >= n) continue;
+      const drop = key[c] - key[j * n + i];
+      if (drop <= 0) continue;
+      const sl = drop / DIST[d];
+      wts[d] = sl * sl;
+      total += wts[d];
+    }
+    if (total <= 0) continue;
+    const gx = tx * TILE_STRIDE + ci;
+    const gy = ty * TILE_STRIDE + cj;
+    const seed = seeds.seed(Math.floor((gx * COARSE) / COARSE_MIN_S), Math.floor((gy * COARSE) / COARSE_MIN_S));
+    let r = (hash3(seed ^ 0x2ec3, gx, gy) / 4294967296) * total;
+    for (let d = 0; d < 8; d++) {
+      r -= wts[d];
+      if (wts[d] > 0 && r <= 0) {
+        rec[c] = d;
+        break;
+      }
     }
   }
   for (let o = m - 1; o >= 0; o--) {
@@ -186,24 +265,89 @@ function coarseTile(t: Terrain, tx: number, ty: number): Coarse {
     const r = rec[c];
     if (r < 0) continue;
     const q = c + DY[r] * n + DX[r];
-    const d = DIST[r] * (COARSE / NODE);
+    const d = DIST[r] * SCALE;
     const S = channelSlope(A[c], R[c]);
-    zE[c] = Math.max(zE[q] + EPS * d, Math.min(zPre[c], zE[q] + S * d));
+    // Filled depressions become graded floors rather than dead flats: fine solves
+    // would cross a flat in straight lines.
+    zE[c] = Math.max(zE[q] + Math.max(EPS, Math.min(S, FLOOR_S)) * d, Math.min(zPre[c], zE[q] + S * d));
+  }
+  // Threshold hillslopes in every direction, as window solves do: carving bounds a
+  // node only against its receiver, and window solves would otherwise cut the
+  // difference away, leaving the coarse field above the land shown. Receivers (and
+  // so areas) stay; a last pass in flow order keeps every channel draining.
+  // The lower envelope by alternating raster sweeps (a chamfer transform), repeated
+  // until nothing changes: far cheaper than a priority queue over every node.
+  const step = new Float32Array(N);
+  for (let k = 0; k < N; k++) step[k] = erodeSmax(R[k]) * HILL_LIMIT * NODE * SCALE;
+  for (let sweep = 0, changed = true; changed && sweep < 16; sweep++) {
+    changed = false;
+    const fwd = sweep % 2 === 0;
+    for (let o = 0; o < N; o++) {
+      const q = fwd ? o : N - 1 - o;
+      if (rec[q] === REC_EXIT) continue;
+      const qi = q % n;
+      const qj = (q - qi) / n;
+      let z = zE[q];
+      // Neighbours already visited in this sweep's order.
+      for (let d = fwd ? 4 : 0; d < (fwd ? 8 : 4); d++) {
+        const i = qi + DX[d];
+        const j = qj + DY[d];
+        if (i < 0 || j < 0 || i >= n || j >= n) continue;
+        const cand = zE[j * n + i] + step[q] * (d & 1 ? Math.SQRT2 : 1);
+        if (cand < z) z = cand;
+      }
+      if (z < zE[q] - 1e-3) {
+        zE[q] = z;
+        changed = true;
+      }
+    }
+  }
+  for (let o = 0; o < m; o++) {
+    const c = order[o];
+    const r = rec[c];
+    if (r < 0) continue;
+    const q = c + DY[r] * n + DX[r];
+    const min = zE[q] + EPS * DIST[r] * SCALE;
+    if (zE[c] < min) zE[c] = min;
   }
   return { ox, oy, n, zE, A, rec };
 }
 
+/** Cubic B-spline weights for fractional offset t (nodes floor-1 .. floor+2). */
+function bsplineW(t: number, out: Float64Array, o: number): void {
+  const t2 = t * t;
+  const t3 = t2 * t;
+  out[o] = (1 - 3 * t + 3 * t2 - t3) / 6;
+  out[o + 1] = (3 * t3 - 6 * t2 + 4) / 6;
+  out[o + 2] = (-3 * t3 + 3 * t2 + 3 * t + 1) / 6;
+  out[o + 3] = t3 / 6;
+}
+
+const tileW = new Float64Array(8);
+
+/**
+ * Cubic B-spline through the tile's nodes. It smooths rather than interpolates:
+ * bilinear would leave the D8 valleys as straight creases along the grid, which
+ * fine solves (whose surface starts from this one) would then follow.
+ */
 function tileZ(c: Coarse, x: number, y: number): number {
-  const u = Math.min(c.n - 1.001, Math.max(0, (x - c.ox) / COARSE));
-  const v = Math.min(c.n - 1.001, Math.max(0, (y - c.oy) / COARSE));
+  const u = Math.min(c.n - 2.001, Math.max(1, (x - c.ox) / COARSE));
+  const v = Math.min(c.n - 2.001, Math.max(1, (y - c.oy) / COARSE));
   const i = Math.floor(u);
   const j = Math.floor(v);
-  const fu = u - i;
-  const fv = v - j;
-  const k = j * c.n + i;
+  bsplineW(u - i, tileW, 0);
+  bsplineW(v - j, tileW, 4);
   const z = c.zE;
-  return (z[k] * (1 - fu) + z[k + 1] * fu) * (1 - fv) + (z[k + c.n] * (1 - fu) + z[k + c.n + 1] * fu) * fv;
+  let s = 0;
+  for (let b = 0; b < 4; b++) {
+    const row = (j - 1 + b) * c.n + i - 1;
+    s += tileW[4 + b] * (tileW[0] * z[row] + tileW[1] * z[row + 1] + tileW[2] * z[row + 2] + tileW[3] * z[row + 3]);
+  }
+  return s;
 }
+
+/** One tile's own surface at (x, y), unblended (dev/tilespread.ts). */
+export const tileZForDebug = (c: Coarse, x: number, y: number) => tileZ(c, x, y);
 
 /** Coarse tiles survive across solves (per worker), keyed by tile + seed hash. */
 const tileCache = new Map<string, Coarse>();
@@ -218,7 +362,7 @@ function tileSignature(view: SeedView, tx: number, ty: number): number {
   const y1 = (ty + 2) * s + MAX_WARP;
   let h = 0x811c9dc5;
   for (const S of COARSE_SPACINGS) {
-    const L = view.lattice(S);
+    const L = view.coarse(S);
     for (let iy = Math.floor(y0 / S); iy <= Math.floor(y1 / S) + 1; iy++)
       for (let ix = Math.floor(x0 / S); ix <= Math.floor(x1 / S) + 1; ix++) h = hash3(h ^ L.seed(ix, iy), ix, iy);
   }
@@ -238,12 +382,12 @@ export class CoarseField {
     const lk = `${tx},${ty}`;
     const hit = this.local.get(lk);
     if (hit) return hit;
-    const k = `${lk}:${tileSignature(this.view, tx, ty)}`;
+    const k = `${lk}:${regionOverrideKey()}:${tileSignature(this.view, tx, ty)}`;
     let c = tileCache.get(k);
     if (c) {
       tileCache.delete(k); // refresh LRU position
     } else {
-      c = coarseTile(this.t, tx, ty);
+      c = coarseTile(this.t, this.view, tx, ty);
       if (tileCache.size >= TILE_CACHE_MAX) tileCache.delete(tileCache.keys().next().value!);
     }
     tileCache.set(k, c);

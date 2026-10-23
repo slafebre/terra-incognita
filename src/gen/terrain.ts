@@ -1,6 +1,6 @@
 import { APRON, CELL, CHUNK, DEM_W } from '../lib/constants';
 import { clamp, gnoise, lerp, ND, smoothstep } from '../lib/noise';
-import type { Lattice, SeedView } from './seeds';
+import { COARSE_SPACINGS, type Lattice, type SeedView } from './seeds';
 
 /**
  * Terrain: elevation as a pure function of the retained seeds.
@@ -84,6 +84,8 @@ let regionOverride = NaN;
 export function setRegionOverride(r: number): void {
   regionOverride = r;
 }
+/** Part of cache keys for anything derived from the region field. */
+export const regionOverrideKey = (): string => String(regionOverride);
 
 export class Terrain {
   private readonly l16k: Lattice;
@@ -99,8 +101,12 @@ export class Terrain {
     this.l2k = view.lattice(2048);
     // Unwarped octaves get their own lattice offsets (golden-ratio fractions of S), so
     // no octave's lattice lines coincide with the chunk grid or with each other.
+    // Octaves on coarse lattices (stored seeds) are known far from the view, so the
+    // coarse field can resolve them.
     this.shape = SHAPE_OCTAVES.map((S, k) =>
-      S >= WARP_COARSE_FROM ? view.lattice(S) : view.shifted(S, frac(0.6180339887 * (k + 1)) * S, frac(0.7548776662 * (k + 1)) * S),
+      S >= WARP_COARSE_FROM
+        ? view.lattice(S)
+        : view.shifted(S, frac(0.6180339887 * (k + 1)) * S, frac(0.7548776662 * (k + 1)) * S, (COARSE_SPACINGS as readonly number[]).includes(S)),
     );
   }
 

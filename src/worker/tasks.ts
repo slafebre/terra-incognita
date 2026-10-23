@@ -17,7 +17,7 @@ export function runTask(t: TaskRequest): { result: TaskResult; transfer: Transfe
       const results = t.chunks.map(([cx, cy]) => generatePre(cx, cy, view));
       return {
         result: { kind: 'pre', results, ms: ms() },
-        transfer: results.flatMap((r) => [r.zPre.buffer, r.R.buffer]),
+        transfer: results.flatMap((r) => [r.zPre.buffer, r.R.buffer, r.off.buffer]),
       };
     }
     case 'hydro': {

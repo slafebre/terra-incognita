@@ -1,3 +1,5 @@
+import { COARSE_REACH } from './hydro';
+import { COARSE_KEEP_EXTRA } from './seeds';
 import type { Site } from './settle';
 
 /**
@@ -10,10 +12,13 @@ import type { Site } from './settle';
 export const NET_CELL = 8192;
 /**
  * How far around a net cell the coarse terrain is consulted (m): the main-road
- * corridors that reach the cell's stages, the sites deciding them, and coarse tile
- * reach. Coarse seeds are kept accordingly (COARSE_KEEP_EXTRA).
+ * corridors that reach the cell's stages and the sites deciding them (SITE_REACH),
+ * plus the coarse surface's own reach. Coarse seeds are kept accordingly
+ * (COARSE_KEEP_EXTRA).
  */
-export const NET_REACH = 56000;
+const SITE_REACH = 35500;
+export const NET_REACH = SITE_REACH + COARSE_REACH;
+if (NET_REACH + 4000 > COARSE_KEEP_EXTRA) throw new Error('coarse seeds are not kept as far as net cells read them');
 
 export const ROAD_N = 0;
 export const ROAD_D = 1;
