@@ -188,21 +188,22 @@ Grid overlay
 An edge used by several ways takes the highest class.
 
 **Geometry** (per chunk, in the `roads` stage):
-- Vertices are snapped within 32 m to gentler, dry ground on the fine terrain.
+- Vertices are snapped within 32 m to gentler, dry ground on the fine terrain, off the shore; a vertex under water moves to the nearest dry ground within 128 m.
 - Each edge is one cubic Hermite curve between its vertices. At each vertex its edges are paired greedily (highest class, then straightest); a pair continues smoothly with a shared Catmull–Rom direction, never shorter than a quarter of the shorter leg, so a sharp turn becomes a rounded hairpin. A side road meeting a through road arrives straight.
-- The curve is then fitted to the fine terrain: samples every 10 m may move up to 32 m sideways, fading to nothing at both vertices. Dynamic programming over the offsets picks a line that is gentle, smooth, near the edge, out of lakes and off stream beds; the chosen shifts are then smoothed.
-- **Steep pieces.** Consecutive edges of one way are grouped into pieces of at most 3 edges, between anchors (junctions, dead ends, class changes, and vertices picked by a hash of their position). A piece that climbs more than 1.3× its class limit on the fine terrain, mostly uphill, is routed on the fine terrain itself by the chunk owning its middle edge: A* over 16 m nodes with heading (at most 45° per step, turns costing 20 m per 45°), gradient held near the limit, within a band of up to 200 m but under 45 % of the way to the nearest other way (so two such pieces cannot meet), clear of other ways by 24 m except near the piece's ends, out of lakes. The others skip its edges. The steep test uses only the piece's vertices and terrain inside it, so every chunk that sees the piece decides alike.
+- The curve is then fitted to the fine terrain: samples every 10 m may move up to 32 m sideways, fading to nothing at both vertices. Dynamic programming over the offsets picks a line that is gentle, smooth, near the edge, out of lakes, off their shores and off stream beds; the chosen shifts are then smoothed.
+- **Steep pieces.** Consecutive edges of one way are grouped into pieces of at most 3 edges, between anchors (junctions, dead ends, class changes, and vertices picked by a hash of their position). A piece that climbs more than 1.3× its class limit on the fine terrain, mostly uphill, is routed on the fine terrain itself by the chunk owning its middle edge: A* over 16 m nodes with heading (at most 45° per step, turns costing 20 m per 45°), gradient held near the limit, within a band of up to 200 m but under 45 % of the way to the nearest other way (so two such pieces cannot meet), clear of other ways by 24 m except near the piece's ends, round lakes (below). The others skip its edges. The steep test uses only the piece's vertices and terrain inside it, so every chunk that sees the piece decides alike.
+- **Lakes.** The network can't see lakes (they come from the fine solves, which exist only near the view), so the drawing goes round them. A piece whose line between its vertices has water under it is routed on the fine terrain as a steep piece is, by the same owner rule; an edge whose fitted curve still stands in water is routed on its own (only its owner draws it). In that routing water costs 12× its length plus 150 m per crossing, and dry nodes beside a lake 3× (the map's splined shoreline reaches a few metres past the last lake node). Where the way round leaves the band, the route crosses at a narrow place: a bridge or causeway. Measured on seeded areas (`dev/roadstats.ts`, lakes 2.3–3.5 % of the land): road standing in water down from 18 km to 11 km per 144 km², crossings over 30 m from 150 to 69, shore clips from 30 to 8.
 - All of this uses only the edge (or piece), its neighbours at both ends and the terrain near it, so every chunk draws an edge identically.
 
-**Rendering.** Footpaths and tracks first, uncased, under the roads; then all road casings; then road fills from C up to N.
+**Rendering.** Footpaths and tracks first, uncased, under the roads; then all road casings; then road fills from C up to N. Ways over water are drawn again on top as bridges: black parapets either side, square ends one sample past each shore.
 
 **Measured** (seeded test areas): small closed loops 3–8 per 100 km of road, junction-less crossings ≤ 0.05 per km, almost nothing running alongside another road, every settlement and farm reached. Total ways about 3 km per km² in the lowlands.
 
 **Open.**
 - Roads in mountains are still often steeper than their class allows on the fine terrain: the network cannot see those slopes, and steep pieces rarely have the room or length for a full serpentine.
 - Net cells take about 2–2.5 s each (up to ~6 s for a worker's first, before its coarse tiles and path cache are warm).
-- Lakes are not known to the network; only small ones are avoided, by the fitting.
-- Footpaths to summits and passes, bridges and tunnels as symbols.
+- Lakes are not known to the network. The drawing goes round most of them, but a junction or settlement far inside a lake, or a way whose ends lie on opposite shores of a long lake, still crosses it (as a bridge). The coarse basins' lakes (§3.3) could be given to the network as costly ground.
+- Footpaths to summits and passes, tunnels; bridges over streams and rivers.
 - With the coarse surface now matching the map, a third of minor-road length in hills and half in mountains is still steeper than its limit: genuine climbs the network takes, for switchbacks to handle.
 
 ### 3.6 Built-up areas

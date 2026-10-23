@@ -9,7 +9,8 @@ import { DEBUG_PATHS, debugPaths, edgeGrade, nearestVertex, neighbours, vertexPo
 import { setRegionOverride, Terrain, upliftOf } from '../src/gen/terrain';
 import { SeedView } from '../src/gen/seeds';
 import { APRON, CELL, CHUNK, DEM_W } from '../src/lib/constants';
-import { CORE, CORE_PAD, NODE, NODES } from '../src/gen/hydro';
+import { COARSE, CoarseField, coarseBasins, CORE, CORE_PAD, NODE, NODES } from '../src/gen/hydro';
+import { expand } from '../src/gen/seeds';
 import type { TaskRequest, TaskResult } from '../src/worker/protocol';
 import { runTask } from '../src/worker/tasks';
 import { rng } from '../src/lib/hash';
@@ -57,6 +58,8 @@ function deadEnds(segs: SegmentPath[]): { fine: { x: number; y: number }[] } {
 let slopeAt: (x: number, y: number) => number = () => NaN;
 /** Hydro (16 m, what the fine routing sees) elevation at world (x, y), nearest node. */
 let zEAt: (x: number, y: number) => number = () => NaN;
+/** In a lake of a closed coarse basin (what the network could know about)? */
+let coarseLakeAt: (x: number, y: number) => boolean = () => false;
 /** Lake level at world (x, y) in the solve of the node's own chunk (what roads see), else NaN. */
 let lakeOwnAt: (x: number, y: number) => number = () => NaN;
 /** Lake depth (m, > 0 under water) at world (x, y), nearest DEM vertex. */
@@ -147,6 +150,22 @@ async function segments(R: number): Promise<SegmentPath[]> {
     if (!c?.hydro) return NaN;
     return c.hydro.lake[(gy - (c.cy * NODES - CORE_PAD)) * CORE + (gx - (c.cx * NODES - CORE_PAD))];
   };
+  {
+    const r = { x0: view.x0 - 600, y0: view.y0 - 600, x1: view.x1 + 600, y1: view.y1 + 600 };
+    const sv = new SeedView(m.seeds.payloadFor(r, expand(r, 40000)));
+    const basins = coarseBasins(new CoarseField(new Terrain(sv), sv), view.x0, view.y0, view.x1, view.y1);
+    coarseLakeAt = (x, y) => {
+      // The fine lake spreads up to a cell beyond the coarse lake cells.
+      const i0 = Math.round(x / COARSE) - basins.g0x;
+      const j0 = Math.round(y / COARSE) - basins.g0y;
+      for (let dj = -1; dj <= 1; dj++)
+        for (let di = -1; di <= 1; di++) {
+          const i = i0 + di, j = j0 + dj;
+          if (i >= 0 && j >= 0 && i < basins.gw && j < basins.gh && basins.kind[j * basins.gw + i] === 1) return true;
+        }
+      return false;
+    };
+  }
   areaTerrain = new Terrain(new SeedView(m.seeds.payloadFor({ x0: view.x0 - 600, y0: view.y0 - 600, x1: view.x1 + 600, y1: view.y1 + 600 })));
   lastSites = [];
   lastEdges = [];
@@ -312,7 +331,7 @@ const unreached = [0, 0, 0, 0];
 /** Roads in lakes per class: [km in water, crossings over WET_RUN m, short clips]; lake share of the area. */
 const wetLen = [[0, 0, 0], [0, 0, 0], [0, 0, 0], [0, 0, 0], [0, 0, 0]];
 const WET_RUN = 30;
-let lakeCells = 0, areaCells = 0, wetVerts = 0, allVerts = 0;
+let lakeCells = 0, areaCells = 0, wetVerts = 0, allVerts = 0, wetCoarse = 0, wetVertsCoarse = 0, lakeCoarse = 0;
 const wetMarks: { x: number; y: number; a: number }[] = [];
 for (const R of REGIONS) {
   let km = 0, crossings = 0, alongside = 0;
@@ -506,6 +525,7 @@ for (const R of REGIONS) {
           if (run === 0) [rx, ry] = [x, y];
           run += step;
           wetLen[g.cls][0] += step / 1000;
+          if (coarseLakeAt(x, y)) wetCoarse += step / 1000;
         } else end();
       }
       end();
@@ -518,7 +538,10 @@ for (const R of REGIONS) {
           if (x < area.x0 || x >= area.x1 || y < area.y0 || y >= area.y1 || vs.has(`${x},${y}`)) continue;
           vs.add(`${x},${y}`);
           allVerts++;
-          if (waterAt(x, y) > 0) wetVerts++;
+          if (waterAt(x, y) > 0) {
+            wetVerts++;
+            if (coarseLakeAt(x, y)) wetVertsCoarse++;
+          }
         }
     }
     if (process.env.LAKECMP) {
@@ -548,6 +571,7 @@ for (const R of REGIONS) {
         if (Number.isNaN(wv)) continue;
         areaCells++;
         if (wv > 0) lakeCells++;
+        if (wv > 0 && coarseLakeAt(x, y)) lakeCoarse++;
       }
     if (process.env.WETLOG) for (const w of wetMarks) console.log(`  wet run ${w.a.toFixed(0)} m at ?at=${Math.round(w.x)},${Math.round(w.y)}`);
     if (process.env.WET && wetMarks.length) sheet(segs, wetMarks.splice(0), `${process.env.WET}-R${R}-${a}.svg`);
@@ -615,11 +639,15 @@ for (const R of REGIONS) {
   console.log(`GRADE R=${R} share of road over its limit / over 1.5× limit: ` + ['N', 'D', 'C', 'T', 'P'].map((n, i) => `${n} ${((100 * gradeLen[i][1]) / (gradeLen[i][0] || 1)).toFixed(0)}% / ${((100 * gradeLen[i][2]) / (gradeLen[i][0] || 1)).toFixed(0)}% of ${(gradeLen[i][0] / 1000).toFixed(0)} km`).join('  '));
   for (const gl of gradeLen) gl.fill(0);
   console.log(`LAKES R=${R}: ${((100 * lakeCells) / (areaCells || 1)).toFixed(1)}% of the area is lake, ${wetVerts} of ${allVerts} way vertices in a lake; road in water (km, crossings > ${WET_RUN} m, shore clips): ` + ['N', 'D', 'C', 'T', 'P'].map((n, i) => `${n} ${wetLen[i][0].toFixed(2)} / ${wetLen[i][1]} / ${wetLen[i][2]}`).join('  '));
+  console.log(`COARSE LAKES R=${R}: ${((100 * lakeCoarse) / (lakeCells || 1)).toFixed(0)}% of lake area, ${wetVertsCoarse} of ${wetVerts} wet vertices, ${wetCoarse.toFixed(2)} km of road in water lie in (or a cell from) a closed coarse basin's lake`);
   for (const wl of wetLen) wl.fill(0);
   lakeCells = 0;
   areaCells = 0;
   wetVerts = 0;
   allVerts = 0;
+  wetCoarse = 0;
+  wetVertsCoarse = 0;
+  lakeCoarse = 0;
   console.log(`CROSS KINDS R=${R}: ${JSON.stringify(Object.fromEntries(crossKinds))}`);
   crossKinds.clear();
   siteCount.fill(0);
