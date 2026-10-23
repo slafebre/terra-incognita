@@ -192,7 +192,7 @@ An edge used by several ways takes the highest class.
 
 **Open.**
 - Roads in mountains are still often steeper than their class allows on the fine terrain: the network cannot see those slopes, and steep pieces rarely have the room or length for a full serpentine.
-- Net cells take 2–3 s each since forests carry headings.
+- Net cells take about 1–1.6 s each (up to ~2.8 s for a worker's first, before its path cache is warm).
 - Lakes are not known to the network; only small ones are avoided, by the fitting.
 - Footpaths to summits and passes, bridges and tunnels as symbols.
 - Making the coarse surface match the fine one (it is ~40–200 m lower and poorly correlated in hills) would help both roads and settlement placement.

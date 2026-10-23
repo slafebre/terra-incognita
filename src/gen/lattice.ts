@@ -316,59 +316,101 @@ export function latticeCell(gx: number, gy: number, field: CoarseField, set: Set
     if (paths.has(ck)) return paths.get(ck)!;
     const d = dist(a, b);
     const reach = CORRIDOR * d + extra;
-    const inside = (v: number) => {
-      const p = pos(v);
-      return dist(p, a) + dist(p, b) <= reach;
-    };
     const va = nearestVertex(a.x, a.y);
     const vb = nearestVertex(b.x, b.y);
-    const pb = pos(vb);
-    // States: (vertex, the neighbour it was entered from), for turn costs; packed as
-    // vertex × 9 + direction code (4 = the start, entered from nowhere).
-    const key = (v: number, from: number) => v * 9 + (from < 0 ? 4 : dirCode(v, from));
-    const cost = new Map<number, number>();
-    const prev = new Map<number, number>();
-    const states: [number, number][] = [[va, -1]];
-    const heap = new MinHeap(256);
-    cost.set(key(va, -1), 0);
-    heap.push(0, MIN_FACTOR * dist(pos(va), pb));
-    const done = new Set<number>();
-    let goal = -1;
-    let goalState: [number, number] = [va, -1];
-    const stateOf = new Map<number, [number, number]>();
-    while (heap.size) {
-      const st = states[heap.pop()];
-      const [v, from] = st;
-      const sk = key(v, from);
-      if (done.has(sk)) continue;
-      done.add(sk);
-      stateOf.set(sk, st);
-      if (v === vb) {
-        goal = sk;
-        goalState = st;
-        break;
+    // The corridor's box, indexed locally; states are local index × 9 + the code of
+    // the direction the vertex was entered from (4 = the start), for turn costs.
+    const R = reach / 2 + LATTICE;
+    const mx = (a.x + b.x) / 2;
+    const my = (a.y + b.y) / 2;
+    const vi0 = Math.floor((mx - R) / LATTICE) - 2;
+    const vj0 = Math.floor((my - R) / ROW) - 2;
+    const ni = Math.ceil((mx + R) / LATTICE) + 2 - vi0 + 1;
+    const nj = Math.ceil((my + R) / ROW) + 2 - vj0 + 1;
+    const N = ni * nj;
+    const loc = (v: number) => {
+      const p0 = vi(v) - vi0;
+      const q0 = vj(v) - vj0;
+      return p0 < 0 || q0 < 0 || p0 >= ni || q0 >= nj ? -1 : q0 * ni + p0;
+    };
+    const glob = (l: number) => pack((l % ni) + vi0, Math.floor(l / ni) + vj0);
+    const px = new Float64Array(N).fill(NaN);
+    const py = new Float64Array(N);
+    const inside = new Int8Array(N); // 0 unknown, 1 in, 2 out
+    const at = (l: number) => {
+      if (Number.isNaN(px[l])) {
+        const q = pos(glob(l));
+        px[l] = q.x;
+        py[l] = q.y;
       }
-      const c0 = cost.get(sk)!;
-      for (const w of neighbours(v)) {
-        if (w === from || !inside(w)) continue;
-        const pw = pos(w);
-        let c = c0 + edgeCost(field, v, w, k);
-        if (from >= 0) c += turnCost(from, v, w);
-        const nk = key(w, v);
-        if (c >= (cost.get(nk) ?? Infinity)) continue;
-        cost.set(nk, c);
-        prev.set(nk, sk);
-        states.push([w, v]);
-        heap.push(states.length - 1, c + MIN_FACTOR * dist(pw, pb));
-      }
-    }
+    };
+    const la = loc(va);
+    const lb = loc(vb);
     let out: [number, number][] | null = null;
-    if (goal >= 0) {
-      out = [];
-      let [v, from] = goalState;
-      for (let s = goal; prev.has(s); s = prev.get(s)!) {
-        out.push([from, v]);
-        [v, from] = stateOf.get(prev.get(s)!)!;
+    if (la >= 0 && lb >= 0) {
+      at(lb);
+      const bx = px[lb];
+      const by = py[lb];
+      const cost = new Float64Array(N * 9).fill(Infinity);
+      const prev = new Int32Array(N * 9).fill(-1);
+      const done = new Uint8Array(N * 9);
+      const heap = new MinHeap(256);
+      at(la);
+      cost[la * 9 + 4] = 0;
+      heap.push(la * 9 + 4, MIN_FACTOR * Math.hypot(px[la] - bx, py[la] - by));
+      let goal = -1;
+      while (heap.size) {
+        const st = heap.pop();
+        if (done[st]) continue;
+        done[st] = 1;
+        const code = st % 9;
+        const l = (st - code) / 9;
+        if (l === lb) {
+          goal = st;
+          break;
+        }
+        const p0 = l % ni;
+        const q0 = (l - p0) / ni;
+        let lf = -1;
+        if (code !== 4) {
+          const fp = p0 + (code % 3) - 1;
+          const fq = q0 + Math.floor(code / 3) - 1;
+          if (fp >= 0 && fq >= 0 && fp < ni && fq < nj) lf = fq * ni + fp;
+        }
+        at(l);
+        const c0 = cost[st];
+        const nb = ((q0 + vj0) & 1) !== 0 ? NB_ODD : NB_EVEN;
+        for (let dd = 0; dd < 6; dd++) {
+          const wp = p0 + nb[dd][0];
+          const wq = q0 + nb[dd][1];
+          if (wp < 0 || wq < 0 || wp >= ni || wq >= nj) continue;
+          const lw = wq * ni + wp;
+          if (lw === lf) continue;
+          if (inside[lw] === 0) {
+            at(lw);
+            inside[lw] = Math.hypot(px[lw] - a.x, py[lw] - a.y) + Math.hypot(px[lw] - b.x, py[lw] - b.y) <= reach ? 1 : 2;
+          }
+          if (inside[lw] === 2) continue;
+          let c = c0 + edgeCost(field, glob(l), glob(lw), k);
+          if (lf >= 0) {
+            at(lf);
+            const ux = px[l] - px[lf];
+            const uy = py[l] - py[lf];
+            const wx = px[lw] - px[l];
+            const wy = py[lw] - py[l];
+            const cos = (ux * wx + uy * wy) / (Math.hypot(ux, uy) * Math.hypot(wx, wy));
+            c += cos < SHARP_COS ? SHARP_TURN : TURN_COST * (1 - cos);
+          }
+          const ns = lw * 9 + (q0 - wq + 1) * 3 + (p0 - wp + 1);
+          if (c >= cost[ns]) continue;
+          cost[ns] = c;
+          prev[ns] = st;
+          heap.push(ns, c + MIN_FACTOR * Math.hypot(px[lw] - bx, py[lw] - by));
+        }
+      }
+      if (goal >= 0) {
+        out = [];
+        for (let st = goal; prev[st] >= 0; st = prev[st]) out.push([glob((prev[st] - (prev[st] % 9)) / 9), glob((st - (st % 9)) / 9)]);
       }
     }
     if (paths.size > 20000) paths.delete(paths.keys().next().value!);
@@ -406,7 +448,7 @@ export function latticeCell(gx: number, gy: number, field: CoarseField, set: Set
    * vertex is dear: turning on steep ground is left to the fine routing). Returns the
    * way from a vertex back to the network.
    */
-  const forest = (sources: Set<number>, m: number, reach: number, k: RoadClass = ROAD_C): ((v: number) => number[]) => {
+  const forest = (sources: Set<number>, m: number, reach: number, k: RoadClass, targets: number[]): ((v: number) => number[]) => {
     // Vertices of the box, indexed locally; states are local index × 9 + direction code.
     const vi0 = Math.floor((x0 - m - JITTER) / LATTICE) - 2;
     const vi1 = Math.ceil((x1 + m + JITTER) / LATTICE) + 2;
@@ -425,33 +467,82 @@ export function latticeCell(gx: number, gy: number, field: CoarseField, set: Set
     const done = new Uint8Array(ni * nj * 9);
     const best = new Int32Array(ni * nj).fill(-1); // vertex → its cheapest state
     const heap = new MinHeap(1024);
-    const fromOf = (st: number) => {
-      const code = st % 9;
-      if (code === 4) return -1;
-      const v = glob((st - code) / 9);
-      return pack(vi(v) + (code % 3) - 1, vj(v) + Math.floor(code / 3) - 1);
-    };
     for (const s0 of sources) {
       const l = loc(s0);
       if (l < 0) continue;
       cost[l * 9 + 4] = 0;
       heap.push(l * 9 + 4, 0);
     }
-    while (heap.size) {
+    // Stop once every target is reached: their ways are then final.
+    const wanted = new Uint8Array(ni * nj);
+    let left = 0;
+    for (const t of targets) {
+      const l = loc(t);
+      if (l >= 0 && !wanted[l]) {
+        wanted[l] = 1;
+        left++;
+      }
+    }
+    // Local caches (the hot loop): positions, inside-the-box, edge costs per direction.
+    const N = ni * nj;
+    const px = new Float64Array(N).fill(NaN);
+    const py = new Float64Array(N);
+    const inside = new Int8Array(N); // 0 unknown, 1 in, 2 out
+    const ec = new Float64Array(N * 6).fill(-1);
+    const at = (l: number) => {
+      if (Number.isNaN(px[l])) {
+        const q = pos(glob(l));
+        px[l] = q.x;
+        py[l] = q.y;
+      }
+    };
+    while (heap.size && left > 0) {
       const st = heap.pop();
       if (done[st]) continue;
       done[st] = 1;
-      const l = (st - (st % 9)) / 9;
-      if (best[l] < 0) best[l] = st;
-      const v = glob(l);
+      const code = st % 9;
+      const l = (st - code) / 9;
+      if (best[l] < 0) {
+        best[l] = st;
+        if (wanted[l]) left--;
+      }
+      const a = l % ni;
+      const b = (l - a) / ni;
       const c0 = cost[st];
-      const from = fromOf(st);
-      for (const w of neighbours(v)) {
-        if (w === from) continue;
-        const lw = loc(w);
-        if (lw < 0 || !inBox(pos(w), m)) continue;
-        const c = c0 + edgeCost(field, v, w, k) + (from >= 0 ? turnCost(from, v, w) : 0);
-        const ns = lw * 9 + dirCode(w, v);
+      // The vertex this state came from (local), for turn costs.
+      let lf = -1;
+      if (code !== 4) {
+        const fa = a + (code % 3) - 1;
+        const fb = b + Math.floor(code / 3) - 1;
+        if (fa >= 0 && fb >= 0 && fa < ni && fb < nj) lf = fb * ni + fa;
+      }
+      at(l);
+      const nb = ((b + vj0) & 1) !== 0 ? NB_ODD : NB_EVEN;
+      for (let d = 0; d < 6; d++) {
+        const wa = a + nb[d][0];
+        const wb = b + nb[d][1];
+        if (wa < 0 || wb < 0 || wa >= ni || wb >= nj) continue;
+        const lw = wb * ni + wa;
+        if (lw === lf) continue;
+        if (inside[lw] === 0) {
+          at(lw);
+          inside[lw] = inBox({ x: px[lw], y: py[lw] }, m) ? 1 : 2;
+        }
+        if (inside[lw] === 2) continue;
+        let e = ec[l * 6 + d];
+        if (e < 0) e = ec[l * 6 + d] = edgeCost(field, glob(l), glob(lw), k);
+        let c = c0 + e;
+        if (lf >= 0) {
+          at(lf);
+          const ux = px[l] - px[lf];
+          const uy = py[l] - py[lf];
+          const wx = px[lw] - px[l];
+          const wy = py[lw] - py[l];
+          const cos = (ux * wx + uy * wy) / (Math.hypot(ux, uy) * Math.hypot(wx, wy));
+          c += cos < SHARP_COS ? SHARP_TURN : TURN_COST * (1 - cos);
+        }
+        // Entered from l: direction code of l as seen from lw.
+        const ns = lw * 9 + (b - wb + 1) * 3 + (a - wa + 1);
         if (c > reach || c >= cost[ns]) continue;
         cost[ns] = c;
         parent[ns] = st;
@@ -466,18 +557,6 @@ export function latticeCell(gx: number, gy: number, field: CoarseField, set: Set
       return out;
     };
   };
-  /** Cost of turning at v, coming from `from` and going on to w (m). */
-  function turnCost(from: number, v: number, w: number): number {
-    const pf = pos(from);
-    const pv = pos(v);
-    const pw = pos(w);
-    const ux = pv.x - pf.x;
-    const uy = pv.y - pf.y;
-    const wx = pw.x - pv.x;
-    const wy = pw.y - pv.y;
-    const cos = (ux * wx + uy * wy) / (Math.hypot(ux, uy) * Math.hypot(wx, wy));
-    return cos < SHARP_COS ? SHARP_TURN : TURN_COST * (1 - cos);
-  }
   /** Vertices on roads (not tracks or paths), plus the given sites'. */
   const roadVertices = (extra: Site[]) => {
     const s = new Set<number>();
@@ -492,9 +571,10 @@ export function latticeCell(gx: number, gy: number, field: CoarseField, set: Set
 
   // 3. Hamlet roads.
   const tvNear = tv.filter((s) => inBox(s, hamletForestM));
-  const pA = forest(roadVertices(tvNear), hamletForestM, HAMLET_REACH * COST_CAP);
   const hamlets = sitesIn(HAMLET, hamletM);
-  for (const h of hamlets) follow(pA, nearestVertex(h.x, h.y), ROAD_C);
+  const hv = hamlets.map((h) => nearestVertex(h.x, h.y));
+  const pA = forest(roadVertices(tvNear), hamletForestM, HAMLET_REACH * COST_CAP, ROAD_C, hv);
+  for (const v of hv) follow(pA, v, ROAD_C);
 
   // 4. Shortcuts: neighbouring settlements (Gabriel pairs) that the roads so far
   // join only by a long way round get a direct minor road — or, where that would
@@ -559,9 +639,10 @@ export function latticeCell(gx: number, gy: number, field: CoarseField, set: Set
   }
 
   // 5. Farm roads.
-  const pB = forest(roadVertices([...tvNear, ...hamlets]), farmForestM, FARM_REACH * COST_CAP);
   const farms = sitesIn(FARM, farmM);
-  for (const f of farms) follow(pB, nearestVertex(f.x, f.y), ROAD_C);
+  const fv = farms.map((f) => nearestVertex(f.x, f.y));
+  const pB = forest(roadVertices([...tvNear, ...hamlets]), farmForestM, FARM_REACH * COST_CAP, ROAD_C, fv);
+  for (const v of fv) follow(pB, v, ROAD_C);
 
   // 6. Tracks: scattered points of open land and forest far from any road get a
   // track back to the network, grown as one forest so nearby tracks merge.
@@ -570,8 +651,8 @@ export function latticeCell(gx: number, gy: number, field: CoarseField, set: Set
       [...roadVertices([])].map((v) => pos(v)),
       512,
     );
-    const pT = forest(roadVertices([]), farmM, TRACK_REACH * COST_CAP, ROAD_T);
     const box = { x0: x0 - trackM, y0: y0 - trackM, x1: x1 + trackM, y1: y1 + trackM };
+    const seeds: number[] = [];
     for (const v of verticesIn(box)) {
       const p = pos(v);
       // Fewer on steep ground: mountain slopes are crossed by few ways, which then
@@ -582,8 +663,10 @@ export function latticeCell(gx: number, gy: number, field: CoarseField, set: Set
       if (hash3(0x7ac4, vi(v), vj(v)) / 4294967296 >= TRACK_DENSITY * thin) continue;
       if (p.z > TRACK_ALT || roadPts.near(p.x, p.y, TRACK_GAP).length) continue;
       if (neighbours(v).some((w) => edgeGrade(field, v, w) > TRACK_STEEP)) continue;
-      follow(pT, v, ROAD_T);
+      seeds.push(v);
     }
+    const pT = forest(roadVertices([]), farmM, TRACK_REACH * COST_CAP, ROAD_T, seeds);
+    for (const v of seeds) follow(pT, v, ROAD_T);
   }
 
   // Owned edges: midpoint in the cell.
