@@ -6,8 +6,9 @@
 import { ChunkManager } from '../src/chunks/manager';
 import { mergeApproaches, type RoadEdge, type SegmentPath } from '../src/gen/roads';
 import type { Site } from '../src/gen/settle';
-import { nearestVertex, vertexPos } from '../src/gen/lattice';
-import { setRegionOverride } from '../src/gen/terrain';
+import { DEBUG_PATHS, debugPaths, edgeGrade, nearestVertex, neighbours, vertexPos } from '../src/gen/lattice';
+import { setRegionOverride, Terrain, upliftOf } from '../src/gen/terrain';
+import { SeedView } from '../src/gen/seeds';
 import { APRON, CELL, CHUNK, DEM_W } from '../src/lib/constants';
 import type { TaskRequest, TaskResult } from '../src/worker/protocol';
 import { runTask } from '../src/worker/tasks';
@@ -30,6 +31,8 @@ const JUNCTION = 40;
 const ALONGSIDE = 22;
 
 let lastSites: Site[] = [];
+/** Full terrain of the last area (fine seeds exist there). */
+let areaTerrain: Terrain | undefined;
 let lastEdges: RoadEdge[] = [];
 
 /**
@@ -85,6 +88,7 @@ let areaNo = 0;
 
 async function segments(R: number): Promise<SegmentPath[]> {
   setRegionOverride(R);
+  if (process.env.DETOURS || process.env.GRADECMP) debugPaths(true);
   Math.random = rng(SEED * 7919 + areaNo++ * 104729 + Math.round(R * 1000));
   const pool = {
     size: 4,
@@ -146,6 +150,7 @@ async function segments(R: number): Promise<SegmentPath[]> {
     const j = APRON + Math.round((y - c.cy * CHUNK) / CELL);
     return c.water[j * DEM_W + i];
   };
+  areaTerrain = new Terrain(new SeedView(m.seeds.payloadFor({ x0: view.x0 - 600, y0: view.y0 - 600, x1: view.x1 + 600, y1: view.y1 + 600 })));
   lastSites = [];
   lastEdges = [];
   for (const n of m.nets.values()) {
@@ -320,6 +325,106 @@ for (const R of REGIONS) {
     const s = stats(segs);
     const lp = smallLoops(segs);
     const de = deadEnds(segs);
+    if (process.env.GRADECMP && DEBUG_PATHS?.length) {
+      // Coarse (what the network sees) vs fine (what the map shows) gradient of every
+      // lattice edge in the area, between its vertices.
+      const field = DEBUG_PATHS[0].field;
+      let n = 0, err = 0, falseSteep = 0, falseGentle = 0, sx = 0, sy = 0, sxx = 0, syy = 0, sxy = 0;
+      const seenE = new Set<number>();
+      for (let x = area.x0; x < area.x1; x += 120)
+        for (let y = area.y0; y < area.y1; y += 120) {
+          const v = nearestVertex(x, y);
+          if (seenE.has(v)) continue;
+          seenE.add(v);
+          const [vx, vy] = vertexPos(v);
+          for (const w of neighbours(v)) {
+            if (w < v) continue;
+            const [wx, wy] = vertexPos(w);
+            const L = Math.hypot(wx - vx, wy - vy);
+            const gc = edgeGrade(field, v, w);
+            const gf = Math.abs(elevAt(wx, wy) - elevAt(vx, vy)) / L;
+            if (Number.isNaN(gf)) continue;
+            n++;
+            err += Math.abs(gc - gf);
+            if (gc > 0.07 && gf < 0.05) falseSteep++;
+            if (gc < 0.05 && gf > 0.07) falseGentle++;
+            sx += gc; sy += gf; sxx += gc * gc; syy += gf * gf; sxy += gc * gf;
+          }
+        }
+      const r = (n * sxy - sx * sy) / Math.sqrt((n * sxx - sx * sx) * (n * syy - sy * sy));
+      {
+        // Heights themselves at vertices.
+        let m = 0, a = 0, b = 0, aa = 0, bb = 0, ab = 0, d = 0;
+        for (const v of seenE) {
+          const [vx, vy] = vertexPos(v);
+          const zc = field.z(vx, vy);
+          const zf = elevAt(vx, vy);
+          if (Number.isNaN(zf)) continue;
+          m++; a += zc; b += zf; aa += zc * zc; bb += zf * zf; ab += zc * zf; d += Math.abs(zc - zf);
+        }
+        const rz = (m * ab - a * b) / Math.sqrt((m * aa - a * a) * (m * bb - b * b));
+        if (areaTerrain) {
+          const DEBUG_TERRAIN = areaTerrain;
+          const f = new Float64Array(4);
+          let q = 0, c1 = 0, c2 = 0, c11 = 0, c22 = 0, c12 = 0, dd = 0;
+          for (const v of seenE) {
+            const [vx, vy] = vertexPos(v);
+            DEBUG_TERRAIN.fields(vx, vy, f);
+            const zp = DEBUG_TERRAIN.elevationWith(vx, vy, f[0], f[1], f[2], f[3], 64) + upliftOf(f[0]);
+            const zf = elevAt(vx, vy);
+            if (Number.isNaN(zf)) continue;
+            q++; c1 += zp; c2 += zf; c11 += zp * zp; c22 += zf * zf; c12 += zp * zf; dd += Math.abs(zp - zf);
+          }
+          {
+            const zp = (x: number, y: number) => {
+              DEBUG_TERRAIN.fields(x, y, f);
+              return DEBUG_TERRAIN.elevationWith(x, y, f[0], f[1], f[2], f[3], 64) + upliftOf(f[0]);
+            };
+            let n2 = 0, a1 = 0, a2 = 0, a11 = 0, a22 = 0, a12 = 0;
+            for (const v of seenE) {
+              const [vx, vy] = vertexPos(v);
+              for (const w of neighbours(v)) {
+                if (w < v) continue;
+                const [wx, wy] = vertexPos(w);
+                const L = Math.hypot(wx - vx, wy - vy);
+                const gp = Math.abs(zp(wx, wy) - zp(vx, vy)) / L;
+                const gf = Math.abs(elevAt(wx, wy) - elevAt(vx, vy)) / L;
+                if (Number.isNaN(gf)) continue;
+                n2++; a1 += gp; a2 += gf; a11 += gp * gp; a22 += gf * gf; a12 += gp * gf;
+              }
+            }
+            console.log(`PRE-EROSION GRADES: correlation with the map ${((n2 * a12 - a1 * a2) / Math.sqrt((n2 * a11 - a1 * a1) * (n2 * a22 - a2 * a2))).toFixed(2)} (mean ${(100 * a1 / n2).toFixed(1)}% vs map ${(100 * a2 / n2).toFixed(1)}%)`);
+          }
+          console.log(`PRE-EROSION: mean ${(c1 / q).toFixed(0)} m vs fine ${(c2 / q).toFixed(0)} m, mean |diff| ${(dd / q).toFixed(1)} m, correlation ${((q * c12 - c1 * c2) / Math.sqrt((q * c11 - c1 * c1) * (q * c22 - c2 * c2))).toFixed(3)}`);
+        }
+        console.log(`HEIGHTS: ${m} vertices, mean coarse ${(a / m).toFixed(0)} m, fine ${(b / m).toFixed(0)} m, mean |diff| ${(d / m).toFixed(1)} m, correlation ${rz.toFixed(3)}, std coarse ${Math.sqrt(aa / m - (a / m) ** 2).toFixed(0)} fine ${Math.sqrt(bb / m - (b / m) ** 2).toFixed(0)}`);
+      }
+      console.log(`GRADECMP: ${n} edges, mean |coarse − fine| ${(100 * err / n).toFixed(1)} pts, correlation ${r.toFixed(2)}; coarse >7% but map <5%: ${(100 * falseSteep / n).toFixed(1)}%, coarse <5% but map >7%: ${(100 * falseGentle / n).toFixed(1)}%  (mean coarse ${(100 * sx / n).toFixed(1)}%, fine ${(100 * sy / n).toFixed(1)}%)`);
+    }
+    if (process.env.DETOURS && DEBUG_PATHS) {
+      const seenD = new Set<string>();
+      for (const p of DEBUG_PATHS) {
+        const vs = [p.edges[p.edges.length - 1][0], ...p.edges.slice().reverse().map((e) => e[1])];
+        const P = vs.map((v) => vertexPos(v));
+        const along: number[] = [0];
+        for (let i = 1; i < vs.length; i++) along.push(along[i - 1] + Math.hypot(P[i][0] - P[i - 1][0], P[i][1] - P[i - 1][1]));
+        for (let i = 0; i < vs.length; i++)
+          for (let j = i + 4; j < vs.length; j++) {
+            const direct = Math.hypot(P[j][0] - P[i][0], P[j][1] - P[i][1]);
+            if (direct > 250 || along[j] - along[i] < 4 * direct + 400) continue;
+            if (!neighbours(vs[i]).includes(vs[j])) break;
+            const inArea = P[i][0] >= area.x0 && P[i][0] < area.x1 && P[i][1] >= area.y0 && P[i][1] < area.y1;
+            const k = `${vs[i]}-${vs[j]}`;
+            if (!inArea || seenD.has(k)) break;
+            seenD.add(k);
+            const fine = Math.abs(elevAt(P[j][0], P[j][1]) - elevAt(P[i][0], P[i][1])) / direct;
+            console.log(`  detour cls ${p.k}: ${(along[j] - along[i]).toFixed(0)} m round, direct ${direct.toFixed(0)} m: coarse grade ${(100 * edgeGrade(p.field, vs[i], vs[j])).toFixed(0)}%, fine ${(100 * fine).toFixed(0)}%`);
+            i = j;
+            break;
+          }
+      }
+      debugPaths(true);
+    }
     // Grades along drawn roads on the fine DEM, over 48 m windows.
     for (const g of segs) {
       const pts: [number, number][] = [];

@@ -35,7 +35,7 @@ export function runTask(t: TaskRequest): { result: TaskResult; transfer: Transfe
       const terrain = new Terrain(view);
       const field = new CoarseField(terrain, view);
       const build = { tree: netCell, mesh: meshCell, lattice: latticeCell }[networkMode()];
-      const result = build(t.gx, t.gy, field, new Settlements(field, terrain, view));
+      const result = build(t.gx, t.gy, field, new Settlements(field, terrain, view), terrain);
       return { result: { kind: 'net', result, ms: ms() }, transfer: [] };
     }
     case 'roads': {

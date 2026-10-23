@@ -21,6 +21,7 @@ import {
   type SegmentTask,
 } from './roads';
 import { FARM, HAMLET, type Site, type Settlements, TOWN, VILLAGE } from './settle';
+import type { Terrain } from './terrain';
 
 /**
  * Road network on a shared lattice. All roads are made of the edges of one graph:
@@ -106,6 +107,13 @@ class Grid<T extends { x: number; y: number }> {
   }
 }
 
+/** Dev only: when set, main-road paths are collected here. */
+export let DEBUG_PATHS: { k: RoadClass; edges: [number, number][]; field: CoarseField }[] | undefined;
+/** Dev only: the terrain of the last cell built while DEBUG_PATHS is on. */
+export let DEBUG_TERRAIN: Terrain | undefined;
+export const debugPaths = (on: boolean) => (DEBUG_PATHS = on ? [] : undefined);
+export { edgeCost, edgeGrade, neighbours };
+
 const OFF = 1 << 20;
 const SPAN = 1 << 21;
 /** Vertex (i, j) packed into one number. */
@@ -166,14 +174,15 @@ function verticesIn(r: { x0: number; y0: number; x1: number; y1: number }): numb
 const edgeKey = (u: number, v: number) => (u < v ? `${u}_${v}` : `${v}_${u}`);
 
 /** Terrain at vertices, cached per field. */
-const vertexCache = new WeakMap<CoarseField, Map<number, { x: number; y: number; z: number; valley: number }>>();
+const vertexCache = new WeakMap<CoarseField, Map<number, { x: number; y: number; z: number; area: number; valley: number }>>();
 function vdata(field: CoarseField, v: number) {
   let m = vertexCache.get(field);
   if (!m) vertexCache.set(field, (m = new Map()));
   let d = m.get(v);
   if (!d) {
     const [x, y] = vertexPos(v);
-    d = { x, y, z: field.z(x, y), valley: smoothstep(VALLEY_AREA[0], VALLEY_AREA[1], field.area(x, y)) };
+    const area = field.area(x, y);
+    d = { x, y, z: field.z(x, y), area, valley: smoothstep(VALLEY_AREA[0], VALLEY_AREA[1], area) };
     m.set(v, d);
   }
   return d;
@@ -196,29 +205,54 @@ function edgeCost(field: CoarseField, u: number, v: number, cls: RoadClass): num
   m.set(ck, c);
   return c;
 }
-/** Coarse gradient along edge u–v (climb sampled along it, over its length). */
-function edgeGrade(field: CoarseField, u: number, v: number): number {
+/**
+ * Coarse terrain along edge u–v. The coarse surface does not predict the map's
+ * slopes at the scale of one edge (the detailed erosion that makes them only runs
+ * near the view), so steepness is judged over a longer baseline: the slope along
+ * the edge's direction across SLOPE_BASE m around its middle. Plus whether it
+ * crosses a stream (much more drainage under its middle than at its ends).
+ */
+const SLOPE_BASE = 500;
+const terrainCache = new WeakMap<CoarseField, Map<number, { grade: number; stream: number }>>();
+function edgeTerrain(field: CoarseField, u: number, v: number): { grade: number; stream: number } {
+  let m = terrainCache.get(field);
+  if (!m) terrainCache.set(field, (m = new Map()));
+  const lo = Math.min(u, v);
+  const key = lo * 9 + dirCode(lo, Math.max(u, v));
+  let r = m.get(key);
+  if (r) return r;
   const a = vdata(field, u);
   const b = vdata(field, v);
-  let climb = 0;
-  let zp = a.z;
-  for (const t of [0.25, 0.5, 0.75]) {
-    const z = field.z(a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t);
-    climb += Math.abs(z - zp);
-    zp = z;
-  }
-  climb += Math.abs(b.z - zp);
-  return climb / Math.hypot(b.x - a.x, b.y - a.y);
+  const len = Math.hypot(b.x - a.x, b.y - a.y);
+  const mx = (a.x + b.x) / 2;
+  const my = (a.y + b.y) / 2;
+  const dx = ((b.x - a.x) / len) * (SLOPE_BASE / 2);
+  const dy = ((b.y - a.y) / len) * (SLOPE_BASE / 2);
+  const mid = field.area(mx, my);
+  r = {
+    grade: Math.abs(field.z(mx + dx, my + dy) - field.z(mx - dx, my - dy)) / SLOPE_BASE,
+    stream: mid > 2 * Math.max(a.area, b.area) ? mid : 0,
+  };
+  m.set(key, r);
+  return r;
 }
+/** Coarse gradient around edge u–v, along it, over SLOPE_BASE. */
+function edgeGrade(field: CoarseField, u: number, v: number): number {
+  return edgeTerrain(field, u, v).grade;
+}
+/** Slope penalty weight and cap (× length): soft — at this scale it is only a tendency. */
+const SLOPE_W = 1.5;
+const SLOPE_CAP = 6;
+/** Crossing a stream draining more than BRIDGE_AREA km² costs a bridge (m), more for a river. */
+const BRIDGE_AREA = 1;
+const BRIDGE_COST = 40;
 function edgeCostRaw(field: CoarseField, u: number, v: number, cls: RoadClass): number {
   const a = vdata(field, u);
   const b = vdata(field, v);
   const len = Math.hypot(b.x - a.x, b.y - a.y);
-  const gmax = MAX_GRADE[cls];
-  // Climb sampled along the edge, so a bump or dip between the vertices counts.
-  const g = edgeGrade(field, u, v);
-  let c = len * (1 + 3 * (g / gmax) ** 2);
-  if (g > gmax) c *= 1 + 15 * (g / gmax - 1); // only where there's no way round
+  const { grade: g, stream } = edgeTerrain(field, u, v);
+  let c = len * Math.min(SLOPE_CAP, 1 + SLOPE_W * (g / MAX_GRADE[cls]) ** 2);
+  if (stream > BRIDGE_AREA) c += BRIDGE_COST * (1 + Math.log10(stream / BRIDGE_AREA));
   c *= 1 - (VALLEY_BONUS * (a.valley + b.valley)) / 2;
   const lo = Math.min(u, v);
   const hi = Math.max(u, v);
@@ -228,7 +262,8 @@ function edgeCostRaw(field: CoarseField, u: number, v: number, cls: RoadClass): 
 /** No edge costs less than this × its length (for A* estimates). */
 const MIN_FACTOR = 1 - VALLEY_BONUS;
 
-export function latticeCell(gx: number, gy: number, field: CoarseField, set: Settlements): NetCell {
+export function latticeCell(gx: number, gy: number, field: CoarseField, set: Settlements, terrain?: Terrain): NetCell {
+  if (DEBUG_PATHS) DEBUG_TERRAIN = terrain;
   const x0 = gx * NET_CELL;
   const y0 = gy * NET_CELL;
   const x1 = x0 + NET_CELL;
@@ -339,6 +374,7 @@ export function latticeCell(gx: number, gy: number, field: CoarseField, set: Set
     }
     if (paths.size > 20000) paths.delete(paths.keys().next().value!);
     paths.set(ck, out);
+    if (out && k <= ROAD_D) DEBUG_PATHS?.push({ k, edges: out, field });
     return out;
   };
   const mainPath = (k: RoadClass, a: Site, b: Site) => {
@@ -613,6 +649,18 @@ export function routeCurves(tasks: SegmentTask[], p: RoadPatch): SegmentPath[] {
       }
     return best;
   };
+  /** Bilinear fine elevation at world (x, y). */
+  const zAt = (x: number, y: number) => {
+    const u = Math.min(w - 1.001, Math.max(0, x / NODE - p.gx));
+    const v = Math.min(h - 1.001, Math.max(0, y / NODE - p.gy));
+    const i = Math.floor(u);
+    const j = Math.floor(v);
+    const k = j * w + i;
+    const fu = u - i;
+    const fv = v - j;
+    const z = p.zE;
+    return (z[k] * (1 - fu) + z[k + 1] * fu) * (1 - fv) + (z[k + w] * (1 - fu) + z[k + w + 1] * fu) * fv;
+  };
   return tasks.map((t) => {
     const [ax, ay] = snap(t.ax, t.ay);
     const [bx, by] = snap(t.bx, t.by);
@@ -633,17 +681,134 @@ export function routeCurves(tasks: SegmentTask[], p: RoadPatch): SegmentPath[] {
     const [m1x, m1y] = tangent(bx, by, ax, ay, t.pb);
     const t1x = -m1x;
     const t1y = -m1y;
-    const n = Math.max(2, Math.ceil(len / 8));
-    const xy = new Float32Array(2 * (n + 1));
+    const n = Math.max(2, Math.ceil(len / FIT_STEP));
+    const xs: number[] = [];
+    const ys: number[] = [];
     for (let s = 0; s <= n; s++) {
       const u = s / n;
       const h00 = 2 * u ** 3 - 3 * u ** 2 + 1;
       const h10 = u ** 3 - 2 * u ** 2 + u;
       const h01 = -2 * u ** 3 + 3 * u ** 2;
       const h11 = u ** 3 - u ** 2;
-      xy[2 * s] = h00 * ax + h10 * t0x + h01 * bx + h11 * t1x;
-      xy[2 * s + 1] = h00 * ay + h10 * t0y + h01 * by + h11 * t1y;
+      xs.push(h00 * ax + h10 * t0x + h01 * bx + h11 * t1x);
+      ys.push(h00 * ay + h10 * t0y + h01 * by + h11 * t1y);
+    }
+    fitToTerrain(xs, ys, MAX_GRADE[t.cls], zAt, (x, y) => {
+      const i = Math.round(x / NODE) - p.gx;
+      const j = Math.round(y / NODE) - p.gy;
+      if (i < 0 || j < 0 || i >= w || j >= h) return 0;
+      const k = j * w + i;
+      return !Number.isNaN(p.lake[k]) ? FIT_WATER : p.A[k] > 1 ? FIT_STREAM : 0;
+    });
+    const xy = new Float32Array(2 * (n + 1));
+    for (let s = 0; s <= n; s++) {
+      xy[2 * s] = xs[s];
+      xy[2 * s + 1] = ys[s];
     }
     return { key: t.key, cls: t.cls, xy, curve: true };
   });
+}
+
+/** Terrain fitting: samples every FIT_STEP m, shifted sideways by up to FIT_BAND m in FIT_OFFSET steps. */
+const FIT_STEP = 10;
+const FIT_BAND = 32;
+const FIT_OFFSET = 8;
+/** Per-sample penalties (m-equivalent) for standing in a lake or on a stream bed. */
+const FIT_WATER = 400;
+const FIT_STREAM = 6;
+/** Weights: steepness beyond the class limit, sideways change (smoothness), shift itself. */
+const FIT_GRADE = 4;
+const FIT_SMOOTH = 8;
+const FIT_SHIFT = 2;
+
+/**
+ * Fits a drawn edge to the fine terrain: each interior sample may move sideways
+ * (along the curve's normal) within a band that fades to nothing at both ends — so
+ * the vertices, and the directions the curve shares there with its neighbours, stay
+ * put. The best shifts (dynamic programming over samples × offsets) keep the road
+ * gentle where the band allows, smooth, near its line, and out of lakes and off
+ * stream beds. Uses only this edge and the terrain near it: every chunk draws it
+ * the same.
+ */
+function fitToTerrain(
+  xs: number[],
+  ys: number[],
+  gmax: number,
+  zAt: (x: number, y: number) => number,
+  wet: (x: number, y: number) => number,
+): void {
+  const n = xs.length - 1;
+  if (n < 3) return;
+  const K = Math.round(FIT_BAND / FIT_OFFSET);
+  const offs: number[] = [];
+  for (let k = -K; k <= K; k++) offs.push(k * FIT_OFFSET);
+  const O = offs.length;
+  // Normals along the curve, and the band at each sample.
+  const nx: number[] = [];
+  const ny: number[] = [];
+  const band: number[] = [];
+  for (let s = 0; s <= n; s++) {
+    const dx = xs[Math.min(n, s + 1)] - xs[Math.max(0, s - 1)];
+    const dy = ys[Math.min(n, s + 1)] - ys[Math.max(0, s - 1)];
+    const L = Math.hypot(dx, dy) || 1;
+    nx.push(-dy / L);
+    ny.push(dx / L);
+    band.push(FIT_BAND * Math.sin((Math.PI * s) / n) ** 2);
+  }
+  const px = (s: number, o: number) => xs[s] + offs[o] * nx[s];
+  const py = (s: number, o: number) => ys[s] + offs[o] * ny[s];
+  const z: number[][] = [];
+  const node: number[][] = [];
+  for (let s = 0; s <= n; s++) {
+    z.push([]);
+    node.push([]);
+    for (let o = 0; o < O; o++) {
+      const ok = Math.abs(offs[o]) <= band[s] + 1e-6;
+      z[s].push(ok ? zAt(px(s, o), py(s, o)) : NaN);
+      node[s].push(ok ? wet(px(s, o), py(s, o)) + FIT_SHIFT * (offs[o] / FIT_BAND) ** 2 : Infinity);
+    }
+  }
+  const cost: number[][] = [node[0].slice()];
+  const from: number[][] = [new Array(O).fill(-1)];
+  for (let s = 1; s <= n; s++) {
+    const c = new Array(O).fill(Infinity);
+    const f = new Array(O).fill(-1);
+    for (let o = 0; o < O; o++) {
+      if (node[s][o] === Infinity) continue;
+      for (let q = 0; q < O; q++) {
+        if (cost[s - 1][q] === Infinity) continue;
+        const ds = Math.hypot(px(s, o) - px(s - 1, q), py(s, o) - py(s - 1, q)) || 1;
+        const over = Math.max(0, Math.abs(z[s][o] - z[s - 1][q]) / ds - gmax) / gmax;
+        const v = cost[s - 1][q] + node[s][o] + ds * FIT_GRADE * over * over + (FIT_SMOOTH * (offs[o] - offs[q]) ** 2) / ds;
+        if (v < c[o]) {
+          c[o] = v;
+          f[o] = q;
+        }
+      }
+    }
+    cost.push(c);
+    from.push(f);
+  }
+  // Chosen shifts, smoothed (a short binomial kernel) and kept within the band.
+  const shift = new Array(n + 1).fill(0);
+  let o = K; // the end itself: no shift
+  for (let s = n; s >= 0; s--) {
+    shift[s] = offs[o];
+    const prev = from[s][o];
+    if (prev >= 0) o = prev;
+  }
+  const smooth = shift.map((_, s) => {
+    let a = 0;
+    let wsum = 0;
+    for (const [d, wt] of [[-2, 1], [-1, 4], [0, 6], [1, 4], [2, 1]]) {
+      const k = Math.max(0, Math.min(n, s + d));
+      a += wt * shift[k];
+      wsum += wt;
+    }
+    return Math.max(-band[s], Math.min(band[s], a / wsum));
+  });
+  for (let s = 0; s <= n; s++) {
+    xs[s] += smooth[s] * nx[s];
+    ys[s] += smooth[s] * ny[s];
+  }
 }
