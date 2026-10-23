@@ -887,7 +887,8 @@ export function planTown({ site, roads, patch: p }: PlanInput): TownPlan {
 
   // Tracks and footpaths through built-up land are residential streets there: the
   // plan redraws those segments, built-up runs as streets and the rest as before.
-  const replaced = new Set(redrawn.map((q) => q.key));
+  const inputKeys = new Set(sorted.map((q) => q.key));
+  const replaced = new Set(redrawn.filter((q) => inputKeys.has(q.key)).map((q) => q.key));
   const roadsOut = [...redrawn];
   for (const q of net) {
     if (q.cls !== ROAD_T && q.cls !== ROAD_P) continue;

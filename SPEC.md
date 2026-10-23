@@ -304,6 +304,7 @@ test/                invariant tests (Vitest)
   - gradient limits hold per road class
   - no N or D dead-ends inside the finished set
   - every settlement is connected
+  - street plans (synthetic villages and towns): the same plan whatever order the roads come in, streets meet roads and each other only at junctions, every street connected, off water, within the plan's extent, redrawn roads keep their far ends, tracks through built-up land become streets
   - no building overlaps a road or water
   - chunk borders join (height and polyline continuity)
 - **Visual checks** in the browser at phone and desktop sizes. A hidden `?debug` flag shows chunk stages and timings for development (not a user-facing panel).
