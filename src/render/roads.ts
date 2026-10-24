@@ -10,7 +10,7 @@ type Ctx = OffscreenCanvasRenderingContext2D;
 const WIDTH_M = [9, 7, 5, 0, 0];
 const MIN_PX = [3.2, 2.6, 1.9, 1.0, 0.9];
 /** Few passes: heavy smoothing pulls the legs of a hairpin onto each other. */
-const SMOOTH_PASSES = [2, 1, 1, 1, 1];
+export const SMOOTH_PASSES = [2, 1, 1, 1, 1];
 
 /** Built-up placeholders (until streets and buildings exist). */
 export function drawSites(ctx: Ctx, sites: Site[], cx: number, cy: number, pxPerM: number): void {

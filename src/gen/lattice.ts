@@ -2,7 +2,7 @@ import { CHUNK } from '../lib/constants';
 import { hash3 } from '../lib/hash';
 import { MinHeap } from '../lib/heap';
 import { smoothstep } from '../lib/noise';
-import { type CoarseField, DX, DY, NODE } from './hydro';
+import { type CoarseField, NODE } from './hydro';
 import {
   MAX_GRADE,
   MAX_LEN,
@@ -16,6 +16,7 @@ import {
   type RoadClass,
   type RoadEdge,
   type RoadPatch,
+  type Room,
   rngEdge,
   type SegmentPath,
   type SegmentTask,
@@ -798,13 +799,19 @@ export function latticeSegments(edges: RoadEdge[], cx: number, cy: number): Segm
     const my = (o.route[1] + o.route[3]) / 2 - (cy + 0.5) * CHUNK;
     return Math.abs(mx) < CHUNK / 2 + NEAR && Math.abs(my) < CHUNK / 2 + NEAR;
   });
-  /** Room either side of a run of edges (vertices `pts`, keys `own`): the nearest way not part of it nor meeting it, and the ways within ROOM_REACH. */
+  /**
+   * Room either side of a run of edges (vertices `pts`, keys `own`): the nearest way
+   * on each side not part of it (of a way meeting it, the far half; sides of its
+   * chord; a way reaching across counts on both), and the ways within ROOM_REACH.
+   */
   const surroundings = (pts: number[], own: Set<string>) => {
     const n = pts.length / 2;
     const ends = new Set<string>();
     for (let i = 0; i < n; i++) ends.add(k2(pts[2 * i], pts[2 * i + 1]));
-    let room = Infinity;
+    const room: Room = [ROOM_REACH, ROOM_REACH];
     const obstacles: number[] = [];
+    const [cx0, cy0] = [pts[0], pts[1]];
+    const [cdx, cdy] = [pts[2 * n - 2] - cx0, pts[2 * n - 1] - cy0];
     for (const o of local) {
       if (own.has(o.id)) continue;
       let r = o.route;
@@ -813,14 +820,19 @@ export function latticeSegments(edges: RoadEdge[], cx: number, cy: number): Segm
       const atA = ends.has(k2(r[0], r[1]));
       const atB = ends.has(k2(r[2], r[3]));
       if (atA && atB) continue;
+      const whole = r;
       if (atA) r = [(r[0] + r[2]) / 2, (r[1] + r[3]) / 2, r[2], r[3]];
       else if (atB) r = [r[0], r[1], (r[0] + r[2]) / 2, (r[1] + r[3]) / 2];
+      const s0 = sideOf(cdx, cdy, r[0] - cx0, r[1] - cy0);
+      const s1 = sideOf(cdx, cdy, r[2] - cx0, r[3] - cy0);
       for (let i = 1; i < n; i++) {
         const sgm = [pts[2 * i - 2], pts[2 * i - 1], pts[2 * i], pts[2 * i + 1]];
         if (Math.abs((r[0] + r[2]) / 2 - (sgm[0] + sgm[2]) / 2) > 600 || Math.abs((r[1] + r[3]) / 2 - (sgm[1] + sgm[3]) / 2) > 600) continue;
         const d = segDist(sgm, r);
-        room = Math.min(room, d, ROOM_REACH);
-        if (d < ROOM_REACH && (obstacles.length < 4 || obstacles[obstacles.length - 4] !== r[0] || obstacles[obstacles.length - 3] !== r[1])) obstacles.push(...r);
+        room[s0] = Math.min(room[s0], d);
+        room[s1] = Math.min(room[s1], d);
+        // Obstacles: the whole way, so a fine-routed piece can't wrap round one near the junction.
+        if (d < ROOM_REACH && (obstacles.length < 4 || obstacles[obstacles.length - 4] !== whole[0] || obstacles[obstacles.length - 3] !== whole[1])) obstacles.push(...whole);
       }
     }
     return { room, obstacles };
@@ -860,6 +872,9 @@ export function latticeSegments(edges: RoadEdge[], cx: number, cy: number): Segm
   }
   return out;
 }
+
+/** Side (0 left, 1 right) of a point (px, py) relative to a direction (dx, dy), both from one origin. */
+const sideOf = (dx: number, dy: number, px: number, py: number): 0 | 1 => (dx * py - dy * px >= 0 ? 0 : 1);
 
 /** Room around a piece is looked for this far (m): every chunk that sees the piece knows all ways that close. */
 const ROOM_REACH = 300;
@@ -970,7 +985,7 @@ export function routeCurves(tasks: SegmentTask[], p: RoadPatch): SegmentPath[] {
    * to its last (both snapped). `pa`/`pb`: the vertices beyond either end, if the road
    * goes on there.
    */
-  const routed = (key: string, cls: RoadClass, pts: number[], pa: [number, number] | undefined, pb: [number, number] | undefined, room: number, obstacles: number[]): SegmentPath => {
+  const routed = (key: string, cls: RoadClass, pts: number[], pa: [number, number] | undefined, pb: [number, number] | undefined, room: Room, obstacles: number[]): SegmentPath => {
     const n = pts.length / 2;
     const [ax, ay] = snap(pts[0], pts[1]);
     const [bx, by] = snap(pts[2 * n - 2], pts[2 * n - 1]);
@@ -978,9 +993,9 @@ export function routeCurves(tasks: SegmentTask[], p: RoadPatch): SegmentPath[] {
     // minus previous), as the piece or edge on the other side also uses.
     const inDir = pa ? [pts[2] - pa[0], pts[3] - pa[1]] : [bx - ax, by - ay];
     const outDir = pb ? [pb[0] - pts[2 * n - 4], pb[1] - pts[2 * n - 3]] : [bx - ax, by - ay];
-    // Each keeps to under half the way to its neighbour: two can't meet.
-    const band = Math.min(MICRO_BAND, MICRO_ROOM * Math.min(room, ROOM_REACH));
-    const xy = microRoute(ax, ay, bx, by, inDir, outDir, MAX_GRADE[cls], p, zAt, obstacles, band);
+    // Each side keeps under half the way to the nearest way there: two can't meet.
+    const band: Room = [Math.min(MICRO_BAND, MICRO_ROOM * room[0]), Math.min(MICRO_BAND, MICRO_ROOM * room[1])];
+    const xy = microRoute(ax, ay, bx, by, inDir, outDir, MAX_GRADE[cls], p, zAt, obstacles, band, cls);
     return { key, cls, xy: Float32Array.from(xy), micro: true };
   };
   const out: SegmentPath[] = [];
@@ -1205,17 +1220,96 @@ const MICRO_BAND = 200;
 const MICRO_ROOM = 0.45;
 const MICRO_CLEAR = 24;
 const MICRO_FREE = 48;
+/** Clearance (m) from the road's continuation beyond either end of a piece. */
+const MICRO_BEYOND = 10;
+/** Within this (m) of a piece's end, ways meeting there may be as close as they like. */
+const MICRO_JUNCTION = 12;
 /** Costs (m-equivalent): per 45° of turn, per unit of over-limit gradient per m, for
  * leaving off the road's arriving/leaving direction (per 45°), entering a stream bed. */
 const MICRO_TURN = 20;
 const MICRO_STEEP = 25;
-const MICRO_ENDS = 3;
+const MICRO_ENDS = 20;
 const MICRO_STREAM = 15;
 /** Water: per m of lake (a bridge or causeway), plus per crossing; per m on a dry node beside a lake. */
 const MICRO_WATER = 12;
 const MICRO_BRIDGE = 150;
 const MICRO_SHORE = 3;
-const MDIST = DX.map((dx, i) => Math.hypot(dx, DY[i]) * NODE);
+/**
+ * Moves of the fine routing: 16 headings 22.5° apart (the 8 neighbours and knight's
+ * moves between them), so a leg can follow the contours without stair-stepping
+ * between two of 8 directions, which turn costs made dearer than a leg at the wrong
+ * angle.
+ */
+const DX16 = [1, 2, 1, 1, 0, -1, -1, -2, -1, -2, -1, -1, 0, 1, 1, 2];
+const DY16 = [0, 1, 1, 2, 1, 2, 1, 1, 0, -1, -1, -2, -1, -2, -1, -1];
+const MDIST16 = DX16.map((dx, i) => Math.hypot(dx, DY16[i]) * NODE);
+/** Largest radius (m) of a bend on a fine-routed piece, by class: hairpins are tight. */
+const MICRO_RADIUS = [20, 15, 11, 8, 5];
+/** Spacing (m) of points on fine-routed pieces: the renderer's smoothing (±3 points) then only softens them. */
+const MICRO_STEP = 2;
+
+/**
+ * A polyline as straight runs joined by circular arcs: each corner gets the largest
+ * radius up to `rmax` whose arc fits in half of either adjacent run, so where the road
+ * turns back the bend is a tight hairpin and the legs stay straight. Sampled every
+ * MICRO_STEP m.
+ */
+function filleted(pts: number[], rmax: number): number[] {
+  const n = pts.length / 2;
+  if (n < 3) return resampled(pts);
+  const out: number[] = [pts[0], pts[1]];
+  // Where the previous arc ended (the run from there to the next corner is straight).
+  let sx = pts[0];
+  let sy = pts[1];
+  for (let i = 1; i < n - 1; i++) {
+    const px = pts[2 * i - 2], py = pts[2 * i - 1];
+    const cx = pts[2 * i], cy = pts[2 * i + 1];
+    const qx = pts[2 * i + 2], qy = pts[2 * i + 3];
+    const l1 = Math.hypot(cx - px, cy - py);
+    const l2 = Math.hypot(qx - cx, qy - cy);
+    if (l1 < 1e-6 || l2 < 1e-6) continue;
+    const ux = (cx - px) / l1, uy = (cy - py) / l1;
+    const vx = (qx - cx) / l2, vy = (qy - cy) / l2;
+    const cos = Math.max(-1, Math.min(1, ux * vx + uy * vy));
+    const theta = Math.acos(cos); // turn angle
+    if (theta < 1e-3) continue;
+    // Tangent length r·tan(θ/2), within half of each run (the first run counts from
+    // the previous arc's end).
+    const avail = Math.min(Math.hypot(cx - sx, cy - sy), 0.5 * l1, 0.5 * l2);
+    const tanH = Math.tan(theta / 2);
+    const r = Math.min(rmax, avail / tanH);
+    const t = r * tanH;
+    const ax = cx - ux * t, ay = cy - uy * t;
+    const bx = cx + vx * t, by = cy + vy * t;
+    pushLine(out, ax, ay);
+    // Arc from a to b: centre at a + r·normal (towards the turn).
+    const side = ux * vy - uy * vx > 0 ? 1 : -1;
+    const ox = ax - side * uy * r, oy = ay + side * ux * r;
+    const a0 = Math.atan2(ay - oy, ax - ox);
+    const m = Math.max(1, Math.ceil((r * theta) / MICRO_STEP));
+    for (let k = 1; k <= m; k++) {
+      const a = a0 + (side * theta * k) / m;
+      out.push(ox + r * Math.cos(a), oy + r * Math.sin(a));
+    }
+    sx = bx;
+    sy = by;
+  }
+  pushLine(out, pts[2 * n - 2], pts[2 * n - 1]);
+  return out;
+}
+
+/** Straight line from the last point of `out` to (x, y), every MICRO_STEP m. */
+function pushLine(out: number[], x: number, y: number): void {
+  const x0 = out[out.length - 2], y0 = out[out.length - 1];
+  const m = Math.max(1, Math.ceil(Math.hypot(x - x0, y - y0) / MICRO_STEP));
+  for (let k = 1; k <= m; k++) out.push(x0 + ((x - x0) * k) / m, y0 + ((y - y0) * k) / m);
+}
+
+function resampled(pts: number[]): number[] {
+  const out = [pts[0], pts[1]];
+  for (let i = 2; i < pts.length; i += 2) pushLine(out, pts[i], pts[i + 1]);
+  return out;
+}
 
 /**
  * A steep piece routed on the fine terrain itself (16 m nodes, with heading: at most
@@ -1236,13 +1330,14 @@ function microRoute(
   p: RoadPatch,
   zAt: (x: number, y: number) => number,
   obstacles: number[],
-  band: number,
+  band: Room,
+  cls: RoadClass,
 ): number[] {
   const { w, h } = p;
   const node = (x: number, y: number) => [Math.round(x / NODE) - p.gx, Math.round(y / NODE) - p.gy];
   const [ia, ja] = node(ax, ay);
   const [ib, jb] = node(bx, by);
-  const pad = Math.ceil(band / NODE);
+  const pad = Math.ceil(Math.max(band[0], band[1], MICRO_FREE) / NODE);
   const i0 = Math.max(1, Math.min(ia, ib) - pad);
   const j0 = Math.max(1, Math.min(ja, jb) - pad);
   const i1 = Math.min(w - 2, Math.max(ia, ib) + pad);
@@ -1260,40 +1355,55 @@ function microRoute(
     return Math.hypot(x - s[o] - t * dx, y - s[o + 1] - t * dy);
   };
   const ab = [ax, ay, bx, by];
+  const ray = (x: number, y: number, dx: number, dy: number) => {
+    const L = Math.hypot(dx, dy) || 1;
+    return [x + (dx / L) * MICRO_BEYOND * 1.5, y + (dy / L) * MICRO_BEYOND * 1.5, x + (dx / L) * MICRO_FREE * 1.5, y + (dy / L) * MICRO_FREE * 1.5];
+  };
+  const beyondA = ray(ax, ay, -inDir[0], -inDir[1]);
+  const beyondB = ray(bx, by, outDir[0], outDir[1]);
   for (let lj = 0; lj < bh; lj++)
     for (let li = 0; li < bw; li++) {
       const x = (p.gx + li + i0) * NODE;
       const y = (p.gy + lj + j0) * NODE;
-      if (segDistTo(x, y, ab, 0) > Math.max(band, MICRO_FREE)) continue;
-      const nearEnd = Math.hypot(x - ax, y - ay) < MICRO_FREE || Math.hypot(x - bx, y - by) < MICRO_FREE;
+      if (segDistTo(x, y, ab, 0) > Math.max(band[sideOf(bx - ax, by - ay, x - ax, y - ay)], MICRO_FREE)) continue;
+      // Never across the road's own continuation beyond either end (a tight turn there
+      // would curl round it, losing height in a loop).
+      if (segDistTo(x, y, beyondA, 0) < MICRO_BEYOND || segDistTo(x, y, beyondB, 0) < MICRO_BEYOND) continue;
+      const dA = Math.hypot(x - ax, y - ay);
+      const dB = Math.hypot(x - bx, y - by);
+      const nearEnd = dA < MICRO_FREE || dB < MICRO_FREE;
+      // Clear of other ways; near the ends only a little (junctions are close), and
+      // right at the junction not at all.
+      const need = !nearEnd ? MICRO_CLEAR : Math.min(dA, dB) < MICRO_JUNCTION ? 0 : MICRO_BEYOND;
       let clear = true;
-      if (!nearEnd) for (let o = 0; o + 3 < obstacles.length && clear; o += 4) if (segDistTo(x, y, obstacles, o) < MICRO_CLEAR) clear = false;
+      if (need > 0) for (let o = 0; o + 3 < obstacles.length && clear; o += 4) if (segDistTo(x, y, obstacles, o) < need) clear = false;
       if (clear) ok[lj * bw + li] = 1;
     }
   const la = (ja - j0) * bw + (ia - i0);
   const lb = (jb - j0) * bw + (ib - i0);
   if (la < 0 || lb < 0 || la >= bw * bh || lb >= bw * bh) return straight();
   ok[la] = ok[lb] = 1;
-  const dirOf = (dx: number, dy: number) => ((Math.round((Math.atan2(dy, dx) / Math.PI) * 4) % 8) + 8) % 8;
+  const dirOf = (dx: number, dy: number) => ((Math.round((Math.atan2(dy, dx) / Math.PI) * 8) % 16) + 16) % 16;
   const hIn = dirOf(inDir[0], inDir[1]);
   const hOut = dirOf(outDir[0], outDir[1]);
-  const turn = (a: number, b: number) => Math.min((a - b + 8) & 7, (b - a + 8) & 7);
+  /** Turn between headings, in 22.5° steps. */
+  const turn = (a: number, b: number) => Math.min((a - b + 16) & 15, (b - a + 16) & 15);
   const wet = (k: number) => !Number.isNaN(p.lake[k]);
   const shore = (k: number) => wet(k - 1) || wet(k + 1) || wet(k - w) || wet(k + w);
-  const S = bw * bh * 8;
+  const S = bw * bh * 16;
   const cost = new Float64Array(S).fill(Infinity);
   const from = new Int32Array(S).fill(-1);
   const heap = new MinHeap(512);
   const hEst = (li: number, lj: number) => Math.hypot(li + i0 - ib, lj + j0 - jb) * NODE;
-  for (let d = 0; d < 8; d++) {
-    cost[la * 8 + d] = MICRO_ENDS * turn(d, hIn);
-    heap.push(la * 8 + d, cost[la * 8 + d] + hEst(ia - i0, ja - j0));
+  for (let d = 0; d < 16; d++) {
+    cost[la * 16 + d] = (MICRO_ENDS / 2) * turn(d, hIn);
+    heap.push(la * 16 + d, cost[la * 16 + d] + hEst(ia - i0, ja - j0));
   }
   let goal = -1;
   while (heap.size) {
     const st = heap.pop();
-    const cell = st >> 3;
-    const d0 = st & 7;
+    const cell = st >> 4;
+    const d0 = st & 15;
     if (cell === lb) {
       goal = st;
       break;
@@ -1301,23 +1411,23 @@ function microRoute(
     const li = cell % bw;
     const lj = (cell - li) / bw;
     const k = (lj + j0) * w + li + i0;
-    for (let t = -1; t <= 1; t++) {
-      const d = (d0 + t + 8) & 7;
-      const ni = li + DX[d];
-      const nj = lj + DY[d];
+    for (let t = -4; t <= 4; t++) {
+      const d = (d0 + t + 16) & 15;
+      const ni = li + DX16[d];
+      const nj = lj + DY16[d];
       if (ni < 0 || nj < 0 || ni >= bw || nj >= bh) continue;
       const nc = nj * bw + ni;
       if (!ok[nc]) continue;
       const q = (nj + j0) * w + ni + i0;
-      const dist = MDIST[d];
+      const dist = MDIST16[d];
       const g = Math.abs(p.zE[q] - p.zE[k]) / dist;
-      let c = cost[st] + dist * (1 + 0.5 * (g / gmax) ** 2) + MICRO_TURN * Math.abs(t);
+      let c = cost[st] + dist * (1 + 0.5 * (g / gmax) ** 2) + (MICRO_TURN / 2) * Math.abs(t);
       if (g > gmax) c += dist * MICRO_STEEP * (g / gmax - 1);
       if (wet(q)) c += dist * MICRO_WATER + (wet(k) ? 0 : MICRO_BRIDGE);
       else if (shore(q)) c += dist * MICRO_SHORE;
       else if (p.A[q] > 1 && p.A[k] <= 1) c += MICRO_STREAM;
-      if (nc === lb) c += MICRO_ENDS * turn(d, hOut);
-      const ns = (nc << 3) | d;
+      if (nc === lb) c += (MICRO_ENDS / 2) * turn(d, hOut);
+      const ns = nc * 16 + d;
       if (c < cost[ns]) {
         cost[ns] = c;
         from[ns] = st;
@@ -1327,7 +1437,7 @@ function microRoute(
   }
   if (goal < 0) return straight();
   const cells: number[] = [];
-  for (let st = goal; st >= 0; st = from[st]) cells.push(st >> 3);
+  for (let st = goal; st >= 0; st = from[st]) cells.push(st >> 4);
   cells.reverse();
   const pts: number[] = [];
   for (const c of cells) {
@@ -1376,15 +1486,24 @@ function microRoute(
     outPts.push(pts[2 * j], pts[2 * j + 1]);
     i = j;
   }
-  // Resample, so smoothing has points to work with.
-  const xy: number[] = [outPts[0], outPts[1]];
-  for (let k = 2; k < outPts.length; k += 2) {
-    const x0 = outPts[k - 2];
-    const y0 = outPts[k - 1];
-    const x1 = outPts[k];
-    const y1 = outPts[k + 1];
-    const m = Math.max(1, Math.ceil(Math.hypot(x1 - x0, y1 - y0) / 8));
-    for (let s2 = 1; s2 <= m; s2++) xy.push(x0 + ((x1 - x0) * s2) / m, y0 + ((y1 - y0) * s2) / m);
+  // The search ran between the grid nodes nearest the ends; the ends themselves may
+  // lie behind them. Rounded, that back-step would be a small curl.
+  trimSpikes(outPts);
+  return filleted(outPts, MICRO_RADIUS[cls]);
+}
+
+/** Drops points next to either end where the line doubles back (> 90°) within a short end segment. */
+function trimSpikes(pts: number[]): void {
+  const turnsBack = (i: number) => {
+    const ux = pts[2 * i] - pts[2 * i - 2], uy = pts[2 * i + 1] - pts[2 * i - 1];
+    const vx = pts[2 * i + 2] - pts[2 * i], vy = pts[2 * i + 3] - pts[2 * i + 1];
+    return ux * vx + uy * vy < 0;
+  };
+  const short = (i: number, j: number) => Math.hypot(pts[2 * j] - pts[2 * i], pts[2 * j + 1] - pts[2 * i + 1]) < 1.5 * NODE;
+  while (pts.length >= 8 && short(0, 1) && turnsBack(1)) pts.splice(2, 2);
+  while (pts.length >= 8) {
+    const n = pts.length / 2;
+    if (!(short(n - 2, n - 1) && turnsBack(n - 2))) break;
+    pts.splice(2 * (n - 2), 2);
   }
-  return xy;
 }

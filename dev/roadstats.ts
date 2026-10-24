@@ -14,6 +14,8 @@ import { expand } from '../src/gen/seeds';
 import type { TaskRequest, TaskResult } from '../src/worker/protocol';
 import { runTask } from '../src/worker/tasks';
 import { rng } from '../src/lib/hash';
+import { smoothPolyline } from '../src/lib/polyline';
+import { SMOOTH_PASSES } from '../src/render/roads';
 
 declare const process: { argv: string[]; env: Record<string, string | undefined> };
 const FS = 'node:fs';
@@ -323,6 +325,11 @@ function stats(segs: SegmentPath[]): { km: number; crossings: number; alongside:
 
 let loopsN = 0, areaKm2 = 0, inKm = 0, deadFine = 0;
 const microStats = [0, 0, 0];
+/** Hairpins of fine-routed pieces as drawn: apex radius and leg spacing (m), per region. */
+let pinR: number[] = [];
+let pinSep: number[] = [];
+let pinLeg: number[] = [];
+let pinKm = 0;
 const microGrade = [0, 0, 0];
 const siteCount = [0, 0, 0, 0];
 const gradeLen = [[0, 0, 0], [0, 0, 0], [0, 0, 0], [0, 0, 0], [0, 0, 0]];
@@ -377,6 +384,20 @@ for (const R of REGIONS) {
           la = i;
         }
       }
+      // Hairpins as drawn (see `hairpins`).
+      const pins: Pin[] = [];
+      for (const g of segs) {
+        if (!g.micro || g.cls > 2) continue;
+        for (let i = 1; i < g.xy.length / 2; i++) pinKm += Math.hypot(g.xy[2 * i] - g.xy[2 * i - 2], g.xy[2 * i + 1] - g.xy[2 * i - 1]) / 1000;
+        for (const h of hairpins(g)) {
+          pins.push(h);
+          pinR.push(h.r);
+          pinSep.push(h.sep);
+          if (!Number.isNaN(h.leg)) pinLeg.push(h.leg);
+        }
+      }
+      if (process.env.HAIRPINS) hairpinSheet(segs, pins.slice(0, 24), `${process.env.HAIRPINS}-R${R}-${a}.svg`);
+      if (process.env.PINLOG) for (const h of pins) console.log(`  hairpin at ${h.x.toFixed(0)},${h.y.toFixed(0)} r=${h.r.toFixed(0)} m sep=${h.sep.toFixed(0)} m`);
       microStats[0] += pieces;
       microStats[1] += pieceKm;
       microStats[2] += longer;
@@ -625,6 +646,25 @@ for (const R of REGIONS) {
       }
     if (process.env.DUMP) svg(segs, `${process.env.DUMP}-R${R}-${a}.svg`);
     if (process.env.SHEET) sheet(segs, lp, `${process.env.SHEET}-R${R}-${a}.svg`);
+    if (process.env.LOOPZOOM) {
+      // Close-ups of loops: every drawn vertex, micro pieces marked.
+      const out = [`<svg xmlns="http://www.w3.org/2000/svg" width="${4 * 300}" height="${Math.ceil(lp.length / 4) * 300}" style="background:#fff">`];
+      lp.forEach((l, n) => {
+        const half = 50;
+        out.push(`<svg x="${(n % 4) * 300}" y="${Math.floor(n / 4) * 300}" width="296" height="296" viewBox="${l.x - half} ${l.y - half} ${2 * half} ${2 * half}"><rect x="${l.x - half}" y="${l.y - half}" width="${2 * half}" height="${2 * half}" fill="#fbfaf5"/>`);
+        for (const g of segs) {
+          let near = false;
+          for (let i = 0; i < g.xy.length && !near; i += 2) near = Math.abs(g.xy[i] - l.x) < half * 2 && Math.abs(g.xy[i + 1] - l.y) < half * 2;
+          if (!near) continue;
+          const col = g.micro ? '#c33' : '#36c';
+          out.push(`<polyline points="${Array.from({ length: g.xy.length / 2 }, (_, i) => `${g.xy[2 * i].toFixed(1)},${g.xy[2 * i + 1].toFixed(1)}`).join(' ')}" fill="none" stroke="${col}" stroke-width="0.6"/>`);
+          for (let i = 0; i < g.xy.length; i += 2) out.push(`<circle cx="${g.xy[i]}" cy="${g.xy[i + 1]}" r="0.5" fill="${col}"/>`);
+        }
+        out.push(`<text x="${l.x - half + 2}" y="${l.y - half + 6}" font-size="5">${n}</text></svg>`);
+      });
+      out.push('</svg>');
+      writeFileSync(`${process.env.LOOPZOOM}-R${R}-${a}.svg`, out.join('\n'));
+    }
     km += s.km;
     crossings += s.crossings;
     alongside += s.alongside;
@@ -632,6 +672,13 @@ for (const R of REGIONS) {
   console.log(`SMALL LOOPS R=${R}: ${loopsN} in ${areaKm2} km² with ${inKm.toFixed(0)} km road → ${((100 * loopsN) / inKm).toFixed(1)} per 100 km`);
   console.log(`MICRO R=${R}: ${microStats[0]} multi-edge pieces drawn (${microStats[1].toFixed(1)} km), ${microStats[2]} paths over 1.5× their chord`);
   console.log(`MICRO GRADE R=${R}: over the class limit on the 16 m surface ${((100 * microGrade[1]) / (microGrade[0] || 1)).toFixed(0)}%, on the DEM ${((100 * microGrade[2]) / (microGrade[0] || 1)).toFixed(0)}% of ${(microGrade[0] / 1000).toFixed(1)} km`);
+  const med = (a: number[]) => (a.length ? [...a].sort((u, v) => u - v)[a.length >> 1] : NaN);
+  const q = (a: number[], f: number) => (a.length ? [...a].sort((u, v) => u - v)[Math.floor(f * (a.length - 1))] : NaN);
+  console.log(`HAIRPINS R=${R}: ${pinR.length} on ${pinKm.toFixed(1)} km of fine-routed roads; apex radius median ${med(pinR).toFixed(0)} m (p10 ${q(pinR, 0.1).toFixed(0)}, p90 ${q(pinR, 0.9).toFixed(0)}), leg spacing 50 m back median ${med(pinSep).toFixed(0)} m, legs between hairpins median ${med(pinLeg).toFixed(0)} m (p10 ${q(pinLeg, 0.1).toFixed(0)}, p90 ${q(pinLeg, 0.9).toFixed(0)})`);
+  pinR = [];
+  pinSep = [];
+  pinLeg = [];
+  pinKm = 0;
   microGrade.fill(0);
   microStats.fill(0);
   console.log(`DEAD ENDS R=${R}: ${deadFine} (road ends not at a settlement or farm)`);
@@ -709,6 +756,123 @@ function sheet(segs: SegmentPath[], lp: { x: number; y: number; a: number }[], f
     }
     const sl = slopeAt(l.x, l.y);
     out.push(`<text x="${l.x - half + 8}" y="${l.y - half + 30}" font-size="26" fill="#000">${n} a=${(l.a / 1e4).toFixed(2)}ha s=${sl.toFixed(2)}</text>`);
+    out.push('</svg>');
+  });
+  out.push('</svg>');
+  writeFileSync(file, out.join('\n'));
+}
+
+type Pin = { x: number; y: number; r: number; sep: number; leg: number; xs: number[]; ys: number[] };
+
+/**
+ * Hairpins of a road as the renderer draws it (same smoothing): along the line,
+ * resampled every 2 m, places where the heading turns by more than 150° within
+ * ±40 m. Apex: the sharpest point there; r: radius of the circle through the line
+ * 8 m either side of it; sep: distance between the legs 50 m back from it.
+ */
+function hairpins(g: SegmentPath): Pin[] {
+  const xs: number[] = [];
+  const ys: number[] = [];
+  for (let i = 0; i < g.xy.length; i += 2) {
+    xs.push(g.xy[i]);
+    ys.push(g.xy[i + 1]);
+  }
+  for (let pass = 0; pass < SMOOTH_PASSES[g.cls]; pass++) smoothPolyline(xs, ys);
+  const P: number[] = [xs[0], ys[0]];
+  let carry = 0;
+  for (let i = 1; i < xs.length; i++) {
+    const dx = xs[i] - xs[i - 1];
+    const dy = ys[i] - ys[i - 1];
+    const L = Math.hypot(dx, dy);
+    let s = 2 - carry;
+    for (; s <= L; s += 2) P.push(xs[i - 1] + (dx * s) / L, ys[i - 1] + (dy * s) / L);
+    carry = L - (s - 2);
+  }
+  const n = P.length / 2;
+  const head = (i: number) => Math.atan2(P[2 * i + 3] - P[2 * i + 1], P[2 * i + 2] - P[2 * i]);
+  const turnBetween = (i: number, j: number) => {
+    let d = Math.abs(head(j) - head(i)) % (2 * Math.PI);
+    return d > Math.PI ? 2 * Math.PI - d : d;
+  };
+  const W = 20;
+  const B = 25;
+  const out: Pin[] = [];
+  let lastApex = 0;
+  for (let i = Math.max(W, B); i < n - Math.max(W, B) - 1; i++) {
+    if (turnBetween(i - W, i + W) < (150 * Math.PI) / 180) continue;
+    // The sharpest point of this hairpin, then skip past it.
+    let best = i;
+    let bestT = -1;
+    let j = i;
+    for (; j < n - Math.max(W, B) - 1 && turnBetween(j - W, j + W) >= (150 * Math.PI) / 180; j++) {
+      const t = turnBetween(j - 3, j + 3);
+      if (t > bestT) {
+        bestT = t;
+        best = j;
+      }
+    }
+    const [ax, ay, bx, by, cx, cy] = [P[2 * best - 8], P[2 * best - 7], P[2 * best], P[2 * best + 1], P[2 * best + 8], P[2 * best + 9]];
+    const a = Math.hypot(bx - cx, by - cy);
+    const b = Math.hypot(ax - cx, ay - cy);
+    const c = Math.hypot(ax - bx, ay - by);
+    const area2 = Math.abs((bx - ax) * (cy - ay) - (by - ay) * (cx - ax));
+    const r = area2 > 1e-6 ? (a * b * c) / (2 * area2) : Infinity;
+    const sep = Math.hypot(P[2 * (best - B)] - P[2 * (best + B)], P[2 * (best - B) + 1] - P[2 * (best + B) + 1]);
+    out.push({ x: bx, y: by, r, sep, leg: out.length ? (best - lastApex) * 2 : NaN, xs, ys });
+    lastApex = best;
+    i = j + W;
+  }
+  return out;
+}
+
+/** Contact sheet of hairpins: the drawn line at road width over 5 m contours. */
+function hairpinSheet(segs: SegmentPath[], pins: Pin[], file: string): void {
+  if (!pins.length) return;
+  const T = 300, cols = 4, half = 120, step = 4, interval = 5;
+  const rows = Math.ceil(pins.length / cols);
+  const out = [`<svg xmlns="http://www.w3.org/2000/svg" width="${cols * T}" height="${rows * T}" style="background:#fff">`];
+  pins.forEach((h, n) => {
+    const tx = (n % cols) * T, ty = Math.floor(n / cols) * T;
+    out.push(`<svg x="${tx}" y="${ty}" width="${T - 4}" height="${T - 4}" viewBox="${h.x - half} ${h.y - half} ${2 * half} ${2 * half}">`);
+    out.push(`<rect x="${h.x - half}" y="${h.y - half}" width="${2 * half}" height="${2 * half}" fill="#fbfaf5" stroke="#999"/>`);
+    // Contours by marching squares on a 4 m grid.
+    const m = (2 * half) / step + 1;
+    const z: number[] = [];
+    for (let j = 0; j < m; j++) for (let i = 0; i < m; i++) z.push(elevAt(h.x - half + i * step, h.y - half + j * step));
+    const segsC: string[] = [];
+    for (let j = 0; j < m - 1; j++)
+      for (let i = 0; i < m - 1; i++) {
+        const c = [z[j * m + i], z[j * m + i + 1], z[(j + 1) * m + i + 1], z[(j + 1) * m + i]];
+        const lo = Math.min(...c), hi = Math.max(...c);
+        for (let L = Math.ceil(lo / interval) * interval; L < hi; L += interval) {
+          const pts: [number, number][] = [];
+          const corner = [[0, 0], [1, 0], [1, 1], [0, 1]];
+          for (let e = 0; e < 4; e++) {
+            const z0 = c[e], z1 = c[(e + 1) & 3];
+            if ((z0 < L) === (z1 < L)) continue;
+            const t = (L - z0) / (z1 - z0);
+            const [u0, v0] = corner[e], [u1, v1] = corner[(e + 1) & 3];
+            pts.push([h.x - half + (i + u0 + (u1 - u0) * t) * step, h.y - half + (j + v0 + (v1 - v0) * t) * step]);
+          }
+          if (pts.length >= 2) segsC.push(`M${pts[0][0].toFixed(1)},${pts[0][1].toFixed(1)}L${pts[1][0].toFixed(1)},${pts[1][1].toFixed(1)}`);
+        }
+      }
+    out.push(`<path d="${segsC.join('')}" stroke="#c9a27a" stroke-width="0.6" fill="none"/>`);
+    for (const g of segs) {
+      let near = false;
+      for (let i = 0; i < g.xy.length && !near; i += 2) near = Math.abs(g.xy[i] - h.x) < half * 1.5 && Math.abs(g.xy[i + 1] - h.y) < half * 1.5;
+      if (!near) continue;
+      const xs: number[] = [], ys: number[] = [];
+      for (let i = 0; i < g.xy.length; i += 2) {
+        xs.push(g.xy[i]);
+        ys.push(g.xy[i + 1]);
+      }
+      for (let pass = 0; pass < SMOOTH_PASSES[g.cls]; pass++) smoothPolyline(xs, ys);
+      const pts = xs.map((x, i) => `${x.toFixed(1)},${ys[i].toFixed(1)}`).join(' ');
+      const wd = [9, 7, 5, 2, 1.5][g.cls];
+      out.push(`<polyline points="${pts}" fill="none" stroke="#444" stroke-width="${wd + 1.5}" stroke-linejoin="round"/><polyline points="${pts}" fill="none" stroke="#fff" stroke-width="${wd}" stroke-linejoin="round"/>`);
+    }
+    out.push(`<text x="${h.x - half + 4}" y="${h.y - half + 14}" font-size="11" fill="#000">${n}: r=${h.r.toFixed(0)} m, legs ${h.sep.toFixed(0)} m apart</text>`);
     out.push('</svg>');
   });
   out.push('</svg>');

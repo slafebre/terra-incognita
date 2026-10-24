@@ -34,6 +34,12 @@ export const MAX_GRADE = [0.07, 0.1, 0.15, 0.22, 0.45];
 export const MAX_LEN = [9000, 4500];
 
 /** One used lattice edge. */
+/**
+ * Distance (m) to the nearest other way left and right of a run of edges (sides of
+ * the line from its first to its last vertex, by the sign of the cross product).
+ */
+export type Room = [number, number];
+
 export interface RoadEdge {
   id: string;
   cls: RoadClass;
@@ -71,20 +77,20 @@ export interface SegmentTask {
   /** The edges it continues into smoothly at either end (their far vertices), if any. */
   pa?: [number, number];
   pb?: [number, number];
-  /** Distance to the nearest other way (m), and the ways near the edge (as for `piece`), for a detour around a lake. */
-  room: number;
+  /** Distance to the nearest other way (m) on either side, and the ways near the edge (as for `piece`), for a detour around a lake. */
+  room: Room;
   obstacles: number[];
   /**
    * The run of edges of one road this edge belongs to (vertices in canonical order),
    * if short enough: routed on the fine terrain as one when too steep or crossing a
    * lake, by the chunk owning its middle edge (`owner`). `room`: distance to the
-   * nearest other way (m).
+   * nearest other way (m) on either side.
    */
   piece?: {
     key: string;
     pts: number[];
     owner: boolean;
-    room: number;
+    room: Room;
     /** Other ways near the piece, as segments [ax, ay, bx, by, …] (those meeting it: their far halves). */
     obstacles: number[];
     pa?: [number, number];
