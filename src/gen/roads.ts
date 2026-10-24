@@ -1,4 +1,5 @@
-import { COARSE_REACH } from './hydro';
+import { COARSE_REACH, LAKE_REACH } from './hydro';
+import { LAKE_TILE } from './lakes';
 import { COARSE_KEEP_EXTRA } from './seeds';
 import type { Site } from './settle';
 
@@ -12,12 +13,15 @@ import type { Site } from './settle';
 export const NET_CELL = 8192;
 /**
  * How far around a net cell the coarse terrain is consulted (m): the main-road
- * corridors that reach the cell's stages and the sites deciding them (SITE_REACH),
- * plus the coarse surface's own reach. Coarse seeds are kept accordingly
- * (COARSE_KEEP_EXTRA).
+ * corridors that reach the cell's stages and the sites deciding them (SITE_REACH);
+ * coarse lakes are tested within LAKE_TEST_REACH (main-road corridors, and the
+ * villages deciding the cell's D roads; towns ignore lakes), and each test reads
+ * the surface up to LAKE_TILE + LAKE_REACH further (lakes.ts); plus the coarse
+ * surface's own reach. Coarse seeds are kept accordingly (COARSE_KEEP_EXTRA).
  */
 const SITE_REACH = 35500;
-export const NET_REACH = SITE_REACH + COARSE_REACH;
+const LAKE_TEST_REACH = 30000;
+export const NET_REACH = Math.max(SITE_REACH, LAKE_TEST_REACH + LAKE_TILE + LAKE_REACH) + COARSE_REACH;
 if (NET_REACH + 4000 > COARSE_KEEP_EXTRA) throw new Error('coarse seeds are not kept as far as net cells read them');
 
 export const ROAD_N = 0;
@@ -107,6 +111,13 @@ export interface SegmentTask {
   /** Neighbouring runs that may limit its room (see `Rival`). */
   rivals: Rival[];
   /**
+   * Where the way beyond an end runs into a dead end without meeting another way
+   * (within a few edges): its vertices [x, y, …], that end first. A way must not end
+   * in a lake, so where all of it is under water the edge stops at the shore.
+   */
+  spurA?: number[];
+  spurB?: number[];
+  /**
    * The run of edges of one road this edge belongs to (vertices in canonical order),
    * if short enough: routed on the fine terrain as one when too steep or crossing a
    * lake, by the chunk owning its middle edge (`owner`).
@@ -122,6 +133,9 @@ export interface SegmentTask {
     rivals: Rival[];
     pa?: [number, number];
     pb?: [number, number];
+    /** As the edge's, for the piece's ends. */
+    spurA?: number[];
+    spurB?: number[];
   };
 }
 

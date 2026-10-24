@@ -3,6 +3,7 @@ import { hash3 } from '../lib/hash';
 import { MinHeap } from '../lib/heap';
 import { smoothstep } from '../lib/noise';
 import { type CoarseField, NODE } from './hydro';
+import { lakesOf } from './lakes';
 import {
   MAX_GRADE,
   MAX_LEN,
@@ -35,7 +36,8 @@ import type { Terrain } from './terrain';
  *  1. Edge costs per road class: length, a soft penalty for slope against the
  *     class's limit (judged on the coarse surface over 500 m: at the scale of one
  *     edge it does not predict the map's slopes), cheaper on valley floors, a small
- *     bridge charge across streams, plus a fixed tie-break so best paths are unique.
+ *     bridge charge across streams, dear across the lakes of closed coarse basins
+ *     (lakes.ts), plus a fixed tie-break so best paths are unique.
  *  2. Main roads: for each town pair (N) and village pair (D) of the relative-
  *     neighbourhood graphs, the cheapest path inside a fixed corridor around the
  *     pair, turns costing a little. The corridor makes it the same in every cell.
@@ -185,7 +187,7 @@ function verticesIn(r: { x0: number; y0: number; x1: number; y1: number }): numb
 const edgeKey = (u: number, v: number) => (u < v ? `${u}_${v}` : `${v}_${u}`);
 
 /** Terrain at vertices, cached per field. */
-const vertexCache = new WeakMap<CoarseField, Map<number, { x: number; y: number; z: number; area: number; valley: number }>>();
+const vertexCache = new WeakMap<CoarseField, Map<number, { x: number; y: number; z: number; area: number; valley: number; wet: boolean }>>();
 function vdata(field: CoarseField, v: number) {
   let m = vertexCache.get(field);
   if (!m) vertexCache.set(field, (m = new Map()));
@@ -193,7 +195,7 @@ function vdata(field: CoarseField, v: number) {
   if (!d) {
     const [x, y] = vertexPos(v);
     const area = field.area(x, y);
-    d = { x, y, z: field.z(x, y), area, valley: smoothstep(VALLEY_AREA[0], VALLEY_AREA[1], area) };
+    d = { x, y, z: field.z(x, y), area, valley: smoothstep(VALLEY_AREA[0], VALLEY_AREA[1], area), wet: lakesOf(field).wet(x, y) };
     m.set(v, d);
   }
   return d;
@@ -257,6 +259,11 @@ const SLOPE_CAP = 6;
 /** Crossing a stream draining more than BRIDGE_AREA km² costs a bridge (m), more for a river. */
 const BRIDGE_AREA = 1;
 const BRIDGE_COST = 40;
+/** Coarse lakes: water costs LAKE_W × its length, plus LAKE_BRIDGE (m) per crossing (as the
+ * fine routing, which goes round lakes the network can't see). Sampled at LAKE_SAMPLES points. */
+const LAKE_W = 12;
+const LAKE_BRIDGE = 150;
+const LAKE_SAMPLES = 5;
 function edgeCostRaw(field: CoarseField, u: number, v: number, cls: RoadClass): number {
   const a = vdata(field, u);
   const b = vdata(field, v);
@@ -265,6 +272,15 @@ function edgeCostRaw(field: CoarseField, u: number, v: number, cls: RoadClass): 
   let c = len * Math.min(SLOPE_CAP, 1 + SLOPE_W * (g / MAX_GRADE[cls]) ** 2);
   if (stream > BRIDGE_AREA) c += BRIDGE_COST * (1 + Math.log10(stream / BRIDGE_AREA));
   c *= 1 - (VALLEY_BONUS * (a.valley + b.valley)) / 2;
+  // Water under the edge (after the valley discount: lakes lie on valley floors).
+  // An edge leaving the shore pays half a crossing.
+  const lakes = lakesOf(field);
+  let wet = (a.wet ? 1 : 0) + (b.wet ? 1 : 0);
+  for (let s = 1; s < LAKE_SAMPLES - 1; s++) {
+    const t = s / (LAKE_SAMPLES - 1);
+    if (lakes.wet(a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t)) wet++;
+  }
+  if (wet) c += (len * LAKE_W * wet) / LAKE_SAMPLES + (wet < LAKE_SAMPLES ? LAKE_BRIDGE / 2 : 0);
   const lo = Math.min(u, v);
   const hi = Math.max(u, v);
   c *= 1 + 0.01 * (hash3(hash3(0x7e1d9, vi(lo), vj(lo)), vi(hi), vj(hi)) / 4294967296);
@@ -664,7 +680,7 @@ export function latticeCell(gx: number, gy: number, field: CoarseField, set: Set
       const gy = field.z(p.x, p.y + 250) - field.z(p.x, p.y - 250);
       const thin = 1 - TRACK_THIN * smoothstep(TRACK_THIN_SLOPE[0], TRACK_THIN_SLOPE[1], Math.hypot(gx, gy) / 500);
       if (hash3(0x7ac4, vi(v), vj(v)) / 4294967296 >= TRACK_DENSITY * thin) continue;
-      if (p.z > TRACK_ALT || roadPts.near(p.x, p.y, TRACK_GAP).length) continue;
+      if (p.z > TRACK_ALT || roadPts.near(p.x, p.y, TRACK_GAP).length || p.wet) continue;
       if (neighbours(v).some((w) => edgeGrade(field, v, w) > TRACK_STEEP)) continue;
       seeds.push(v);
     }
@@ -877,6 +893,22 @@ export function latticeSegments(edges: RoadEdge[], cx: number, cy: number): Segm
     }
     return { obstacles, wedges, rivals: [...rivals.values()] };
   };
+  /** The way beyond vertex (x, y), leaving it away from edge `from`, if it runs into a dead end within SPUR_MAX edges without meeting another way: its vertices, (x, y) first. */
+  const spur = (x: number, y: number, from: string): number[] | undefined => {
+    const pts: number[] = [];
+    let prev = from;
+    for (let n = 0; n <= SPUR_MAX; n++) {
+      pts.push(x, y);
+      const inc = at.get(k2(x, y)) ?? [];
+      if (inc.length === 1) return pts;
+      if (inc.length !== 2) return undefined;
+      const next = inc.find((i) => i.key !== prev)!;
+      prev = next.key;
+      x = next.ox;
+      y = next.oy;
+    }
+    return undefined;
+  };
   const out: SegmentTask[] = [];
   for (const e of edges) {
     const [ax, ay, bx, by] = e.route;
@@ -891,6 +923,8 @@ export function latticeSegments(edges: RoadEdge[], cx: number, cy: number): Segm
       pa: partner.get(`${e.id}@${k2(ax, ay)}`),
       pb: partner.get(`${e.id}@${k2(bx, by)}`),
       ...surroundings(e.route, new Set([e.id]), e.cls),
+      spurA: spur(ax, ay, e.id),
+      spurB: spur(bx, by, e.id),
     };
     const pc = pieceOf(e);
     if (pc) {
@@ -907,6 +941,8 @@ export function latticeSegments(edges: RoadEdge[], cx: number, cy: number): Segm
         rivals,
         pa: partner.get(`${first.id}@${k2(pc.pts[0], pc.pts[1])}`),
         pb: partner.get(`${last.id}@${k2(pc.pts[2 * n - 2], pc.pts[2 * n - 1])}`),
+        spurA: spur(pc.pts[0], pc.pts[1], first.id),
+        spurB: spur(pc.pts[2 * n - 2], pc.pts[2 * n - 1], last.id),
       };
     }
     out.push(task);
@@ -927,6 +963,8 @@ const ROOM_REACH = 300;
 const ROOM_SHARE_MAJOR = 0.7;
 const ROOM_SHARE_MINOR = 0.2;
 const ROOM_SHARE_EQUAL = 0.45;
+/** Dead ends are looked for this many edges beyond an edge's or piece's end (see SegmentTask.spurA). */
+const SPUR_MAX = 4;
 /** Pieces: at most this many edges; a vertex is an anchor with this probability. */
 const PIECE_EDGES = 3;
 const PIECE_ANCHOR = 0.5;
@@ -1060,10 +1098,21 @@ export function routeCurves(tasks: SegmentTask[], p: RoadPatch): SegmentPath[] {
     }
     return band;
   };
-  const routed = (key: string, cls: RoadClass, pts: number[], pa: [number, number] | undefined, pb: [number, number] | undefined, rivals: Rival[], obstacles: number[], wedges: number[]): SegmentPath => {
+  const routed = (
+    key: string,
+    cls: RoadClass,
+    pts: number[],
+    pa: [number, number] | undefined,
+    pb: [number, number] | undefined,
+    rivals: Rival[],
+    obstacles: number[],
+    wedges: number[],
+    rawA = false,
+    rawB = false,
+  ): SegmentPath => {
     const n = pts.length / 2;
-    const [ax, ay] = snap(pts[0], pts[1]);
-    const [bx, by] = snap(pts[2 * n - 2], pts[2 * n - 1]);
+    const [ax, ay] = rawA ? [pts[0], pts[1]] : snap(pts[0], pts[1]);
+    const [bx, by] = rawB ? [pts[2 * n - 2], pts[2 * n - 1]] : snap(pts[2 * n - 2], pts[2 * n - 1]);
     // Directions at the ends: the shared Catmull–Rom direction there (next vertex
     // minus previous), as the piece or edge on the other side also uses.
     const inDir = pa ? [pts[2] - pa[0], pts[3] - pa[1]] : [bx - ax, by - ay];
@@ -1072,6 +1121,79 @@ export function routeCurves(tasks: SegmentTask[], p: RoadPatch): SegmentPath[] {
     const xy = microRoute(ax, ay, bx, by, inDir, outDir, MAX_GRADE[cls], p, zAt, obstacles, band, cls, wedges);
     return { key, cls, xy: Float32Array.from(xy), micro: true };
   };
+  /** A path with no step longer than 8 m (the water checks look at its points). */
+  const densified = (g: SegmentPath): SegmentPath => {
+    const xy = g.xy;
+    let long = false;
+    for (let i = 2; i < xy.length && !long; i += 2) long = Math.hypot(xy[i] - xy[i - 2], xy[i + 1] - xy[i - 1]) > 8;
+    if (!long) return g;
+    const out: number[] = [xy[0], xy[1]];
+    for (let i = 2; i < xy.length; i += 2) {
+      const m = Math.max(1, Math.ceil(Math.hypot(xy[i] - xy[i - 2], xy[i + 1] - xy[i - 1]) / 8));
+      for (let s = 1; s <= m; s++) out.push(xy[i - 2] + ((xy[i] - xy[i - 2]) * s) / m, xy[i - 1] + ((xy[i + 1] - xy[i - 1]) * s) / m);
+    }
+    return { ...g, xy: Float32Array.from(out) };
+  };
+  /** Dry node beside a lake at world (x, y)? */
+  const shoreAt = (x: number, y: number) => {
+    const i = Math.round(x / NODE) - p.gx;
+    const j = Math.round(y / NODE) - p.gy;
+    return i >= 0 && j >= 0 && i < w && j < h && !isLake(j * w + i) && onShore(i, j);
+  };
+  /**
+   * Is all of a way's run to its dead end (vertices `spur`, as the network placed
+   * them: snapping may move a vertex to the far shore) under water?
+   */
+  const drowned = (spur?: number[]) => {
+    if (!spur || !lakeAt(spur[0], spur[1])) return false;
+    let len = 0;
+    for (let i = 2; i < spur.length; i += 2) len += Math.hypot(spur[i] - spur[i - 2], spur[i + 1] - spur[i - 1]);
+    return wetLength(spur) >= len - 1e-6;
+  };
+  /**
+   * What is drawn of a way (polyline xy from its end A to B). A way must not end in
+   * a lake: where all of it beyond an end is under water (`dA`, `dB`; the end is then
+   * not snapped, so the way heads into the water there), it stops at the first water
+   * coming from the other end, and the shore beside it. Tracks and footpaths don't
+   * cross water: any part still in a lake is left out.
+   */
+  const drawn = (g0: SegmentPath, dA: boolean, dB: boolean): SegmentPath[] => {
+    const g = densified(g0);
+    const xy = g.xy;
+    let s = 0;
+    let e = xy.length / 2 - 1;
+    const wetI = (i: number) => lakeAt(xy[2 * i], xy[2 * i + 1]);
+    const shoreI = (i: number) => shoreAt(xy[2 * i], xy[2 * i + 1]);
+    if (dB) {
+      let i = s;
+      while (i <= e && !wetI(i)) i++;
+      e = i - 1;
+      while (e > s && shoreI(e)) e--;
+    }
+    if (dA) {
+      let i = e;
+      while (i >= s && !wetI(i)) i--;
+      s = i + 1;
+      while (s < e && shoreI(s)) s++;
+    }
+    if (e - s < 1) return [];
+    if (g.cls < ROAD_T) return [s === 0 && e === xy.length / 2 - 1 ? g : { ...g, xy: xy.slice(2 * s, 2 * e + 2) }];
+    // Tracks and footpaths: the dry runs only (a run's ends kept off the shore).
+    const parts: SegmentPath[] = [];
+    let i = s;
+    while (i <= e) {
+      while (i <= e && lakeAt(xy[2 * i], xy[2 * i + 1])) i++;
+      let j = i;
+      while (j + 1 <= e && !lakeAt(xy[2 * j + 2], xy[2 * j + 3])) j++;
+      let a = i;
+      let b = j;
+      if (a > s) while (a < b && shoreAt(xy[2 * a], xy[2 * a + 1])) a++;
+      if (b < e) while (b > a && shoreAt(xy[2 * b], xy[2 * b + 1])) b--;
+      if (b > a) parts.push({ ...g, key: parts.length || a > s || b < e ? `${g.key}~${a}` : g.key, xy: xy.slice(2 * a, 2 * b + 2) });
+      i = j + 1;
+    }
+    return parts;
+  };
   const out: SegmentPath[] = [];
   for (const t of tasks) {
     // A piece too steep for its class, or crossing a lake: drawn once, routed on the
@@ -1079,21 +1201,28 @@ export function routeCurves(tasks: SegmentTask[], p: RoadPatch): SegmentPath[] {
     if (t.piece) {
       const pc = t.piece;
       if (serpentineFrame(pc.pts, MAX_GRADE[t.cls], zAt) || wetLength(pc.pts) > WET_MIN) {
-        if (pc.owner) out.push(routed(pc.key, t.cls, pc.pts, pc.pa, pc.pb, pc.rivals, pc.obstacles, pc.wedges));
+        const dA = drowned(pc.spurA);
+        const dB = drowned(pc.spurB);
+        // Wholly in the water a way ends in: the way stops at the shore before it.
+        if ((dA || dB) && drowned(pc.pts)) continue;
+        if (pc.owner) out.push(...drawn(routed(pc.key, t.cls, pc.pts, pc.pa, pc.pb, pc.rivals, pc.obstacles, pc.wedges, dA, dB), dA, dB));
         continue;
       }
     }
-    const c = curveOf(t);
+    const dA = drowned(t.spurA);
+    const dB = drowned(t.spurB);
+    if ((dA || dB) && drowned([t.ax, t.ay, t.bx, t.by])) continue;
+    const c = curveOf(t, dA, dB);
     // Still in a lake after fitting (the band is narrow): only this chunk draws the
-    // edge, so it can go round on its own.
-    if (wetLength(c.xy) > WET_MIN) out.push(routed(t.key, t.cls, [t.ax, t.ay, t.bx, t.by], t.pa, t.pb, t.rivals, t.obstacles, t.wedges));
-    else out.push(c);
+    // edge, so it can go round on its own. (Not when it heads into one to end there.)
+    const g = !dA && !dB && wetLength(c.xy) > WET_MIN ? routed(t.key, t.cls, [t.ax, t.ay, t.bx, t.by], t.pa, t.pb, t.rivals, t.obstacles, t.wedges) : c;
+    out.push(...drawn(g, dA, dB));
   }
   return out;
 
-  function curveOf(t: SegmentTask): SegmentPath {
-    const [ax, ay] = snap(t.ax, t.ay);
-    const [bx, by] = snap(t.bx, t.by);
+  function curveOf(t: SegmentTask, rawA = false, rawB = false): SegmentPath {
+    const [ax, ay] = rawA ? [t.ax, t.ay] : snap(t.ax, t.ay);
+    const [bx, by] = rawB ? [t.bx, t.by] : snap(t.bx, t.by);
     const len = Math.hypot(bx - ax, by - ay) || 1;
     const tangent = (px: number, py: number, qx: number, qy: number, partner?: [number, number]): [number, number] => {
       if (!partner) return [(qx - px) * 0.5, (qy - py) * 0.5];
@@ -1389,7 +1518,8 @@ function resampled(pts: number[]): number[] {
  * the class limit, so where the slope is steep the road zig-zags across it, its legs
  * following the real contours. It stays within a band around the piece, clear of the
  * other ways near it, and goes round lakes — or, where the way round is too long or
- * leaves the band, crosses at a narrow place. A to B are the piece's (snapped) ends.
+ * leaves the band, crosses at a narrow place (only if `water`). A to B are the
+ * piece's (snapped) ends.
  */
 function microRoute(
   ax: number,
@@ -1407,6 +1537,8 @@ function microRoute(
   wedges: number[],
 ): number[] {
   const { w, h } = p;
+  // Tracks and footpaths don't cross water at all.
+  const water = cls < ROAD_T;
   const node = (x: number, y: number) => [Math.round(x / NODE) - p.gx, Math.round(y / NODE) - p.gy];
   const [ia, ja] = node(ax, ay);
   const [ib, jb] = node(bx, by);
@@ -1417,7 +1549,14 @@ function microRoute(
   const j1 = Math.min(h - 2, Math.max(ja, jb) + pad);
   const bw = i1 - i0 + 1;
   const bh = j1 - j0 + 1;
-  const straight = () => [ax, ay, bx, by];
+  // No way found: a straight line, sampled like a found one (so what lies under it,
+  // such as water, is seen by the checks after routing).
+  const straight = () => {
+    const m = Math.max(1, Math.ceil(Math.hypot(bx - ax, by - ay) / 8));
+    const xy: number[] = [];
+    for (let s = 0; s <= m; s++) xy.push(ax + ((bx - ax) * s) / m, ay + ((by - ay) * s) / m);
+    return xy;
+  };
   if (bw < 2 || bh < 2) return straight();
   // Allowed nodes: in the band, clear of other ways (near the ends anything goes).
   const ok = new Uint8Array(bw * bh);
@@ -1500,7 +1639,10 @@ function microRoute(
       const g = Math.abs(p.zE[q] - p.zE[k]) / dist;
       let c = cost[st] + dist * (1 + 0.5 * (g / gmax) ** 2) + (MICRO_TURN / 2) * Math.abs(t);
       if (g > gmax) c += dist * MICRO_STEEP * (g / gmax - 1);
-      if (wet(q)) c += dist * MICRO_WATER + (wet(k) ? 0 : MICRO_BRIDGE);
+      if (wet(q)) {
+        if (!water) continue;
+        c += dist * MICRO_WATER + (wet(k) ? 0 : MICRO_BRIDGE);
+      }
       else if (shore(q)) c += dist * MICRO_SHORE;
       else if (p.A[q] > 1 && p.A[k] <= 1) c += MICRO_STREAM;
       if (nc === lb) c += (MICRO_ENDS / 2) * turn(d, hOut);

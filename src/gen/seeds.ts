@@ -26,9 +26,10 @@ export const MAX_WARP = 600;
 /**
  * Coarse seeds are kept this far beyond the retention rectangle (m), because the
  * hydrology reads coarse tiles ~21 km away, and settlements and roads (net cells)
- * decide far-away towns from coarse terrain up to ~37 km beyond a cell.
+ * decide far-away towns from coarse terrain, and the coarse lakes around them, up to
+ * ~62 km beyond a cell.
  */
-export const COARSE_KEEP_EXTRA = 64000;
+export const COARSE_KEEP_EXTRA = 70000;
 
 export interface Rect {
   x0: number;
