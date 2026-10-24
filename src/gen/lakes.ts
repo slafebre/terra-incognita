@@ -1,4 +1,4 @@
-import { COARSE, type CoarseField, coarseBasins, DX, DY, LAKE_REACH, LAKE_SHORE_DROP, TILE_STRIDE } from './hydro';
+import { COARSE, type CoarseField, coarseBasins, DX, DY, LAKE_REACH, LAKE_SHORE_DROP, TILE_STRIDE, tileId } from './hydro';
 
 /**
  * Lakes of closed coarse basins, as the network and settlements see them: the
@@ -22,14 +22,6 @@ const TW = TC + 2;
 /** Per worker: lake levels by tile and the coarse tiles they were built from (null: no lake in the tile). */
 const cache = new Map<string, Float32Array | null>();
 const CACHE_MAX = 256;
-/** Coarse tiles are cached by seed signature (hydro.ts): the same object means the same surface. */
-const ids = new WeakMap<object, number>();
-let nextId = 1;
-const idOf = (o: object) => {
-  let id = ids.get(o);
-  if (id === undefined) ids.set(o, (id = nextId++));
-  return id;
-};
 
 export class CoarseLakes {
   private readonly local = new Map<number, Float32Array | null>();
@@ -68,7 +60,7 @@ export class CoarseLakes {
     let sig = '';
     for (let b = Math.floor((y0 - LAKE_REACH - COARSE) / s) - 1; b <= Math.floor((y1 + LAKE_REACH + COARSE) / s); b++)
       for (let a = Math.floor((x0 - LAKE_REACH - COARSE) / s) - 1; a <= Math.floor((x1 + LAKE_REACH + COARSE) / s); a++)
-        sig += `${idOf(this.field.tile(a, b))},`;
+        sig += `${tileId(this.field.tile(a, b))},`;
     const key = `${tx},${ty}:${sig}`;
     let t = cache.get(key);
     if (t !== undefined) {

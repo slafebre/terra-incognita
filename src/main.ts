@@ -43,7 +43,8 @@ const actual: ViewState = {
 const desired: ViewState = { ...actual };
 
 let dirty = true;
-const workers = Math.max(1, Math.min(4, (navigator.hardwareConcurrency || 2) - 1));
+// Debug: `?workers=n` sets the pool size.
+const workers = num('workers') ?? Math.max(1, Math.min(4, (navigator.hardwareConcurrency || 2) - 1));
 // Debug: `?R=0.1` forces the region (0 lowland … 1 alpine) everywhere.
 const region = num('R') ?? snap?.R ?? null;
 const pool = new WorkerPool(workers, () => manager.schedule(), { regionOverride: region ?? NaN });

@@ -300,6 +300,7 @@ Church (one per village, cathedral-sized in towns), chapel, wayside cross at jun
 
 - The retention set is about 350 chunks on a phone and about 550 on a desktop. The 4 m DEM takes 64 KB per chunk as Float32. Rasters are re-rendered on demand rather than all kept: only visible chunks plus one ring keep their bitmaps.
 - Heavy arrays use transferable buffers. Workers keep their own copies of neighbouring data so it isn't copied back and forth.
+- Workers cache what overlapping tasks share, keyed by the seeds it depends on: coarse tiles, coarse heights on the 128 m grid, meander costs per chunk (each in 49 window solves), and the net's vertex terrain, edge costs and corridor paths (neighbouring cells read much the same land; pruned to about 16 km around the latest cell). The net caches are dropped when a tile position turns up with other seeds (land forgotten and made anew; `test/netcache.test.ts`).
 
 ## 6. Code layout (planned)
 

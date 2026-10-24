@@ -2,7 +2,7 @@ import { CHUNK } from '../lib/constants';
 import { hash3 } from '../lib/hash';
 import { MinHeap } from '../lib/heap';
 import { smoothstep } from '../lib/noise';
-import { type CoarseField, NODE } from './hydro';
+import { coarseEpochNow, type CoarseField, NODE } from './hydro';
 import { lakesOf } from './lakes';
 import {
   MAX_GRADE,
@@ -156,7 +156,7 @@ const SPAN = 1 << 21;
 /** Vertex (i, j) packed into one number. */
 const pack = (i: number, j: number) => (i + OFF) * SPAN + (j + OFF);
 const vi = (v: number) => Math.floor(v / SPAN) - OFF;
-const vj = (v: number) => (v % SPAN) - OFF;
+const vj = (v: number) => v - Math.floor(v / SPAN) * SPAN - OFF; // (exact; % on doubles is slow)
 
 /** Jittered world position of vertex v. */
 export function vertexPos(v: number): [number, number] {
@@ -210,11 +210,54 @@ function verticesIn(r: { x0: number; y0: number; x1: number; y1: number }): numb
 
 const edgeKey = (u: number, v: number) => (u < v ? `${u}_${v}` : `${v}_${u}`);
 
-/** Terrain at vertices, cached per field. */
-const vertexCache = new WeakMap<CoarseField, Map<number, { x: number; y: number; z: number; area: number; valley: number; wet: boolean }>>();
+/**
+ * Net caches, per worker and shared by every cell it builds (neighbouring cells look
+ * at much the same land): terrain at vertices, edge terrain and costs, paths between
+ * site pairs. All are pure functions of the coarse surface, so they hold until its
+ * seeds change (coarseEpochNow; latticeCell checks a new payload's seeds).
+ */
+const caches = {
+  epoch: -1,
+  vertex: new Map<number, { x: number; y: number; z: number; area: number; valley: number; wet: boolean }>(),
+  cost: new Map<number, number>(),
+  terrain: new Map<number, { grade: number; local: number; stream: number }>(),
+  path: new Map<string, [number, number][] | null>(),
+};
+/** Entries kept per cache at most (all are dropped beyond it). */
+const NET_CACHE_MAX = 1_500_000;
+/**
+ * Beyond this many vertex and edge entries, a cell first drops those of vertices more
+ * than NET_KEEP from it (a neighbouring cell reads little beyond that).
+ */
+const NET_PRUNE_AT = 600_000;
+const NET_KEEP = 16000;
+function pruneNetCaches(x0: number, y0: number, x1: number, y1: number): void {
+  const c = netCaches();
+  if (c.vertex.size + c.cost.size + c.terrain.size < NET_PRUNE_AT) return;
+  const far = (v: number) => {
+    const x = vi(v) * LATTICE;
+    const y = vj(v) * ROW;
+    return x < x0 - NET_KEEP || x > x1 + NET_KEEP || y < y0 - NET_KEEP || y > y1 + NET_KEEP;
+  };
+  for (const v of c.vertex.keys()) if (far(v)) c.vertex.delete(v);
+  for (const k of c.cost.keys()) if (far(Math.floor(Math.floor(k / 5) / 9))) c.cost.delete(k);
+  for (const k of c.terrain.keys()) if (far(Math.floor(k / 9))) c.terrain.delete(k);
+}
+function netCaches(): typeof caches {
+  const e = coarseEpochNow();
+  if (caches.epoch !== e || caches.cost.size > NET_CACHE_MAX || caches.vertex.size > NET_CACHE_MAX) {
+    caches.vertex.clear();
+    caches.cost.clear();
+    caches.terrain.clear();
+    caches.path.clear();
+    caches.epoch = e;
+  }
+  return caches;
+}
+
+/** Terrain at vertices. */
 function vdata(field: CoarseField, v: number) {
-  let m = vertexCache.get(field);
-  if (!m) vertexCache.set(field, (m = new Map()));
+  const m = netCaches().vertex;
   let d = m.get(v);
   if (!d) {
     const [x, y] = vertexPos(v);
@@ -225,15 +268,11 @@ function vdata(field: CoarseField, v: number) {
   return d;
 }
 
-/** Cost of edge u–v for a road class (symmetric). */
-const costCache = new WeakMap<CoarseField, Map<number, number>>();
-/** Paths between site pairs, per field (see corridorPath). */
-const pathCache = new WeakMap<CoarseField, Map<string, [number, number][] | null>>();
 /** Direction from vertex v to its neighbour w, 0..8 (4 is v itself). */
 const dirCode = (v: number, w: number) => (vj(w) - vj(v) + 1) * 3 + (vi(w) - vi(v) + 1);
+/** Cost of edge u–v for a road class (symmetric). */
 function edgeCost(field: CoarseField, u: number, v: number, cls: RoadClass): number {
-  let m = costCache.get(field);
-  if (!m) costCache.set(field, (m = new Map()));
+  const m = netCaches().cost;
   const lo = Math.min(u, v);
   const ck = (lo * 9 + dirCode(lo, Math.max(u, v))) * 5 + cls;
   const hit = m.get(ck);
@@ -251,10 +290,8 @@ function edgeCost(field: CoarseField, u: number, v: number, cls: RoadClass): num
  * middle than at its ends).
  */
 const SLOPE_BASE = 500;
-const terrainCache = new WeakMap<CoarseField, Map<number, { grade: number; local: number; stream: number }>>();
 function edgeTerrain(field: CoarseField, u: number, v: number): { grade: number; local: number; stream: number } {
-  let m = terrainCache.get(field);
-  if (!m) terrainCache.set(field, (m = new Map()));
+  const m = netCaches().terrain;
   const lo = Math.min(u, v);
   const key = lo * 9 + dirCode(lo, Math.max(u, v));
   let r = m.get(key);
@@ -332,11 +369,15 @@ const MIN_FACTOR = 1 - VALLEY_BONUS;
 
 export function latticeCell(gx: number, gy: number, field: CoarseField, set: Settlements, terrain?: Terrain): NetCell {
   if (DEBUG_PATHS) DEBUG_TERRAIN = terrain;
+  field.checkSeeds();
+  const debugSeen = new Set<string>();
   const x0 = gx * NET_CELL;
   const y0 = gy * NET_CELL;
   const x1 = x0 + NET_CELL;
   const y1 = y0 + NET_CELL;
-  const inBox = (s: { x: number; y: number }, m: number) => s.x >= x0 - m && s.x < x1 + m && s.y >= y0 - m && s.y < y1 + m;
+  pruneNetCaches(x0, y0, x1, y1);
+  const inBoxXY = (x: number, y: number, m: number) => x >= x0 - m && x < x1 + m && y >= y0 - m && y < y1 + m;
+  const inBox = (s: { x: number; y: number }, m: number) => inBoxXY(s.x, s.y, m);
   const sitesIn = (rank: 0 | 1 | 2 | 3, m: number) => set.sitesIn(rank, x0 - m, y0 - m, x1 + m, y1 + m);
   const dist = (a: { x: number; y: number }, b: { x: number; y: number }) => Math.hypot(a.x - b.x, a.y - b.y);
   const pos = (v: number) => vdata(field, v);
@@ -374,9 +415,19 @@ export function latticeCell(gx: number, gy: number, field: CoarseField, set: Set
   const corridorPath = (k: RoadClass, a: { x: number; y: number }, b: { x: number; y: number }, extra = CORRIDOR_EXTRA): [number, number][] | null => {
     // A pure function of the pair: cached per worker, neighbouring cells reuse it.
     const ck = `${k}|${a.x},${a.y}|${b.x},${b.y}|${extra}`;
-    let paths = pathCache.get(field);
-    if (!paths) pathCache.set(field, (paths = new Map()));
-    if (paths.has(ck)) return paths.get(ck)!;
+    const paths = netCaches().path;
+    // (Dev: each path once per cell, whether or not an earlier cell found it.)
+    const debug = (p: [number, number][] | null) => {
+      if (p && k <= ROAD_D && DEBUG_PATHS && !debugSeen.has(ck)) {
+        debugSeen.add(ck);
+        DEBUG_PATHS.push({ k, edges: p, field });
+      }
+    };
+    if (paths.has(ck)) {
+      const hit = paths.get(ck)!;
+      debug(hit);
+      return hit;
+    }
     const d = dist(a, b);
     const reach = CORRIDOR * d + extra;
     const va = nearestVertex(a.x, a.y);
@@ -400,6 +451,8 @@ export function latticeCell(gx: number, gy: number, field: CoarseField, set: Set
     const px = new Float64Array(N).fill(NaN);
     const py = new Float64Array(N);
     const inside = new Int8Array(N); // 0 unknown, 1 in, 2 out
+    const ec = new Float64Array(N * 6).fill(-1); // edge costs by vertex and direction
+    const len = new Float64Array(N * 6).fill(-1); // and lengths
     const at = (l: number) => {
       if (Number.isNaN(px[l])) {
         const q = pos(glob(l));
@@ -442,6 +495,16 @@ export function latticeCell(gx: number, gy: number, field: CoarseField, set: Set
         }
         at(l);
         const c0 = cost[st];
+        // The incoming edge, for turn costs.
+        let ux = 0;
+        let uy = 0;
+        let lenIn = 0;
+        if (lf >= 0) {
+          at(lf);
+          ux = px[l] - px[lf];
+          uy = py[l] - py[lf];
+          lenIn = Math.hypot(ux, uy);
+        }
         const nb = ((q0 + vj0) & 1) !== 0 ? NB_ODD : NB_EVEN;
         for (let dd = 0; dd < 6; dd++) {
           const wp = p0 + nb[dd][0];
@@ -454,14 +517,15 @@ export function latticeCell(gx: number, gy: number, field: CoarseField, set: Set
             inside[lw] = Math.hypot(px[lw] - a.x, py[lw] - a.y) + Math.hypot(px[lw] - b.x, py[lw] - b.y) <= reach ? 1 : 2;
           }
           if (inside[lw] === 2) continue;
-          let c = c0 + edgeCost(field, glob(l), glob(lw), k);
+          let e = ec[l * 6 + dd];
+          if (e < 0) e = ec[l * 6 + dd] = edgeCost(field, glob(l), glob(lw), k);
+          let c = c0 + e;
           if (lf >= 0) {
-            at(lf);
-            const ux = px[l] - px[lf];
-            const uy = py[l] - py[lf];
             const wx = px[lw] - px[l];
             const wy = py[lw] - py[l];
-            const cos = (ux * wx + uy * wy) / (Math.hypot(ux, uy) * Math.hypot(wx, wy));
+            let lenOut = len[l * 6 + dd];
+            if (lenOut < 0) lenOut = len[l * 6 + dd] = Math.hypot(wx, wy);
+            const cos = (ux * wx + uy * wy) / (lenIn * lenOut);
             c += cos < SHARP_COS ? SHARP_TURN : TURN_COST * (1 - cos);
           }
           const ns = lw * 9 + (q0 - wq + 1) * 3 + (p0 - wp + 1);
@@ -478,7 +542,7 @@ export function latticeCell(gx: number, gy: number, field: CoarseField, set: Set
     }
     if (paths.size > 20000) paths.delete(paths.keys().next().value!);
     paths.set(ck, out);
-    if (out && k <= ROAD_D) DEBUG_PATHS?.push({ k, edges: out, field });
+    debug(out);
     return out;
   };
   const mainPath = (k: RoadClass, a: Site, b: Site) => {
@@ -552,6 +616,7 @@ export function latticeCell(gx: number, gy: number, field: CoarseField, set: Set
     const py = new Float64Array(N);
     const inside = new Int8Array(N); // 0 unknown, 1 in, 2 out
     const ec = new Float64Array(N * 6).fill(-1);
+    const len = new Float64Array(N * 6).fill(-1);
     const at = (l: number) => {
       if (Number.isNaN(px[l])) {
         const q = pos(glob(l));
@@ -580,6 +645,16 @@ export function latticeCell(gx: number, gy: number, field: CoarseField, set: Set
         if (fa >= 0 && fb >= 0 && fa < ni && fb < nj) lf = fb * ni + fa;
       }
       at(l);
+      // The incoming edge, for turn costs.
+      let ux = 0;
+      let uy = 0;
+      let lenIn = 0;
+      if (lf >= 0) {
+        at(lf);
+        ux = px[l] - px[lf];
+        uy = py[l] - py[lf];
+        lenIn = Math.hypot(ux, uy);
+      }
       const nb = ((b + vj0) & 1) !== 0 ? NB_ODD : NB_EVEN;
       for (let d = 0; d < 6; d++) {
         const wa = a + nb[d][0];
@@ -589,19 +664,18 @@ export function latticeCell(gx: number, gy: number, field: CoarseField, set: Set
         if (lw === lf) continue;
         if (inside[lw] === 0) {
           at(lw);
-          inside[lw] = inBox({ x: px[lw], y: py[lw] }, m) ? 1 : 2;
+          inside[lw] = inBoxXY(px[lw], py[lw], m) ? 1 : 2;
         }
         if (inside[lw] === 2) continue;
         let e = ec[l * 6 + d];
         if (e < 0) e = ec[l * 6 + d] = edgeCost(field, glob(l), glob(lw), k);
         let c = c0 + e;
         if (lf >= 0) {
-          at(lf);
-          const ux = px[l] - px[lf];
-          const uy = py[l] - py[lf];
           const wx = px[lw] - px[l];
           const wy = py[lw] - py[l];
-          const cos = (ux * wx + uy * wy) / (Math.hypot(ux, uy) * Math.hypot(wx, wy));
+          let lenOut = len[l * 6 + d];
+          if (lenOut < 0) lenOut = len[l * 6 + d] = Math.hypot(wx, wy);
+          const cos = (ux * wx + uy * wy) / (lenIn * lenOut);
           c += cos < SHARP_COS ? SHARP_TURN : TURN_COST * (1 - cos);
         }
         // Entered from l: direction code of l as seen from lw.

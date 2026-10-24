@@ -94,6 +94,39 @@ const MEANDER_GAIN = 3;
 const MEANDER_MIN = 0.25;
 const SALT_MEANDER = 0x6f1d2b3a;
 
+/**
+ * Meander costs of a chunk's nodes. A pure function of place and the chunk seeds
+ * around it (the octaves are at most CHUNK, so their lattice points lie within one
+ * chunk), so every window covering the chunk shares them: cached per worker, keyed by
+ * those seeds.
+ */
+const fillCostCache = new Map<string, Float32Array>();
+const FILL_COST_CACHE_MAX = 4096;
+function chunkFillCost(view: SeedView, cx: number, cy: number): Float32Array {
+  const L = view.lattice(CHUNK);
+  let key = `${cx},${cy}`;
+  for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) key += `,${L.seed(cx + dx, cy + dy)}`;
+  let f = fillCostCache.get(key);
+  if (f) {
+    fillCostCache.delete(key); // refresh LRU position
+  } else {
+    f = new Float32Array(NODES * NODES);
+    const lat = MEANDER_OCTAVES.map(([S, , ox, oy]) => view.shifted(S, ox * S, oy * S));
+    for (let j = 0; j < NODES; j++)
+      for (let i = 0; i < NODES; i++) {
+        const x = (cx * NODES + i) * NODE;
+        const y = (cy * NODES + j) * NODE;
+        let n = 0;
+        for (let o = 0; o < lat.length; o++) n += MEANDER_OCTAVES[o][1] * gnoise(lat[o], SALT_MEANDER + o, x, y);
+        // At least MEANDER_MIN: a fill step must still register in float32 heights.
+        f[j * NODES + i] = Math.max(MEANDER_MIN, Math.exp(MEANDER_GAIN * n));
+      }
+    if (fillCostCache.size >= FILL_COST_CACHE_MAX) fillCostCache.delete(fillCostCache.keys().next().value!);
+  }
+  fillCostCache.set(key, f);
+  return f;
+}
+
 /** Octaves at or above this spacing are the coarse solve's; the fine solve adds the rest. */
 const COARSE_MIN_S = 512;
 
@@ -386,6 +419,53 @@ function tileSignature(view: SeedView, tx: number, ty: number): number {
   return h;
 }
 
+/** Identity of a coarse tile object (the tile cache returns the same object for the same surface). */
+const tileIds = new WeakMap<object, number>();
+let nextTileId = 1;
+export const tileId = (o: object) => {
+  let id = tileIds.get(o);
+  if (id === undefined) tileIds.set(o, (id = nextTileId++));
+  return id;
+};
+/** Coarse heights on the COARSE grid per square between tile centres (see zGrid), per worker. */
+const gridCache = new Map<string, Float32Array>();
+const GRID_CACHE_MAX = 256;
+
+const tileKey = (view: SeedView, tx: number, ty: number) => `${tx},${ty}:${regionOverrideKey()}:${tileSignature(view, tx, ty)}`;
+
+/**
+ * Per worker: the key (seed signature) each tile position was last resolved with. It
+ * changes only where the seeds under a tile were forgotten and made anew, and then
+ * everything cached from the coarse surface is stale: the epoch moves on.
+ */
+const tileKeyAt = new Map<number, string>();
+let coarseEpoch = 0;
+function newCoarseEpoch(): void {
+  coarseEpoch++;
+  tileKeyAt.clear();
+}
+/** Changes whenever caches built from the coarse surface (per worker, beyond one task) must be dropped. */
+export const coarseEpochNow = () => coarseEpoch;
+/**
+ * Before reusing such caches with a new payload: moves the epoch on if any tile
+ * resolved before has other seeds in this payload. (Tiles the payload doesn't cover
+ * are skipped: this task can't read anything that depends on them.)
+ */
+function checkCoarseSeeds(view: SeedView): void {
+  if (tileKeyAt.size > 4096) return newCoarseEpoch();
+  for (const [lk, k] of tileKeyAt) {
+    const tx = Math.floor(lk / 65536) - 32768;
+    const ty = (lk % 65536) - 32768;
+    let now: string;
+    try {
+      now = tileKey(view, tx, ty);
+    } catch {
+      continue; // seeds not in the payload
+    }
+    if (now !== k) return newCoarseEpoch();
+  }
+}
+
 /** Blended coarse eroded surface over a fixed tile lattice. */
 export class CoarseField {
   constructor(
@@ -393,13 +473,34 @@ export class CoarseField {
     private readonly view: SeedView,
   ) {}
 
-  private readonly local = new Map<string, Coarse>();
+  private readonly local = new Map<number, Coarse>();
+  /** The last tile returned, by key (most lookups repeat it). */
+  private lastKey = NaN;
+  private last: Coarse | undefined;
 
   tile(tx: number, ty: number): Coarse {
-    const lk = `${tx},${ty}`;
-    const hit = this.local.get(lk);
-    if (hit) return hit;
-    const k = `${lk}:${regionOverrideKey()}:${tileSignature(this.view, tx, ty)}`;
+    const lk = (tx + 32768) * 65536 + ty + 32768;
+    if (lk === this.lastKey) return this.last!;
+    let hit = this.local.get(lk);
+    if (!hit) {
+      hit = this.resolve(lk, tx, ty);
+      this.local.set(lk, hit);
+    }
+    this.lastKey = lk;
+    this.last = hit;
+    return hit;
+  }
+
+  /** See checkCoarseSeeds. */
+  checkSeeds(): void {
+    checkCoarseSeeds(this.view);
+  }
+
+  private resolve(lk: number, tx: number, ty: number): Coarse {
+    const k = tileKey(this.view, tx, ty);
+    const prev = tileKeyAt.get(lk);
+    if (prev !== undefined && prev !== k) newCoarseEpoch();
+    tileKeyAt.set(lk, k);
     let c = tileCache.get(k);
     if (c) {
       tileCache.delete(k); // refresh LRU position
@@ -408,7 +509,6 @@ export class CoarseField {
       if (tileCache.size >= TILE_CACHE_MAX) tileCache.delete(tileCache.keys().next().value!);
     }
     tileCache.set(k, c);
-    this.local.set(lk, c);
     return c;
   }
 
@@ -430,6 +530,41 @@ export class CoarseField {
     const s = TILE_STRIDE * COARSE;
     return this.tile(Math.round(x / s) - 1, Math.round(y / s) - 1);
   }
+
+  /**
+   * `z` at world (gi·COARSE, gj·COARSE), as float32: cached per worker for each
+   * square between tile centres, keyed by the four tiles it blends.
+   */
+  zGrid(gi: number, gj: number): number {
+    const a = Math.floor(gi / TILE_STRIDE);
+    const b = Math.floor(gj / TILE_STRIDE);
+    const key = (a + 32768) * 65536 + b + 32768;
+    let g = this.lastGrid;
+    if (key !== this.lastGridKey) {
+      g = this.grids.get(key);
+      if (!g) {
+        const ts = [this.tile(a - 1, b - 1), this.tile(a, b - 1), this.tile(a - 1, b), this.tile(a, b)];
+        const k = `${a},${b}:${ts.map(tileId).join(',')}`;
+        g = gridCache.get(k);
+        if (g) gridCache.delete(k); // refresh LRU position
+        else {
+          g = new Float32Array(TILE_STRIDE * TILE_STRIDE).fill(NaN);
+          if (gridCache.size >= GRID_CACHE_MAX) gridCache.delete(gridCache.keys().next().value!);
+        }
+        gridCache.set(k, g);
+        this.grids.set(key, g);
+      }
+      this.lastGridKey = key;
+      this.lastGrid = g;
+    }
+    const o = (gj - b * TILE_STRIDE) * TILE_STRIDE + gi - a * TILE_STRIDE;
+    let z = g![o];
+    if (Number.isNaN(z)) z = g![o] = this.z(gi * COARSE, gj * COARSE);
+    return z;
+  }
+  private readonly grids = new Map<number, Float32Array>();
+  private lastGridKey = NaN;
+  private lastGrid: Float32Array | undefined;
 
   z(x: number, y: number): number {
     const s = TILE_STRIDE * COARSE;
@@ -488,7 +623,7 @@ export function coarseBasins(field: CoarseField, x0: number, y0: number, x1: num
   for (let j = 0; j < gh; j++)
     for (let i = 0; i < gw; i++) {
       const k = j * gw + i;
-      gz[k] = field.z((g0x + i) * COARSE, (g0y + j) * COARSE);
+      gz[k] = field.zGrid(g0x + i, g0y + j);
       if (i === 0 || j === 0 || i === gw - 1 || j === gh - 1) {
         fill[k] = gz[k];
         seen[k] = 1;
@@ -776,6 +911,41 @@ function floorParams(R: number): [number, number] {
   return [26, 0.018];
 }
 
+/** Valley floors: distance (m) of node offsets up to FLOOR_RAD nodes. */
+const FLOOR_RAD = Math.ceil((FLOOR_MAX_HALF + WALL_FOOT + 3 * NODE) / NODE);
+const FLOOR_SIDE = 2 * FLOOR_RAD + 1;
+const FLOOR_DIST = new Float64Array(FLOOR_SIDE * FLOOR_SIDE);
+for (let dj = -FLOOR_RAD; dj <= FLOOR_RAD; dj++)
+  for (let di = -FLOOR_RAD; di <= FLOOR_RAD; di++) FLOOR_DIST[(dj + FLOOR_RAD) * FLOOR_SIDE + di + FLOOR_RAD] = Math.hypot(di, dj) * NODE;
+
+/**
+ * Indices 0..n-1 ordered by height z (index order on ties; -0 counts as 0), by a
+ * stable radix sort on the float32 bits.
+ */
+function sortByHeight(z: Float32Array, n: number): Uint32Array {
+  const f = new Float32Array(n);
+  for (let k = 0; k < n; k++) f[k] = z[k] + 0; // -0 → 0
+  const u = new Uint32Array(f.buffer);
+  // Order-preserving map of float bits to unsigned integers.
+  for (let k = 0; k < n; k++) u[k] = u[k] & 0x80000000 ? ~u[k] >>> 0 : (u[k] | 0x80000000) >>> 0;
+  let idx = new Uint32Array(n);
+  let tmp = new Uint32Array(n);
+  for (let k = 0; k < n; k++) idx[k] = k;
+  const count = new Uint32Array(2048);
+  for (let shift = 0; shift < 32; shift += 11) {
+    count.fill(0);
+    for (let k = 0; k < n; k++) count[(u[idx[k]] >>> shift) & 2047]++;
+    for (let b = 0, sum = 0; b < 2048; b++) {
+      const c = count[b];
+      count[b] = sum;
+      sum += c;
+    }
+    for (let k = 0; k < n; k++) tmp[count[(u[idx[k]] >>> shift) & 2047]++] = idx[k];
+    [idx, tmp] = [tmp, idx];
+  }
+  return idx;
+}
+
 export function solveHydro(win: HydroWindow, cx: number, cy: number, view: SeedView): HydroResult {
   const { w, h, gx, gy, zPre, R } = win;
   const N = w * h;
@@ -797,18 +967,27 @@ export function solveHydro(win: HydroWindow, cx: number, cy: number, view: SeedV
   const worldX = (i: number) => (gx + i) * NODE;
   const worldY = (j: number) => (gy + j) * NODE;
   const onEdge = (i: number, j: number) => i === 0 || j === 0 || i === w - 1 || j === h - 1;
+  // Column and row of every node, and the index offset of each direction (no % or /
+  // in the hot loops).
+  const col = new Int32Array(N);
+  const row = new Int32Array(N);
+  for (let k = 0; k < N; k++) {
+    col[k] = k % w;
+    row[k] = (k - col[k]) / w;
+  }
+  const OFS = DX.map((dx, d) => DY[d] * w + dx);
   const recIdx = (k: number): number => {
     const r = rec[k];
     if (r < 0) return -1;
-    const i = (k % w) + DX[r];
-    const j = Math.floor(k / w) + DY[r];
+    const i = col[k] + DX[r];
+    const j = row[k] + DY[r];
     if (i < 0 || j < 0 || i >= w || j >= h) return -1;
-    return j * w + i;
+    return k + OFS[r];
   };
   // Randomness is tied to place, not to the solve: overlapping solves must agree on
   // how a node routes and where lakes are. Seeds come from each chunk's seed.
   const nodeSeeds = view.lattice(NODE);
-  const nodeRand = (k: number) => nodeSeeds.seed(gx + (k % w), gy + Math.floor(k / w)) / 4294967296;
+  const nodeRand = (k: number) => nodeSeeds.seed(gx + col[k], gy + row[k]) / 4294967296;
   const chunkSeeds = view.lattice(CHUNK);
 
   // --- Big rivers entering the window (from the coarse solution) -------------
@@ -849,17 +1028,11 @@ export function solveHydro(win: HydroWindow, cx: number, cy: number, view: SeedV
   // lines. A smoothly varying cost makes them wander and gather into the cheap
   // corridors, as streams do on a floodplain. Bound to place, like all randomness here.
   const fillCost = new Float32Array(N);
-  {
-    const lat = MEANDER_OCTAVES.map(([S, , ox, oy]) => view.shifted(S, ox * S, oy * S));
-    for (let k = 0; k < N; k++) {
-      const x = worldX(k % w);
-      const y = worldY(Math.floor(k / w));
-      let n = 0;
-      for (let o = 0; o < lat.length; o++) n += MEANDER_OCTAVES[o][1] * gnoise(lat[o], SALT_MEANDER + o, x, y);
-      // At least MEANDER_MIN: a fill step must still register in float32 heights.
-      fillCost[k] = Math.max(MEANDER_MIN, Math.exp(MEANDER_GAIN * n));
+  for (let ccy = 0; ccy < h / NODES; ccy++)
+    for (let ccx = 0; ccx < w / NODES; ccx++) {
+      const f = chunkFillCost(view, gx / NODES + ccx, gy / NODES + ccy);
+      for (let j = 0; j < NODES; j++) fillCost.set(f.subarray(j * NODES, (j + 1) * NODES), (ccy * NODES + j) * w + ccx * NODES);
     }
-  }
 
   // --- Closed coarse basins (see coarseBasins) --------------------------------------
   // Breach channels cut into the surface this solve erodes; lakes come after erosion.
@@ -880,7 +1053,7 @@ export function solveHydro(win: HydroWindow, cx: number, cy: number, view: SeedV
       const r = rec[x];
       if (r < 0) return true;
       t -= EPS * DIST[r];
-      x = (Math.floor(x / w) + DY[r]) * w + (x % w) + DX[r];
+      x += OFS[r];
     }
     return true;
   };
@@ -903,8 +1076,8 @@ export function solveHydro(win: HydroWindow, cx: number, cy: number, view: SeedV
     const c = heap.pop();
     order[m++] = c;
     const kc = key[c];
-    const ci = c % w;
-    const cj = (c - ci) / w;
+    const ci = col[c];
+    const cj = row[c];
     for (let d = 0; d < 8; d++) {
       const i = ci + DX[d];
       const j = cj + DY[d];
@@ -923,7 +1096,7 @@ export function solveHydro(win: HydroWindow, cx: number, cy: number, view: SeedV
           const r = rec[x];
           if (r < 0) break;
           t -= EPS * DIST[r];
-          x = (Math.floor(x / w) + DY[r]) * w + (x % w) + DX[r];
+          x += OFS[r];
         }
       }
       heap.push(q, key[q]);
@@ -942,14 +1115,15 @@ export function solveHydro(win: HydroWindow, cx: number, cy: number, view: SeedV
   // --- Receivers: stochastic steepest descent on the filled surface -----------
   // Flood order alone gives straight D8 lines on smooth slopes. A random lower
   // neighbour weighted by slope² lets flow lines wander and merge (dendritic).
+  const wts = new Float64Array(8);
   for (let o = 0; o < m; o++) {
     const c = order[o];
     if (rec[c] === REC_EXIT) continue;
-    const ci = c % w;
-    const cj = (c - ci) / w;
+    const ci = col[c];
+    const cj = row[c];
     let total = 0;
-    const wts = [0, 0, 0, 0, 0, 0, 0, 0];
     for (let d = 0; d < 8; d++) {
+      wts[d] = 0;
       const i = ci + DX[d];
       const j = cj + DY[d];
       if (i < 0 || j < 0 || i >= w || j >= h) continue;
@@ -975,22 +1149,25 @@ export function solveHydro(win: HydroWindow, cx: number, cy: number, view: SeedV
   const donorStart = new Int32Array(N + 1);
   const donorFill = new Int32Array(N);
   const donors = new Int32Array(N);
+  /** Receiver index of each node (recIdx), as of the last buildOrder. */
+  const ri = new Int32Array(N);
   /** Receivers-before-donors order via a donor-stack traversal from base nodes. O(N). */
   const buildOrder = (): number => {
     donorStart.fill(0);
     for (let k = 0; k < N; k++) {
       const q = recIdx(k);
+      ri[k] = q;
       if (q >= 0) donorStart[q + 1]++;
     }
     for (let k = 0; k < N; k++) donorStart[k + 1] += donorStart[k];
     donorFill.set(donorStart.subarray(0, N));
     for (let k = 0; k < N; k++) {
-      const q = recIdx(k);
+      const q = ri[k];
       if (q >= 0) donors[donorFill[q]++] = k;
     }
     let n = 0;
     for (let k = 0; k < N; k++) {
-      if (recIdx(k) >= 0) continue;
+      if (ri[k] >= 0) continue;
       order[n++] = k;
       for (let p = n - 1; p < n; p++) {
         const c = order[p];
@@ -1013,20 +1190,29 @@ export function solveHydro(win: HydroWindow, cx: number, cy: number, view: SeedV
   const routeSteepest = () => {
     for (let c = 0; c < N; c++) {
       if (rec[c] === REC_EXIT || !Number.isNaN(lake[c])) continue;
-      const ci = c % w;
-      const cj = (c - ci) / w;
+      const ci = col[c];
+      const cj = row[c];
       let bestD = -1;
       let bestS = 0;
-      for (let d = 0; d < 8; d++) {
-        const i = ci + DX[d];
-        const j = cj + DY[d];
-        if (i < 0 || j < 0 || i >= w || j >= h) continue;
-        const sl = (zE[c] - zE[j * w + i]) / DIST[d];
-        if (sl > bestS) {
-          bestS = sl;
-          bestD = d;
+      if (ci > 0 && cj > 0 && ci < w - 1 && cj < h - 1) {
+        for (let d = 0; d < 8; d++) {
+          const sl = (zE[c] - zE[c + OFS[d]]) / DIST[d];
+          if (sl > bestS) {
+            bestS = sl;
+            bestD = d;
+          }
         }
-      }
+      } else
+        for (let d = 0; d < 8; d++) {
+          const i = ci + DX[d];
+          const j = cj + DY[d];
+          if (i < 0 || j < 0 || i >= w || j >= h) continue;
+          const sl = (zE[c] - zE[j * w + i]) / DIST[d];
+          if (sl > bestS) {
+            bestS = sl;
+            bestD = d;
+          }
+        }
       // Keep the current receiver while it's still downhill and not clearly worse:
       // on flats all slopes tie, and re-picking would snap streams to grid lines.
       const cur = rec[c];
@@ -1046,18 +1232,26 @@ export function solveHydro(win: HydroWindow, cx: number, cy: number, view: SeedV
     for (let o = m - 1; o >= 0; o--) {
       const c = order[o];
       A[c] += NODE_AREA + inflow[c];
-      const q = recIdx(c);
+      const q = ri[c];
       if (q >= 0) A[q] += A[c];
     }
   };
+  // channelSlope's region parameters, per node.
+  const kR = new Float64Array(N);
+  const smaxR = new Float64Array(N);
+  for (let k = 0; k < N; k++) {
+    kR[k] = erodeK(R[k]);
+    smaxR[k] = erodeSmax(R[k]);
+  }
   const carve = () => {
     for (let o = 0; o < m; o++) {
       const c = order[o];
       if (!Number.isNaN(lake[c])) continue;
-      const q = recIdx(c);
+      const q = ri[c];
       if (q < 0) continue; // outlet or pit
       const d = DIST[rec[c]];
-      const S = channelSlope(A[c], R[c]);
+      const s = kR[c] / Math.sqrt(A[c]);
+      const S = s > smaxR[c] ? smaxR[c] : s < S_MIN ? S_MIN : s; // channelSlope
       zE[c] = Math.max(zE[q] + EPS * d * fillCost[c], Math.min(zPre[c], zE[q] + S * d));
     }
   };
@@ -1110,8 +1304,8 @@ export function solveHydro(win: HydroWindow, cx: number, cy: number, view: SeedV
       let ok = true;
       while (queue.length && ok) {
         const c = queue.pop()!;
-        const ci = c % w;
-        const cj = (c - ci) / w;
+        const ci = col[c];
+        const cj = row[c];
         for (let d = 0; d < 8 && ok; d++) {
           const i = ci + DX[d];
           const j = cj + DY[d];
@@ -1141,7 +1335,7 @@ export function solveHydro(win: HydroWindow, cx: number, cy: number, view: SeedV
         zE[c] = level;
         lake[c] = level;
         const pc = parent.get(c)!;
-        for (let d = 0; d < 8; d++) if ((Math.floor(c / w) + DY[d]) * w + (c % w) + DX[d] === pc) rec[c] = d;
+        for (let d = 0; d < 8; d++) if (c + OFS[d] === pc) rec[c] = d;
       }
       damSites.add(site);
       lakes++;
@@ -1155,7 +1349,9 @@ export function solveHydro(win: HydroWindow, cx: number, cy: number, view: SeedV
   // centimetres of it). Per node, without connectivity, so no window sees it
   // differently. These lakes are never drained (that is decided per window).
   const coarseLake = new Uint8Array(N);
-  for (let k = 0; k < N; k++) {
+  // (Most windows have none.)
+  const anyCoarseLake = basins.level.some((L) => !Number.isNaN(L));
+  for (let k = 0; anyCoarseLake && k < N; k++) {
     if (!Number.isNaN(lake[k])) continue;
     const x = worldX(k % w);
     const y = worldY(Math.floor(k / w));
@@ -1192,8 +1388,8 @@ export function solveHydro(win: HydroWindow, cx: number, cy: number, view: SeedV
       members.push(c);
       depth = Math.max(depth, key[c] - zPre[c]);
       level = Math.max(level, key[c]);
-      const ci = c % w;
-      const cj = (c - ci) / w;
+      const ci = col[c];
+      const cj = row[c];
       for (let d = 0; d < 8; d++) {
         const i = ci + DX[d];
         const j = cj + DY[d];
@@ -1220,10 +1416,10 @@ export function solveHydro(win: HydroWindow, cx: number, cy: number, view: SeedV
     const [kw, slope] = floorParams(R[c]);
     const half = Math.min(FLOOR_MAX_HALF, kw * Math.sqrt(A[c]));
     if (half < NODE) continue;
-    const smax = erodeSmax(R[c]);
+    const smax = smaxR[c];
     const rad = Math.ceil((half + WALL_FOOT + 3 * NODE) / NODE);
-    const ci = c % w;
-    const cj = (c - ci) / w;
+    const ci = col[c];
+    const cj = row[c];
     const zc = zE[c];
     for (let dj = -rad; dj <= rad; dj++) {
       const j = cj + dj;
@@ -1233,7 +1429,7 @@ export function solveHydro(win: HydroWindow, cx: number, cy: number, view: SeedV
         if (i < 0 || i >= w) continue;
         const q = j * w + i;
         if (!Number.isNaN(lake[q])) continue;
-        const dist = Math.hypot(di, dj) * NODE;
+        const dist = FLOOR_DIST[(dj + FLOOR_RAD) * FLOOR_SIDE + di + FLOOR_RAD];
         // Floor, then a concave foot (slope ramps up over WALL_FOOT) into the valley wall.
         const e = dist - half;
         const wall = e <= 0 ? 0 : e < WALL_FOOT ? (smax * e * e) / (2 * WALL_FOOT) : smax * (e - WALL_FOOT / 2);
@@ -1253,33 +1449,51 @@ export function solveHydro(win: HydroWindow, cx: number, cy: number, view: SeedV
   // Channels are lowered too (and re-routed into the lower ground): otherwise a side
   // stream left perched above a newly carved valley stands as a one-node wall.
   // Channels beside a lake keep their course, so inflows and outflows stay intact.
+  const limStep = new Float64Array(N);
+  for (let k = 0; k < N; k++) limStep[k] = smaxR[k] * HILL_LIMIT;
   const limitHillslopes = () => {
     const nearLake = new Uint8Array(N);
     for (let c = 0; c < N; c++) {
       if (Number.isNaN(lake[c])) continue;
-      const ci = c % w;
-      const cj = (c - ci) / w;
+      const ci = col[c];
+      const cj = row[c];
       for (let d = 0; d < 8; d++) {
         const i = ci + DX[d];
         const j = cj + DY[d];
         if (i >= 0 && j >= 0 && i < w && j < h) nearLake[j * w + i] = 1;
       }
     }
-    const lim = new MinHeap(N);
-    for (let k = 0; k < N; k++) lim.push(k, zE[k]);
-    while (lim.size) {
-      const kz = lim.peekKey();
-      const c = lim.pop();
+    // Nodes that are never lowered (fixed for the whole pass: lakes, rec and A don't
+    // change here other than rec of nodes that may be lowered).
+    const fixed = new Uint8Array(N);
+    for (let q = 0; q < N; q++) fixed[q] = !Number.isNaN(lake[q]) || rec[q] === REC_EXIT || (A[q] >= CHANNEL_A && nearLake[q]) ? 1 : 0;
+    // Lowest first: every node in height order (index order on ties), merged with a
+    // heap of the nodes lowered since. Pops in the same order as one heap holding them
+    // all (lowered nodes were pushed later, so they lose ties), at a fraction of the cost.
+    const sorted = sortByHeight(zE, N);
+    const sortedKey = new Float64Array(N);
+    for (let p = 0; p < N; p++) sortedKey[p] = zE[sorted[p]];
+    const lim = new MinHeap(1024);
+    for (let p = 0; ; ) {
+      let c: number;
+      let kz: number;
+      if (p < N && (!lim.size || sortedKey[p] <= lim.peekKey())) {
+        c = sorted[p];
+        kz = sortedKey[p++];
+      } else if (lim.size) {
+        kz = lim.peekKey();
+        c = lim.pop();
+      } else break;
       if (kz !== zE[c]) continue; // stale entry
-      const ci = c % w;
-      const cj = (c - ci) / w;
+      const ci = col[c];
+      const cj = row[c];
       for (let d = 0; d < 8; d++) {
         const i = ci + DX[d];
         const j = cj + DY[d];
         if (i < 0 || j < 0 || i >= w || j >= h) continue;
         const q = j * w + i;
-        if (!Number.isNaN(lake[q]) || rec[q] === REC_EXIT || (A[q] >= CHANNEL_A && nearLake[q])) continue;
-        const cand = zE[c] + erodeSmax(R[q]) * HILL_LIMIT * DIST[d];
+        if (fixed[q]) continue;
+        const cand = zE[c] + limStep[q] * DIST[d];
         if (cand < zE[q] - 1e-3) {
           zE[q] = cand;
           rec[q] = (d + 4) & 7;
@@ -1313,8 +1527,8 @@ export function solveHydro(win: HydroWindow, cx: number, cy: number, view: SeedV
       done[s0] = 1;
       for (let p = 0; p < members.length; p++) {
         const c = members[p];
-        const ci = c % w;
-        const cj = (c - ci) / w;
+        const ci = col[c];
+        const cj = row[c];
         for (let d = 0; d < 8; d++) {
           const i = ci + DX[d];
           const j = cj + DY[d];
@@ -1351,8 +1565,8 @@ export function solveHydro(win: HydroWindow, cx: number, cy: number, view: SeedV
   // Land beside a lake can't sit below its level (except the outflowing river).
   for (let c = 0; c < N; c++) {
     if (!lowered[c] || A[c] >= CHANNEL_A) continue;
-    const ci = c % w;
-    const cj = (c - ci) / w;
+    const ci = col[c];
+    const cj = row[c];
     for (let d = 0; d < 8; d++) {
       const i = ci + DX[d];
       const j = cj + DY[d];
@@ -1419,8 +1633,8 @@ export function solveHydro(win: HydroWindow, cx: number, cy: number, view: SeedV
       }
     while (fill.size) {
       const c = fill.pop();
-      const ci = c % w;
-      const cj = (c - ci) / w;
+      const ci = col[c];
+      const cj = row[c];
       for (let d = 0; d < 8; d++) {
         const i = ci + DX[d];
         const j = cj + DY[d];

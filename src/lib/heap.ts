@@ -1,6 +1,8 @@
 /**
- * Binary min-heap of integer ids keyed by float priority, with FIFO tie-breaking
- * (insertion sequence), which keeps priority-flood routing across flats stable.
+ * Min-heap (4-ary: shallower than binary, so fewer moves per pop) of integer ids keyed
+ * by float priority, with FIFO tie-breaking (insertion sequence), which keeps
+ * priority-flood routing across flats stable. (Key, sequence) orders entries
+ * strictly, so the order of pops doesn't depend on the heap's layout.
  */
 export class MinHeap {
   private ids: Int32Array;
@@ -21,19 +23,23 @@ export class MinHeap {
 
   push(id: number, key: number): void {
     if (this.n === this.ids.length) this.grow();
+    const keys = this.keys;
+    const seqs = this.seqs;
+    const ids = this.ids;
     let i = this.n++;
     const s = this.seq++;
     while (i > 0) {
-      const p = (i - 1) >> 1;
-      if (this.keys[p] < key || (this.keys[p] === key && this.seqs[p] < s)) break;
-      this.ids[i] = this.ids[p];
-      this.keys[i] = this.keys[p];
-      this.seqs[i] = this.seqs[p];
+      const p = (i - 1) >> 2;
+      const kp = keys[p];
+      if (kp < key || (kp === key && seqs[p] < s)) break;
+      ids[i] = ids[p];
+      keys[i] = kp;
+      seqs[i] = seqs[p];
       i = p;
     }
-    this.ids[i] = id;
-    this.keys[i] = key;
-    this.seqs[i] = s;
+    ids[i] = id;
+    keys[i] = key;
+    seqs[i] = s;
   }
 
   /** Key of the top element (call before `pop`). */
@@ -42,27 +48,41 @@ export class MinHeap {
   }
 
   pop(): number {
-    const top = this.ids[0];
+    const ids = this.ids;
+    const keys = this.keys;
+    const seqs = this.seqs;
+    const top = ids[0];
     const n = --this.n;
     if (n > 0) {
-      const id = this.ids[n];
-      const key = this.keys[n];
-      const s = this.seqs[n];
+      const id = ids[n];
+      const key = keys[n];
+      const s = seqs[n];
       let i = 0;
       for (;;) {
-        let c = 2 * i + 1;
-        if (c >= n) break;
-        const r = c + 1;
-        if (r < n && (this.keys[r] < this.keys[c] || (this.keys[r] === this.keys[c] && this.seqs[r] < this.seqs[c]))) c = r;
-        if (key < this.keys[c] || (key === this.keys[c] && s < this.seqs[c])) break;
-        this.ids[i] = this.ids[c];
-        this.keys[i] = this.keys[c];
-        this.seqs[i] = this.seqs[c];
+        const c0 = 4 * i + 1;
+        if (c0 >= n) break;
+        // Smallest of up to four children.
+        let c = c0;
+        let kc = keys[c0];
+        let sc = seqs[c0];
+        const end = c0 + 4 < n ? c0 + 4 : n;
+        for (let x = c0 + 1; x < end; x++) {
+          const kx = keys[x];
+          if (kx < kc || (kx === kc && seqs[x] < sc)) {
+            c = x;
+            kc = kx;
+            sc = seqs[x];
+          }
+        }
+        if (key < kc || (key === kc && s < sc)) break;
+        ids[i] = ids[c];
+        keys[i] = kc;
+        seqs[i] = sc;
         i = c;
       }
-      this.ids[i] = id;
-      this.keys[i] = key;
-      this.seqs[i] = s;
+      ids[i] = id;
+      keys[i] = key;
+      seqs[i] = s;
     }
     return top;
   }

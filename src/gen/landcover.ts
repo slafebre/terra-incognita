@@ -103,12 +103,14 @@ export function computeCover(cx: number, cy: number, view: SeedView, inp: CoverI
   const NOISE = [SALTS.ice, SALTS.rock, SALTS.forest2, SALTS.rock + 9, SALTS.forest, SALTS.conifer, SALTS.vine, SALTS.wet, SALTS.heath, SALTS.clear];
   const NW = (DEM_W + 1) >> 1;
   const grid = new Float32Array(NOISE.length * NW * NW);
-  for (let gj = 0; gj < NW; gj++)
-    for (let gi = 0; gi < NW; gi++) {
-      const x = cx * CHUNK + (2 * gi - APRON) * CELL;
-      const y = cy * CHUNK + (2 * gj - APRON) * CELL;
-      NOISE.forEach((salt, n) => (grid[(n * NW + gj) * NW + gi] = fbm(salt, x, y)));
-    }
+  // One field at a time: gnoise reuses a lattice cell's gradients only for the same salt.
+  for (let n = 0; n < NOISE.length; n++)
+    for (let gj = 0; gj < NW; gj++)
+      for (let gi = 0; gi < NW; gi++) {
+        const x = cx * CHUNK + (2 * gi - APRON) * CELL;
+        const y = cy * CHUNK + (2 * gj - APRON) * CELL;
+        grid[(n * NW + gj) * NW + gi] = fbm(NOISE[n], x, y);
+      }
   const noiseAt = (n: number, i: number, j: number) => {
     const gi = Math.min(NW - 2, i >> 1);
     const gj = Math.min(NW - 2, j >> 1);
@@ -122,10 +124,25 @@ export function computeCover(cx: number, cy: number, view: SeedView, inp: CoverI
 
   // Clearings are centred where a settlement's roads meet (its lattice vertex, where
   // its street plan or farmstead is).
-  const clearings = sites.map((st) => {
-    const [x, y] = vertexPos(nearestVertex(st.x, st.y));
-    return { x, y, r: CLEAR_R[st.rank] };
-  });
+  // Only those that can reach the chunk: the raggedness factor is at least the least
+  // grid value of its noise (interpolated between them), less a margin for rounding.
+  let raggedMin = Infinity;
+  for (let k = 9 * NW * NW; k < 10 * NW * NW; k++) raggedMin = Math.min(raggedMin, 1 + CLEAR_RAGGED * grid[k]);
+  raggedMin -= 0.01;
+  const bx0 = cx * CHUNK - APRON * CELL;
+  const by0 = cy * CHUNK - APRON * CELL;
+  const bx1 = cx * CHUNK + (DEM_W - 1 - APRON) * CELL;
+  const by1 = cy * CHUNK + (DEM_W - 1 - APRON) * CELL;
+  const clearings = sites
+    .map((st) => {
+      const [x, y] = vertexPos(nearestVertex(st.x, st.y));
+      return { x, y, r: CLEAR_R[st.rank] };
+    })
+    .filter((c) => {
+      if (raggedMin <= 0) return true;
+      const d = Math.hypot(Math.max(bx0 - c.x, 0, c.x - bx1), Math.max(by0 - c.y, 0, c.y - by1));
+      return d * raggedMin < c.r + 1;
+    });
 
   for (let j = 0; j < DEM_W; j++)
     for (let i = 0; i < DEM_W; i++) {
