@@ -1,5 +1,6 @@
 import { hash1, hash3, rng } from '../lib/hash';
 import { lerp, smoothstep } from '../lib/noise';
+import { placeBuildings, type Way } from './buildings';
 import { NODE } from './hydro';
 import { nearestVertex, vertexPos } from './lattice';
 import { ROAD_C, ROAD_P, ROAD_T, type RoadPatch, type SegmentPath } from './roads';
@@ -57,6 +58,8 @@ export interface TownPlan {
   roads: SegmentPath[];
   /** Built-up land: a strip `depth` m each side of each polyline. */
   frontage: { depth: number; xy: Float32Array }[];
+  /** Building footprints: four corners each, [x0, y0, … x3, y3] (world metres). */
+  buildings: Float32Array;
 }
 
 /** Everything a plan draws lies within this distance of its site (m), per rank. */
@@ -107,6 +110,16 @@ const UPGRADE_MIN = 30;
 const REFILL = 3;
 /** Street length per area (m/m²) the old core adds to the budget, per rank: about 30–40 m blocks. */
 const OLD_DENSITY = [0.045, 0.035];
+/** Buildings keep this far from a road's centre line (m), per class (N, D, C, track, path): half its width and a margin. */
+export const ROAD_CLEAR = [6, 5, 4, 2.5, 1.5];
+/** …and from a street's (street, lane). */
+export const STREET_CLEAR = [3.5, 3];
+/** Hamlets' houses stand further apart. */
+const HAMLET_GAPS = 1.8;
+/** No building this close to the church at a village's or town's centre (m). */
+const CHURCH_CLEAR = 10;
+/** No building on ground steeper than this (m/m, over 8 m). */
+const BUILD_STEEP = 0.4;
 /** Attempts per branch point. */
 const RETRIES = 2;
 /** Junction angles below this are refused (rad). */
@@ -202,7 +215,7 @@ export function planTown({ site, roads, patch: p }: PlanInput): TownPlan {
   const core = (rank === TOWN ? lerp(260, 340, rand()) : rank === VILLAGE ? lerp(140, 200, rand()) : lerp(40, 70, rand())) * size;
   const reach = Math.min(
     extent - 60,
-    rank === TOWN ? lerp(650, 850, rand()) * size : rank === VILLAGE ? core * 1.7 : lerp(80, 150, rand()) * size,
+    rank === TOWN ? lerp(650, 850, rand()) * size : rank === VILLAGE ? core * 1.7 : lerp(50, 100, rand()) * size,
   );
   let budget = (rank === TOWN ? lerp(14000, 22000, rand()) : lerp(900, 2000, rand())) * size * size;
   // Character. A village is clustered round its crossroads or strung out along its
@@ -1031,16 +1044,43 @@ export function planTown({ site, roads, patch: p }: PlanInput): TownPlan {
     }
     flush();
   }
+  // --- Buildings -----------------------------------------------------------------
+  const allStreets = [...out, ...upgraded];
+  const ways: Way[] = [
+    ...sorted.filter((q) => !replaced.has(q.key)).map((q) => ({ xy: q.xy, clear: ROAD_CLEAR[q.cls] })),
+    ...roadsOut.map((q) => ({ xy: q.xy, clear: ROAD_CLEAR[q.cls] })),
+    ...allStreets.map((q) => ({ xy: q.xy, clear: STREET_CLEAR[q.cls] })),
+  ];
+  const mid = (xy: Float32Array) => {
+    const k = 2 * Math.floor(xy.length / 4);
+    return Math.hypot(xy[k] - cx, xy[k + 1] - cy);
+  };
+  const buildings = placeBuildings({
+    // Nearest the centre first: the dense rows claim their plots before the houses.
+    fronts: frontage.map((f) => f.xy).sort((a, b) => mid(a) - mid(b)),
+    ways,
+    dense: (x, y) => rank !== HAMLET && zoneDist(x, y, false) < oldCore,
+    ok: (x, y) => {
+      const r = Math.hypot(x - cx, y - cy);
+      if (wet(x, y) || areaAt(x, y) > STREAM_A || r > extent - 5 || (rank !== HAMLET && r < CHURCH_CLEAR)) return false;
+      const g = Math.hypot(zAt(x + 4, y) - zAt(x - 4, y), zAt(x, y + 4) - zAt(x, y - 4)) / 8;
+      return g < BUILD_STEEP;
+    },
+    rand,
+    gapScale: rank === HAMLET ? HAMLET_GAPS : 1,
+  });
+
   return {
     id: site.id,
     rank,
     x: cx,
     y: cy,
-    streets: [...out, ...upgraded],
+    streets: allStreets,
     replaced: [...replaced],
     // (Copies: transferred separately from the inputs.)
     roads: roadsOut.map((q) => ({ ...q, xy: q.xy.slice() })),
     frontage,
+    buildings,
   };
 }
 

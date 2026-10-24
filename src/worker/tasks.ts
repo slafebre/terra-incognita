@@ -44,7 +44,12 @@ export function runTask(t: TaskRequest): { result: TaskResult; transfer: Transfe
       const result = planTown(t.input);
       return {
         result: { kind: 'plan', result, ms: ms() },
-        transfer: [...result.streets.map((s) => s.xy.buffer), ...result.frontage.map((f) => f.xy.buffer), ...result.roads.map((r) => r.xy.buffer)],
+        transfer: [
+          ...result.streets.map((s) => s.xy.buffer),
+          ...result.frontage.map((f) => f.xy.buffer),
+          ...result.roads.map((r) => r.xy.buffer),
+          result.buildings.buffer,
+        ],
       };
     }
     case 'dem': {

@@ -3,7 +3,8 @@ import { NODE } from '../src/gen/hydro';
 import { nearestVertex, vertexPos } from '../src/gen/lattice';
 import { ROAD_C, ROAD_D, ROAD_T, type RoadClass, type RoadPatch, type SegmentPath } from '../src/gen/roads';
 import { HAMLET, TOWN, VILLAGE, type Rank, type Site } from '../src/gen/settle';
-import { PLAN_EXTENT, PLAN_MARGIN, planTown, type PlanInput, type TownPlan } from '../src/gen/town';
+import { PLAN_EXTENT, PLAN_MARGIN, planTown, ROAD_CLEAR, STREET_CLEAR, type PlanInput, type TownPlan } from '../src/gen/town';
+import { quadsOverlap, segQuadDist } from '../src/gen/buildings';
 import { rng } from '../src/lib/hash';
 import { APRON, CELL, CHUNK, DEM_W } from '../src/lib/constants';
 import { COVER, COVER_FIELDS, COVER_SCALE } from '../src/gen/landcover';
@@ -262,5 +263,59 @@ describe('street plans', () => {
     // Both kinds occur.
     expect(lanes).toBeGreaterThan(0);
     expect(bare).toBeGreaterThan(0);
+  });
+
+  it('place buildings clear of ways, water and each other', () => {
+    for (const { name, inp, plan } of plans) {
+      const b = plan.buildings;
+      const n = b.length / 8;
+      expect(n, name).toBeGreaterThan(name.startsWith('hamlet') ? 0 : 50);
+      const replaced = new Set(plan.replaced);
+      const ways = [
+        ...[...inp.roads.filter((r) => !replaced.has(r.key)), ...plan.roads].map((r) => ({ xy: r.xy, clear: ROAD_CLEAR[r.cls] })),
+        ...plan.streets.map((s) => ({ xy: s.xy, clear: STREET_CLEAR[s.cls] })),
+      ];
+      const { patch: p } = inp;
+      for (let i = 0; i < n; i++) {
+        const q = Array.from(b.subarray(8 * i, 8 * i + 8));
+        const [qx, qy] = [(q[0] + q[4]) / 2, (q[1] + q[5]) / 2];
+        for (const w of ways)
+          for (let k = 2; k < w.xy.length; k += 2) {
+            if (Math.hypot(w.xy[k] - qx, w.xy[k + 1] - qy) > 80) continue;
+            expect(segQuadDist(w.xy[k - 2], w.xy[k - 1], w.xy[k], w.xy[k + 1], q), `${name} building ${i}`).toBeGreaterThanOrEqual(w.clear - 1e-3);
+          }
+        for (let c = 0; c < 8; c += 2) {
+          const k = (Math.round(q[c + 1] / NODE) - p.gy) * p.w + Math.round(q[c] / NODE) - p.gx;
+          expect(Number.isNaN(p.lake[k]) && p.A[k] <= 0.15, `${name} building ${i} on water`).toBe(true);
+        }
+        for (let j = 0; j < i; j++) {
+          const r = b.subarray(8 * j, 8 * j + 8);
+          if (Math.hypot(r[0] - q[0], r[1] - q[1]) > 60) continue;
+          expect(quadsOverlap(q, r, 0.3), `${name} buildings ${j} and ${i}`).toBe(false);
+        }
+      }
+    }
+  });
+
+  it('build villages and towns in both densities', () => {
+    for (const { name, plan } of plans) {
+      if (name.startsWith('hamlet')) continue;
+      const b = plan.buildings;
+      const n = b.length / 8;
+      // Wall to wall (a terrace) or standing alone (a house): nearest neighbour's corner within 1 m or not.
+      let terraced = 0;
+      for (let i = 0; i < n; i++) {
+        let near = Infinity;
+        for (let j = 0; j < n; j++) {
+          if (i === j) continue;
+          for (let a = 0; a < 8; a += 2)
+            for (let c = 0; c < 8; c += 2) near = Math.min(near, Math.hypot(b[8 * i + a] - b[8 * j + c], b[8 * i + a + 1] - b[8 * j + c + 1]));
+        }
+        if (near < 1) terraced++;
+      }
+      console.log(`${name}: ${n} buildings, ${terraced} in terraces`);
+      expect(terraced, name).toBeGreaterThan(0.1 * n);
+      expect(n - terraced, name).toBeGreaterThan(0.2 * n);
+    }
   });
 });

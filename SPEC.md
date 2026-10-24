@@ -224,6 +224,11 @@ An edge used by several ways takes the highest class.
 - **Hamlets:** no square, back lanes or church. Built up along their main road only (roads proper, not tracks or paths) for 80–150 m from the crossroads, leaning one way; or (half of them in the lowlands, a quarter in the mountains) one or two short residential streets (40–110 m) off it, with built-up land along those too. Tracks through a hamlet stay tracks unless they run along its main road.
 - **Size:** village core 140–200 m, reach 1.7× that, 0.9–2 km of streets; town core 260–340 m, reach 650–850 m, 14–22 km of streets at most (measured: 8.5–9.5 km in lowland and hills, 3.5–5 km in the mountains, held back by lakes and slopes); both shrink by up to 40 % in the mountains.
 - **Tracks and footpaths through built-up land** (runs of at least 30 m) become residential streets there; the plan redraws those segments (built-up runs as streets, the rest keeping its class) and chunks drop the network's.
+- **Buildings** *(as implemented in `src/gen/buildings.ts`, part of the plan)*: both sides of every built-up front (streets, and the road stretches through built-up land), nearest the centre first, are walked end to end and a rectangle square to the street tried at each step, in two densities:
+  - *dense* (the old core): terraced rows flush with the street (0.4 m beyond its clearance), 6–11 m along it and 9–14 m deep, wall to wall, now and then (15 %) a 3–6 m gap for an alley or a yard; a plot that won't take a full width (bends, corners) takes 55 % of it;
+  - *loose* (everywhere else, and hamlets): houses 8–13 × 7–11 m set back 3–8 m, 6–22 m apart (1.8× in hamlets), now and then (12 %) a barn of 14–22 × 9–12 m.
+
+  A footprint is kept only if it stays clear of every road and street by half its width and a margin (6, 5, 4, 2.5, 1.5 m from N, D, C, track and path centre lines; 3.5 and 3 m from streets and lanes), of other buildings (they may share walls), of lakes and stream channels, of ground steeper than 40 % and of the church (10 m); one clashing at full depth is tried at 62 % of it. Measured on synthetic land: 100–300 buildings per village, a quarter to a third of them in terraces; 1,000–1,700 per town. Drawn filled with a thin darker edge, over the built-up tint and under the roads.
 - **Built-up land** clears the cover under it (woods, vines, marsh, heath; 6 m soft margin) before the chunk is drawn.
 - **Built-up land** is a strip 18–24 m each side of every street and of the road stretches near streets or the core, drawn opaque into a layer and laid down translucent once.
 - **The crossroads** (redrawn roads: the plan lists the keys of the network's segments it replaces and draws its own pieces instead; their far ends don't move). The roads ending at the centre are cut back and joined by short curved links round it: three or more roads make a rounded triangular green or a small square (24–34 m; in towns always, a 30–45 m market square), a road passing straight through may part round a long green (35–60 m, an Anger; more often in the lowlands). Each link carries the lesser class of its two roads, so a through road keeps its class along one side. Not on slopes over 10 % or where a link would be wet.
@@ -231,7 +236,7 @@ An edge used by several ways takes the highest class.
 
 **Planned**
 - **Streets** grow from the roads entering the settlement. Old cores get an organic street pattern around a church square. Towns also get grid or cul-de-sac suburbs and an industrial zone near rail or the N road.
-- **Buildings** are footprint polygons aligned to the street, with setbacks. Farmyards in villages are L- or U-shaped. Industrial halls are larger. Building density and size depend on settlement rank and distance from the centre.
+- **Buildings:** farmyards in villages L- or U-shaped, industrial halls; farms' own buildings.
 - **Parcels** subdivide farmland bounded by roads and tracks. Shapes depend on the region: strip fields in lowland, small irregular fields with **hedges** in bocage, terraces on steep slopes. Vineyards go on south-facing slopes at roughly 150–500 m, orchards around villages.
 
 ### 3.7 Land cover
@@ -312,7 +317,7 @@ test/                invariant tests (Vitest)
   - gradient limits hold per road class
   - no N or D dead-ends inside the finished set
   - every settlement is connected
-  - street plans (synthetic villages and towns): the same plan whatever order the roads come in, streets meet roads and each other only at junctions, every street connected, off water, within the plan's extent, redrawn roads keep their far ends, tracks through built-up land become streets, woods cleared under built-up land
+  - street plans (synthetic villages and towns): buildings clear of ways, water and each other, both densities present; the same plan whatever order the roads come in, streets meet roads and each other only at junctions, every street connected, off water, within the plan's extent, redrawn roads keep their far ends, tracks through built-up land become streets, woods cleared under built-up land
   - no building overlaps a road or water
   - chunk borders join (height and polyline continuity)
 - **Visual checks** in the browser at phone and desktop sizes. A hidden `?debug` flag shows chunk stages and timings for development (not a user-facing panel).

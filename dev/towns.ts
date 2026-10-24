@@ -96,6 +96,13 @@ function svg({ input, plan: p }: { input: PlanInput; plan: TownPlan }): string {
   // Frontage (built-up).
   for (const f of p.frontage)
     s += `<path d="${poly(f.xy)}" fill="none" stroke="rgb(214,180,170)" stroke-width="${2 * f.depth}" stroke-linecap="round" stroke-linejoin="round"/>`;
+  // Buildings.
+  {
+    let d = '';
+    const b = p.buildings;
+    for (let i = 0; i < b.length; i += 8) d += `M${b[i].toFixed(1)} ${b[i + 1].toFixed(1)}L${b[i + 2].toFixed(1)} ${b[i + 3].toFixed(1)}L${b[i + 4].toFixed(1)} ${b[i + 5].toFixed(1)}L${b[i + 6].toFixed(1)} ${b[i + 7].toFixed(1)}Z`;
+    s += `<path d="${d}" fill="rgb(150,110,100)" stroke="rgb(95,70,64)" stroke-width="0.6"/>`;
+  }
   // Lakes and streams.
   for (let j = 0; j < patch.h; j++)
     for (let i = 0; i < patch.w; i++) {
@@ -169,7 +176,10 @@ for (const input of inputs) {
   const f = `${OUT}-R${site.R.toFixed(2)}-${site.id.replace(/[:,]/g, '_')}.svg`;
   svgs.push(svg({ input, plan: p }));
   writeFileSync(f, svgs[svgs.length - 1]);
-  console.log(`R=${site.R.toFixed(2)} ${site.id} at ${site.x.toFixed(0)},${site.y.toFixed(0)}: ${p.streets.length} streets, ${km.toFixed(2)} km, plan ${ms.toFixed(0)} ms → ${f}`);
+  console.log(
+    `R=${site.R.toFixed(2)} ${site.id} at ${site.x.toFixed(0)},${site.y.toFixed(0)}: ${p.streets.length} streets, ${km.toFixed(2)} km, ` +
+      `${p.buildings.length / 8} buildings, plan ${ms.toFixed(0)} ms → ${f}`,
+  );
 }
 // One SVG of them all, nested in a grid (square, so thumbnailers show it whole).
 {
