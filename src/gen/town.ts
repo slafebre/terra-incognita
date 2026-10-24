@@ -116,6 +116,8 @@ export const ROAD_CLEAR = [6, 5, 4, 2.5, 1.5];
 export const STREET_CLEAR = [3.5, 3];
 /** Terraces line the main roads out to this many times the old core's radius. */
 const MAIN_DENSE = 1.25;
+/** Ground buildings may stand on (m/m, over 8 m), lowland to mountains: mountain villages climb their slopes. */
+const BUILD_STEEP = [0.55, 0.8];
 /** Hamlets' houses stand further apart. */
 const HAMLET_GAPS = 1.8;
 /** No building this close to the church at a village's or town's centre (m). */
@@ -1082,14 +1084,19 @@ export function planTown({ site, roads, patch: p }: PlanInput): TownPlan {
     dense: (x, y, main) => rank !== HAMLET && zoneDist(x, y, main) < oldCore * (main ? MAIN_DENSE : 1),
     ok: (x, y, steep) => {
       const r = Math.hypot(x - cx, y - cy);
-      if (wet(x, y) || areaAt(x, y) > STREAM_A || r > extent - 5 || (rank !== HAMLET && r < CHURCH_CLEAR)) return false;
+      if (wet(x, y)) return no('ground: lake'), false;
+      if (areaAt(x, y) > STREAM_A) return no('ground: stream'), false;
+      if (r > extent - 5) return no('ground: extent'), false;
+      if (rank !== HAMLET && r < CHURCH_CLEAR) return no('ground: church'), false;
       const g = Math.hypot(zAt(x + 4, y) - zAt(x - 4, y), zAt(x, y + 4) - zAt(x, y - 4)) / 8;
-      return g < steep;
+      if (g >= steep) return no('ground: steep'), false;
+      return true;
     },
     // Factories and stores: in the outer parts only, mostly on the main roads and in towns.
     large: (x, y, main) => (zoneDist(x, y, main) < oldCore * LARGE_FROM ? 0 : LARGE_CHANCE[rank] * (main ? LARGE_MAIN : 1)),
     rand,
     gapScale: rank === HAMLET ? HAMLET_GAPS : 1,
+    steep: lerp(BUILD_STEEP[0], BUILD_STEEP[1], mount),
   });
 
   return {

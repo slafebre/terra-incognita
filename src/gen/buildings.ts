@@ -39,6 +39,8 @@ export interface BuildingInput {
   rand: () => number;
   /** Gaps between loose buildings are scaled by this (hamlets: sparser). */
   gapScale?: number;
+  /** Ground buildings other than large ones may stand on (m/m): steeper in the mountains. */
+  steep?: number;
 }
 
 /** Footprint sizes (m): along the street × back from it, and the gap to the next. */
@@ -46,8 +48,6 @@ const DENSE = { w: [6, 11], d: [9, 14], setback: 0.4, alley: 0.15, alleyW: [3, 6
 const LOOSE = { w: [8, 13], d: [7, 11], setback: [3, 8], gap: [5, 16], barn: 0.12, barnW: [14, 22], barnD: [9, 12] };
 /** Large buildings in the outer parts: factories, newer stores (m); they want gentle ground. */
 const LARGE = { w: [25, 60], d: [18, 40], setback: [8, 15], gap: [10, 25], steep: 0.2, smaller: 0.7 };
-/** Ground any other building may stand on (m/m). */
-const STEEP = 0.55;
 /** Where a house won't fit, a small one close to the street (w, d, setback; m). */
 const SMALL = { w: [6, 8], d: [6, 8], setback: [1.5, 3] };
 /** Steps (m) after a footprint that didn't fit. */
@@ -67,7 +67,7 @@ const CELL = 16;
 export const buildingStats: Record<string, number> = {};
 const note = (k: string) => (buildingStats[k] = (buildingStats[k] ?? 0) + 1);
 
-export function placeBuildings({ fronts, ways, dense, ok, large, rand, gapScale = 1 }: BuildingInput): Float32Array {
+export function placeBuildings({ fronts, ways, dense, ok, large, rand, gapScale = 1, steep: STEEP = 0.55 }: BuildingInput): Float32Array {
   // Way pieces in a grid, for clearance tests.
   const wayGrid = new Map<number, number[]>();
   const key = (i: number, j: number) => (i + 32768) * 65536 + (j + 32768);
