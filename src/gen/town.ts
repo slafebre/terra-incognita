@@ -29,6 +29,12 @@ import { HAMLET, TOWN, VILLAGE, type Rank, type Site } from './settle';
  * Hamlets get the same treatment in miniature: built-up land along their main road
  * only, or one or two short residential streets off it.
  *
+ * Towns get a small industrial estate (now and then two) where there is flat, dry
+ * ground at their edge beside a main road: an access street leaving the road, and
+ * side streets off it, kept straight but bending to stay on the flat, ending where
+ * it ends (now and then in a turning loop) or meeting each other. Sheds and halls
+ * line them, so the estate's outline follows the flat land. The town grows round it.
+ *
  * Output: the streets, the built-up frontage along streets and roads, and the
  * centre (the crossroads the roads meet at, where a village's or town's church
  * stands).
@@ -60,6 +66,8 @@ export interface TownPlan {
   frontage: { depth: number; xy: Float32Array }[];
   /** Building footprints: four corners each, [x0, y0, … x3, y3] (world metres). */
   buildings: Float32Array;
+  /** One per building: 1 for an industrial one (a shed, a hall). */
+  industrial: Uint8Array;
 }
 
 /** Everything a plan draws lies within this distance of its site (m), per rank (farms: farm.ts). */
@@ -137,6 +145,38 @@ const HARD = 1.6;
 /** Drainage area (km²) above which a street won't cross; below it a stream is bridged at most once. */
 const RIVER_A = 3;
 export const STREAM_A = 0.15;
+/** Industrial estates (towns) stand on flat ground only: dry, no stream, and no node's neighbours further than IND_FLAT apart in height per metre (across 32 m). */
+const IND_FLAT = 0.06;
+/** An estate wants at least IND_AREA m² of flat ground within IND_R m of its junction, on its side of the road (sampled every IND_SAMPLE m), and its streets stay within IND_R of it. */
+const IND_R = 260;
+const IND_AREA = 30000;
+const IND_SAMPLE = 24;
+/** Street length per estate (m); its access street's length; branches every IND_SPACING m along a street (on each side with IND_BRANCH_CHANCE), and their length. */
+const IND_BUDGET = [450, 1000];
+const IND_ACCESS = [160, 340];
+const IND_SPACING = [55, 95];
+const IND_BRANCH_CHANCE = 0.6;
+const IND_BRANCH = [50, 190];
+/** Generations of branches off branches. */
+const IND_GENS = 2;
+/** Estate streets keep this far apart where they don't meet (m): blocks deep enough for sheds. */
+const IND_GAP = 42;
+/** An estate street's heading drifts by up to this much per step (rad): long, gentle curves. */
+const IND_DRIFT = 0.025;
+/** Dead ends at least IND_LOOP_FROM m long end, with IND_LOOP_CHANCE, in a turning loop of radius IND_LOOP m. */
+const IND_LOOP_FROM = 60;
+const IND_LOOP_CHANCE = 0.5;
+const IND_LOOP = 9;
+/** Chance of a second estate. */
+const IND_SECOND = 0.3;
+/** An estate's land: this far either side of its streets, and of its main road along its front (IND_ROAD_FRONT m either way from its junction; m). */
+const IND_FRONT = 45;
+const IND_ROAD_FRONT = 110;
+/** Estates' land is kept as distances on a grid this fine (m). */
+const IND_CELL = 8;
+/** Houses keep this far out of an estate's land; the town's streets stop this close to its streets (m). */
+const IND_KEEP = 8;
+const IND_STREET_KEEP = 30;
 
 export interface PlanInput {
   site: Site;
@@ -158,6 +198,8 @@ interface Line {
   style: Style | null;
   /** Removed after growth (a stub). */
   pruned?: boolean;
+  /** A street of an industrial estate. */
+  ind?: boolean;
 }
 
 /** Debugging: why branches ended or were refused, summed over plans. */
@@ -604,6 +646,7 @@ export function planTown({ site, roads, patch: p }: PlanInput): TownPlan {
   /** Branch points along line li, on both sides, within the settlement. */
   const offer = (li: number) => {
     const L = lines[li];
+    if (L.ind) return;
     const total = L.s[L.s.length - 1];
     for (const side of [1, -1]) {
       // Spacing comes from the zone at each point.
@@ -642,6 +685,7 @@ export function planTown({ site, roads, patch: p }: PlanInput): TownPlan {
       if (Math.abs(zAt(xs[i], ys[i]) - zAt(xs[i - 1], ys[i - 1])) > HARD * grade * L) steep++;
       if (crossing(xs[i - 1], ys[i - 1], xs[i], ys[i], nearEnd)) return no('link: crosses'), false;
       if (i < n - 1 && nearest(xs[i], ys[i], GAP, nearEnd)) return no('link: alongside'), false;
+      if (i < n - 1 && inEstate(xs[i], ys[i], IND_STREET_KEEP - IND_FRONT)) return no('link: estate'), false;
     }
     if (steep > 1) return no('link: steep'), false;
     let len = 0;
@@ -664,6 +708,7 @@ export function planTown({ site, roads, patch: p }: PlanInput): TownPlan {
     // Where lines cross the circle of radius r, by angle.
     const hits: { a: number; x: number; y: number; tx: number; ty: number; li: number }[] = [];
     lines.forEach((L, li) => {
+      if (L.ind) return;
       for (let k = 0; k + 1 < L.xs.length; k++) {
         const d0 = Math.hypot(L.xs[k] - cx, L.ys[k] - cy) - r;
         const d1 = Math.hypot(L.xs[k + 1] - cx, L.ys[k + 1] - cy) - r;
@@ -749,6 +794,283 @@ export function planTown({ site, roads, patch: p }: PlanInput): TownPlan {
       tryStreet(px, py, st, 1);
     }
   };
+  // --- Industrial estates (towns) --------------------------------------------------
+  // Where there is flat, dry ground at the edge of town beside a main road (an N
+  // road rather than a D or C), clear of the old core: an access street leaving the
+  // road, and side streets off it, a generation or two deep. They run straight but
+  // drift and bend to stay on the flat, and end where it ends, alongside another
+  // street or meeting one (a junction); long dead ends now and then get a turning
+  // loop. The estate's land is the strip either side of its streets (and of the road
+  // along its front), so its outline follows the flat land. Laid out before the
+  // town grows, which then keeps out of it.
+  /** Flat ground, by node (made on first use). */
+  let flatMask: Uint8Array | null = null;
+  const flatAt = (x: number, y: number) => {
+    if (!flatMask) {
+      flatMask = new Uint8Array(w * h);
+      const z = p.zE;
+      for (let j = 1; j < h - 1; j++)
+        for (let i = 1; i < w - 1; i++) {
+          const k = j * w + i;
+          if (!Number.isNaN(p.lake[k]) || p.A[k] > STREAM_A) continue;
+          if (Math.hypot(z[k + 1] - z[k - 1], z[k + w] - z[k - w]) / (2 * NODE) <= IND_FLAT) flatMask[k] = 1;
+        }
+    }
+    const k = node(x, y);
+    return k >= 0 && flatMask[k] === 1;
+  };
+  /** The estates' main road fronts: the road's points, and the side of it the estate lies on (+1: left of its direction). */
+  const roadFronts: { xs: number[]; ys: number[]; side: number }[] = [];
+  // How far each place is from the estates' land (to IND_FRONT beyond it), on a
+  // grid of IND_CELL m over the patch: their streets, and their road fronts on their side.
+  const efW = Math.ceil(((w - 1) * NODE) / IND_CELL) + 1;
+  const efH = Math.ceil(((h - 1) * NODE) / IND_CELL) + 1;
+  let estDist: Float32Array | null = null;
+  const markEstates = () => {
+    const D = (estDist = new Float32Array(efW * efH).fill(Infinity));
+    const R = 2 * IND_FRONT;
+    const mark = (ax: number, ay: number, bx: number, by: number, side: number) => {
+      for (let j = Math.max(0, Math.floor((Math.min(ay, by) - R) / IND_CELL - p.gy * (NODE / IND_CELL))); j < efH; j++) {
+        const y = p.gy * NODE + j * IND_CELL;
+        if (y > Math.max(ay, by) + R) break;
+        for (let i = Math.max(0, Math.floor((Math.min(ax, bx) - R) / IND_CELL - p.gx * (NODE / IND_CELL))); i < efW; i++) {
+          const x = p.gx * NODE + i * IND_CELL;
+          if (x > Math.max(ax, bx) + R) break;
+          const dx = bx - ax;
+          const dy = by - ay;
+          if (side && Math.sign(dx * (y - ay) - dy * (x - ax)) !== side) continue;
+          const t = Math.max(0, Math.min(1, ((x - ax) * dx + (y - ay) * dy) / (dx * dx + dy * dy || 1e-9)));
+          const px = ax + t * dx;
+          const py = ay + t * dy;
+          const d = Math.hypot(px - x, py - y);
+          // Not across a road (where its streets meet one; tested to a metre past the street, as it may end on the road).
+          if (d < D[j * efW + i] && (side || !crossing(x, y, px + (px - x) / (d || 1), py + (py - y) / (d || 1), (li) => !lines[li].road)))
+            D[j * efW + i] = d;
+        }
+      }
+    };
+    for (const L of lines) if (L.ind) for (let k = 1; k < L.xs.length; k++) mark(L.xs[k - 1], L.ys[k - 1], L.xs[k], L.ys[k], 0);
+    for (const f of roadFronts) for (let k = 1; k < f.xs.length; k++) mark(f.xs[k - 1], f.ys[k - 1], f.xs[k], f.ys[k], f.side);
+  };
+  /** Is (x, y) within IND_FRONT + m (at most 2 × IND_FRONT) of an estate's streets, or of its road front on its side? */
+  function inEstate(x: number, y: number, m: number): boolean {
+    if (!estDist) return false;
+    const i = Math.round((x - p.gx * NODE) / IND_CELL);
+    const j = Math.round((y - p.gy * NODE) / IND_CELL);
+    return i >= 0 && j >= 0 && i < efW && j < efH && estDist[j * efW + i] <= IND_FRONT + m;
+  }
+  /** Estates keep out of the old core. */
+  const indInner = Math.max(oldCore * LARGE_FROM, core * 0.6);
+  /**
+   * An estate street from (x0, y0) heading a0, within IND_R of (ex, ey), off line
+   * `parent`. Null if it would meet a way at a bad angle or loop straight back.
+   */
+  const estateWalk = (x0: number, y0: number, a0: number, maxLen: number, ex: number, ey: number, parent: number) => {
+    const xs = [x0];
+    const ys = [y0];
+    // Pieces near its start are its own junction (wide enough that the street it leaves isn't "alongside").
+    const home = (_li: number, _s: number, x: number, y: number) => Math.hypot(x - x0, y - y0) < IND_GAP + 20;
+    let a = a0;
+    let base = a0;
+    const drift = (rand() * 2 - 1) * IND_DRIFT;
+    let len = 0;
+    let target = -1;
+    while (len < maxLen) {
+      const x = xs[xs.length - 1];
+      const y = ys[ys.length - 1];
+      base += drift;
+      // A street close ahead draws it in, to meet it square-ish.
+      let want = base;
+      if (len >= STEP) {
+        const ahead = nearest(x + Math.cos(a) * 30, y + Math.sin(a) * 30, 30, home);
+        if (ahead) want = Math.atan2(ahead.y - y, ahead.x - x);
+      }
+      let best = Infinity;
+      let ba = a;
+      for (const da of [-0.3, -0.15, -0.06, 0, 0.06, 0.15, 0.3]) {
+        const na = a + da;
+        if (!flatAt(x + Math.cos(na) * STEP, y + Math.sin(na) * STEP)) continue;
+        // Bending early where the flat ends ahead.
+        let off = 0;
+        for (const k of [2, 3]) if (!flatAt(x + Math.cos(na) * STEP * k, y + Math.sin(na) * STEP * k)) off++;
+        const cost = 2 * Math.abs(angDiff(na, want)) + 0.4 * Math.abs(da) + off;
+        if (cost < best) {
+          best = cost;
+          ba = na;
+        }
+      }
+      if (best === Infinity) break; // off the flat
+      a = ba;
+      let nx = x + Math.cos(a) * STEP;
+      let ny = y + Math.sin(a) * STEP;
+      const dc = Math.hypot(nx - cx, ny - cy);
+      if (Math.hypot(nx - ex, ny - ey) > IND_R || dc > hardReach - IND_KEEP || dc < indInner) break;
+      const hit =
+        crossing(x, y, nx, ny, home) ??
+        (() => {
+          const n = nearest(nx, ny, SNAP, home);
+          return n && Math.cos(Math.atan2(n.y - y, n.x - x) - a) > 0.35 ? n : null;
+        })();
+      if (hit) {
+        // Not onto tracks or paths: a dead end short of them.
+        if (lines[hit.li].road && lines[hit.li].cls > ROAD_C) break;
+        const [hx, hy] = dirAt(hit.li, hit.k);
+        const ang = Math.abs(angDiff(Math.atan2(hit.y - y, hit.x - x), Math.atan2(hy, hx)));
+        if (Math.min(ang, Math.PI - ang) < MIN_ANGLE) return no('estate: angle'), null;
+        if (hit.li === parent) return no('estate: short loop'), null;
+        nx = hit.x;
+        ny = hit.y;
+        xs.push(nx);
+        ys.push(ny);
+        len += Math.hypot(nx - x, ny - y);
+        target = hit.li;
+        break;
+      }
+      // Alongside another street without meeting it: stop short.
+      const by = nearest(nx, ny, IND_GAP, home);
+      if (by && Math.cos(Math.atan2(by.y - ny, by.x - nx) - a) < 0.5) break;
+      xs.push(nx);
+      ys.push(ny);
+      len += STEP;
+    }
+    return { xs, ys, len, target };
+  };
+  /** Adds an estate street, and a turning loop at its end if it's a long dead end with room for one. */
+  const addEstateStreet = (xs: number[], ys: number[], target: number, len: number) => {
+    const li = addLine(xs, ys, false, 1, null);
+    lines[li].ind = true;
+    const n = xs.length;
+    if (target >= 0 || len < IND_LOOP_FROM || rand() >= IND_LOOP_CHANCE) return li;
+    const ex = xs[n - 1];
+    const ey = ys[n - 1];
+    const dl = Math.hypot(ex - xs[n - 2], ey - ys[n - 2]) || 1;
+    const ox = ex + ((ex - xs[n - 2]) / dl) * IND_LOOP;
+    const oy = ey + ((ey - ys[n - 2]) / dl) * IND_LOOP;
+    if (nearest(ox, oy, IND_LOOP + 10, (l2) => l2 === li)) return li;
+    const a0 = Math.atan2(ey - oy, ex - ox);
+    const lx: number[] = [];
+    const ly: number[] = [];
+    for (let q = 0; q <= 12; q++) {
+      const t = a0 + (2 * Math.PI * q) / 12;
+      const x = q % 12 ? ox + IND_LOOP * Math.cos(t) : ex;
+      const y = q % 12 ? oy + IND_LOOP * Math.sin(t) : ey;
+      if (!flatAt(x, y)) return li;
+      lx.push(x);
+      ly.push(y);
+    }
+    lines[addLine(lx, ly, false, 1, null)].ind = true;
+    no('ESTATE LOOP');
+    return li;
+  };
+  /** Grows an estate off road line li at s, on its side `side`; false if its access street won't go far enough. */
+  const growEstate = (li: number, s: number, side: number): boolean => {
+    const P = pointAt(li, s);
+    const A = pointAt(li, s - 30);
+    const B = pointAt(li, s + 30);
+    // Square off the road (on its side), give or take.
+    const a0 = Math.atan2((B.x - A.x) * side, -(B.y - A.y) * side) + (rand() * 2 - 1) * 0.15;
+    const acc = estateWalk(P.x, P.y, a0, lerp(IND_ACCESS[0], IND_ACCESS[1], rand()), P.x, P.y, li);
+    if (!acc || acc.len < 80) return no('estate: access'), false;
+    const budget = lerp(IND_BUDGET[0], IND_BUDGET[1], rand());
+    let built = acc.len;
+    const queue: { li: number; gen: number }[] = [{ li: addEstateStreet(acc.xs, acc.ys, acc.target, acc.len), gen: 1 }];
+    // Its road front: the road's points within IND_ROAD_FRONT of the junction, while the land beside them is flat.
+    {
+      const L = lines[li];
+      const f = { xs: [] as number[], ys: [] as number[], side };
+      for (let i = 0; i < L.xs.length; i++) {
+        if (Math.abs(L.s[i] - s) > IND_ROAD_FRONT) continue;
+        const [tx, ty] = dirAt(li, Math.min(i, L.xs.length - 2));
+        const ok = flatAt(L.xs[i] - ty * side * 20, L.ys[i] + tx * side * 20);
+        if (ok) {
+          f.xs.push(L.xs[i]);
+          f.ys.push(L.ys[i]);
+        } else if (L.s[i] > s) break;
+        else {
+          f.xs.length = 0;
+          f.ys.length = 0;
+        }
+      }
+      if (f.xs.length >= 2) roadFronts.push(f);
+    }
+    while (queue.length && built < budget) {
+      const { li: pl, gen } = queue.shift()!;
+      const L = lines[pl];
+      const total = L.s[L.s.length - 1];
+      for (const sd of [1, -1])
+        for (let t = 35 + rand() * 20; t < total - 25 && built < budget; t += lerp(IND_SPACING[0], IND_SPACING[1], rand())) {
+          if (rand() >= IND_BRANCH_CHANCE) continue;
+          const Q = pointAt(pl, t);
+          const [tx, ty] = dirAt(pl, Q.k);
+          const nx0 = -ty * sd;
+          const ny0 = tx * sd;
+          // Not beside a junction on this side already.
+          if (nearest(Q.x, Q.y, 35, (l2, _s, x, y) => l2 === pl || (x - Q.x) * nx0 + (y - Q.y) * ny0 < 1)) continue;
+          const b = estateWalk(Q.x, Q.y, Math.atan2(ny0, nx0) + (rand() * 2 - 1) * 0.15, lerp(IND_BRANCH[0], IND_BRANCH[1], rand()), P.x, P.y, pl);
+          if (!b || (b.target >= 0 ? b.len < 25 : b.len < 45)) continue;
+          built += b.len;
+          const nl = addEstateStreet(b.xs, b.ys, b.target, b.len);
+          if (gen < IND_GENS) queue.push({ li: nl, gen: gen + 1 });
+        }
+    }
+    return true;
+  };
+  /** How much flat, free land lies near a junction at line li, s, on side `side` (m²); 0 if too little. */
+  const flatNear = (li: number, s: number, side: number): number => {
+    const P = pointAt(li, s);
+    const A = pointAt(li, s - 30);
+    const B = pointAt(li, s + 30);
+    const tl = Math.hypot(B.x - A.x, B.y - A.y) || 1;
+    const nx = (-(B.y - A.y) / tl) * side;
+    const ny = ((B.x - A.x) / tl) * side;
+    // Its access street has flat ground to start on.
+    for (const d of [12, 24, 36]) if (!flatAt(P.x + nx * d, P.y + ny * d)) return 0;
+    let n = 0;
+    for (let v = -IND_R; v <= IND_R; v += IND_SAMPLE)
+      for (let u = IND_SAMPLE / 2; u <= IND_R; u += IND_SAMPLE) {
+        if (u * u + v * v > IND_R * IND_R) continue;
+        const x = P.x + nx * u - ny * v;
+        const y = P.y + ny * u + nx * v;
+        const dc = Math.hypot(x - cx, y - cy);
+        if (dc < indInner || dc > hardReach - IND_KEEP || !flatAt(x, y)) continue;
+        if (nearest(x, y, 15) || inEstate(x, y, IND_FRONT)) continue;
+        n++;
+      }
+    const area = n * IND_SAMPLE * IND_SAMPLE;
+    return area >= IND_AREA ? area : 0;
+  };
+  if (rank === TOWN) {
+    const want = rand() < IND_SECOND ? 2 : 1;
+    for (let k = 0; k < want; k++) {
+      // Junctions every 30 m along the main roads, both sides, best first: the most
+      // flat land (up to twice what's needed), the busier road, nearer 1.3× the core's radius.
+      const cands: { li: number; s: number; side: number; score: number }[] = [];
+      for (let li = 0; li < lines.length; li++) {
+        const L = lines[li];
+        if (!L.road || L.cls > ROAD_C) continue;
+        const total = L.s[L.s.length - 1];
+        for (let s = 40; s < total - 40; s += 30) {
+          const P = pointAt(li, s);
+          const d = Math.hypot(P.x - cx, P.y - cy);
+          if (d < 0.8 * core || d > reach) continue;
+          if (nearest(P.x, P.y, 40, (l2) => l2 === li)) continue; // its own junction alone on the road
+          for (const side of [1, -1]) {
+            const area = flatNear(li, s, side);
+            if (!area) continue;
+            const score = -Math.min(area, 2 * IND_AREA) / IND_AREA + 0.5 * L.cls + Math.abs(d - 1.3 * core) / core + 0.3 * rand();
+            cands.push({ li, s, side, score });
+          }
+        }
+      }
+      cands.sort((c1, c2) => c1.score - c2.score);
+      let grown = false;
+      for (const c of cands.slice(0, 4)) if ((grown = growEstate(c.li, c.s, c.side))) break;
+      if (!grown) break;
+      markEstates();
+      no('ESTATE');
+    }
+  }
+
   if (rank === TOWN) {
     ring(core, 0.9, { ...organic, cls: STREET });
     ring(core * 0.55, 0.6, organic);
@@ -911,6 +1233,14 @@ export function planTown({ site, roads, patch: p }: PlanInput): TownPlan {
         target = hit.li;
         break;
       }
+      // Not into an industrial estate, unless heading to meet one of its streets.
+      if (inEstate(nx, ny, IND_STREET_KEEP - IND_FRONT)) {
+        const e = nearest(nx, ny, IND_STREET_KEEP, (li) => !lines[li].ind);
+        if (!e || Math.cos(Math.atan2(e.y - ny, e.x - nx) - a) < 0.5) {
+          stop = 'estate';
+          break;
+        }
+      }
       // Alongside another street without meeting it: stop short.
       if (nearest(nx, ny, st.gap, home)) {
         stop = 'alongside';
@@ -978,9 +1308,19 @@ export function planTown({ site, roads, patch: p }: PlanInput): TownPlan {
     }
     return { cls, xy };
   });
+  const estateOut: Street[] = lines
+    .filter((L) => L.ind)
+    .map((L) => {
+      const xy = new Float32Array(2 * L.xs.length);
+      for (let i = 0; i < L.xs.length; i++) {
+        xy[2 * i] = L.xs[i];
+        xy[2 * i + 1] = L.ys[i];
+      }
+      return { cls: STREET, xy };
+    });
   const upgraded: Street[] = [];
   // Built-up land: along every street, and along roads near streets or the core.
-  const streetNear = (x: number, y: number) => nearest(x, y, 70, (li) => lines[li].road || !!lines[li].pruned);
+  const streetNear = (x: number, y: number) => nearest(x, y, 70, (li) => lines[li].road || !!lines[li].pruned || !!lines[li].ind);
   /** A hamlet's main road: the roads proper (not tracks or paths) through it. */
   const mainRoad = (li: number) => lines[li].road && lines[li].cls <= ROAD_C;
   const builtAt = (x: number, y: number, track = false) => {
@@ -1038,7 +1378,7 @@ export function planTown({ site, roads, patch: p }: PlanInput): TownPlan {
    * first, and claim the corners), then the streets off them, generation by
    * generation, then tracks taken in; each centre outward.
    */
-  const fronts: { xy: Float32Array; main: boolean; order: number }[] = [];
+  const fronts: { xy: Float32Array; main: boolean; ind?: boolean; order: number }[] = [];
   // (Own copies: a plan's buffers are transferred from the worker, each once.)
   kept.forEach(({ li }, i) => {
     frontage.push({ depth: lines[li].style!.depth, xy: out[i].xy.slice() });
@@ -1048,6 +1388,20 @@ export function planTown({ site, roads, patch: p }: PlanInput): TownPlan {
   for (const u of upgraded) {
     frontage.push({ depth: roadDepth, xy: u.xy.slice() });
     fronts.push({ xy: u.xy, main: false, order: 10 });
+  }
+  // Industrial estates: their streets, and their main road along their front, built up first.
+  for (const st of estateOut) {
+    frontage.push({ depth: IND_FRONT, xy: st.xy.slice() });
+    fronts.push({ xy: st.xy, main: false, ind: true, order: -1 });
+  }
+  for (const f of roadFronts) {
+    const xy = new Float32Array(2 * f.xs.length);
+    for (let i = 0; i < f.xs.length; i++) {
+      xy[2 * i] = f.xs[i];
+      xy[2 * i + 1] = f.ys[i];
+    }
+    frontage.push({ depth: IND_FRONT, xy });
+    fronts.push({ xy: xy.slice(), main: true, ind: true, order: -1 });
   }
   for (const L of lines) {
     if (!L.road || (rank === HAMLET && L.cls > ROAD_C)) continue;
@@ -1067,7 +1421,7 @@ export function planTown({ site, roads, patch: p }: PlanInput): TownPlan {
     flush();
   }
   // --- Buildings -----------------------------------------------------------------
-  const allStreets = [...out, ...upgraded];
+  const allStreets = [...out, ...upgraded, ...estateOut];
   const ways: Way[] = [
     ...sorted.filter((q) => !replaced.has(q.key)).map((q) => ({ xy: q.xy, clear: ROAD_CLEAR[q.cls] })),
     ...roadsOut.map((q) => ({ xy: q.xy, clear: ROAD_CLEAR[q.cls] })),
@@ -1077,13 +1431,15 @@ export function planTown({ site, roads, patch: p }: PlanInput): TownPlan {
     const k = 2 * Math.floor(xy.length / 4);
     return Math.hypot(xy[k] - cx, xy[k + 1] - cy);
   };
-  const buildings = placeBuildings({
+  const { buildings, industrial } = placeBuildings({
     fronts: fronts.sort((a, b) => a.order - b.order || mid(a.xy) - mid(b.xy)),
     ways,
     // Main roads keep their terraces a little further out (the faubourgs).
     dense: (x, y, main) => rank !== HAMLET && zoneDist(x, y, main) < oldCore * (main ? MAIN_DENSE : 1),
-    ok: (x, y, steep) => {
+    ok: (x, y, steep, ind) => {
       const r = Math.hypot(x - cx, y - cy);
+      // Sheds and halls on the estates' land, houses off it.
+      if (ind ? !inEstate(x, y, 0) || !flatAt(x, y) : inEstate(x, y, IND_KEEP)) return no('ground: estate'), false;
       if (wet(x, y)) return no('ground: lake'), false;
       if (areaAt(x, y) > STREAM_A) return no('ground: stream'), false;
       if (r > extent - 5) return no('ground: extent'), false;
@@ -1110,6 +1466,7 @@ export function planTown({ site, roads, patch: p }: PlanInput): TownPlan {
     roads: roadsOut.map((q) => ({ ...q, xy: q.xy.slice() })),
     frontage,
     buildings,
+    industrial,
   };
 }
 
