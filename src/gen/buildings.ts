@@ -11,7 +11,8 @@ import { lerp } from '../lib/noise';
  *  - dense (the old core): terraced rows flush with the street, wall to wall,
  *    now and then a gap for an alley or a yard;
  *  - loose (everywhere else): detached houses set back from the street with
- *    gardens between them, now and then a barn.
+ *    gardens between them, now and then a barn; in the outer parts, now and then
+ *    a large building (a factory, a newer store) set further back.
  * A footprint is kept only if it stays clear of every road and street (by its
  * half width and a margin), of other buildings, of water and of steep ground;
  * one that clashes with a street behind it is tried shallower first.
@@ -31,8 +32,10 @@ export interface BuildingInput {
   ways: Way[];
   /** Is (x, y) in the dense zone (on a main road, or a street)? */
   dense: (x: number, y: number, main: boolean) => boolean;
-  /** Can a building corner stand at (x, y)? (Dry, not too steep, inside the plan.) */
-  ok: (x: number, y: number) => boolean;
+  /** Can a building corner stand at (x, y), on ground no steeper than `steep` (m/m)? (Dry, inside the plan.) */
+  ok: (x: number, y: number, steep: number) => boolean;
+  /** Chance that a loose plot at (x, y) takes a large building (a factory, a store). */
+  large: (x: number, y: number, main: boolean) => number;
   rand: () => number;
   /** Gaps between loose buildings are scaled by this (hamlets: sparser). */
   gapScale?: number;
@@ -41,6 +44,10 @@ export interface BuildingInput {
 /** Footprint sizes (m): along the street × back from it, and the gap to the next. */
 const DENSE = { w: [6, 11], d: [9, 14], setback: 0.4, alley: 0.15, alleyW: [3, 6] };
 const LOOSE = { w: [8, 13], d: [7, 11], setback: [3, 8], gap: [5, 16], barn: 0.12, barnW: [14, 22], barnD: [9, 12] };
+/** Large buildings in the outer parts: factories, newer stores (m); they want gentle ground. */
+const LARGE = { w: [25, 60], d: [18, 40], setback: [8, 15], gap: [10, 25], steep: 0.2, smaller: 0.7 };
+/** Ground any other building may stand on (m/m). */
+const STEEP = 0.55;
 /** Where a house won't fit, a small one close to the street (w, d, setback; m). */
 const SMALL = { w: [6, 8], d: [6, 8], setback: [1.5, 3] };
 /** Steps (m) after a footprint that didn't fit. */
@@ -60,7 +67,7 @@ const CELL = 16;
 export const buildingStats: Record<string, number> = {};
 const note = (k: string) => (buildingStats[k] = (buildingStats[k] ?? 0) + 1);
 
-export function placeBuildings({ fronts, ways, dense, ok, rand, gapScale = 1 }: BuildingInput): Float32Array {
+export function placeBuildings({ fronts, ways, dense, ok, large, rand, gapScale = 1 }: BuildingInput): Float32Array {
   // Way pieces in a grid, for clearance tests.
   const wayGrid = new Map<number, number[]>();
   const key = (i: number, j: number) => (i + 32768) * 65536 + (j + 32768);
@@ -153,7 +160,15 @@ export function placeBuildings({ fronts, ways, dense, ok, rand, gapScale = 1 }: 
         let d: number;
         let setback: number;
         let gap: number;
-        if (isDense) {
+        let steep = STEEP;
+        const isLarge = !isDense && rand() < large(px, py, main);
+        if (isLarge) {
+          w = lerp(LARGE.w[0], LARGE.w[1], rand());
+          d = lerp(LARGE.d[0], LARGE.d[1], rand());
+          setback = lerp(LARGE.setback[0], LARGE.setback[1], rand());
+          gap = lerp(LARGE.gap[0], LARGE.gap[1], rand());
+          steep = LARGE.steep;
+        } else if (isDense) {
           w = lerp(DENSE.w[0], DENSE.w[1], rand());
           d = lerp(DENSE.d[0], DENSE.d[1], rand());
           setback = DENSE.setback;
@@ -173,17 +188,24 @@ export function placeBuildings({ fronts, ways, dense, ok, rand, gapScale = 1 }: 
         // A row that won't take a full plot here takes a narrower one (bends, corners);
         // where a house won't fit, a small one close to the street may (no stretch of
         // street left bare for want of room behind it).
-        const tries: [number, number, number][] = isDense
+        // A large building that won't fit tries smaller, then gives way to a house.
+        const tries: [number, number, number, number][] = isLarge
           ? [
-              [w, d, setback],
-              [w * NARROW, d, setback],
+              [w, d, setback, steep],
+              [w * LARGE.smaller, d * LARGE.smaller, setback, steep],
+              [lerp(LOOSE.w[0], LOOSE.w[1], rand()), lerp(LOOSE.d[0], LOOSE.d[1], rand()), lerp(LOOSE.setback[0], LOOSE.setback[1], rand()), STEEP],
+            ]
+          : isDense
+          ? [
+              [w, d, setback, steep],
+              [w * NARROW, d, setback, steep],
             ]
           : [
-              [w, d, setback],
-              [lerp(SMALL.w[0], SMALL.w[1], rand()), lerp(SMALL.d[0], SMALL.d[1], rand()), lerp(SMALL.setback[0], SMALL.setback[1], rand())],
+              [w, d, setback, steep],
+              [lerp(SMALL.w[0], SMALL.w[1], rand()), lerp(SMALL.d[0], SMALL.d[1], rand()), lerp(SMALL.setback[0], SMALL.setback[1], rand()), steep],
             ];
         let placed = 0;
-        for (const [width, dd, sb] of tries) {
+        for (const [width, dd, sb, st] of tries) {
           if (width < MIN_WIDTH || s + width > L) continue;
           // Square to the street at the middle of the plot.
           const [ax, ay] = at(s);
@@ -202,20 +224,22 @@ export function placeBuildings({ fronts, ways, dense, ok, rand, gapScale = 1 }: 
             // As stored (Float32): tests then agree with what's drawn.
             const q = rect(mx, my, tx, ty, nx, ny, width, off, depth).map(Math.fround);
             let fits = true;
-            for (let c = 0; c < 8 && fits; c += 2) fits = ok(q[c], q[c + 1]);
-            if (!fits || !ok((q[0] + q[4]) / 2, (q[1] + q[5]) / 2)) {
-              note(`${isDense ? 'dense' : 'loose'}: ground`);
+            for (let c = 0; c < 8 && fits; c += 2) fits = ok(q[c], q[c + 1], st);
+            // Large ones also on the middles of their sides.
+            for (let c = 0; c < 8 && fits && width > 20; c += 2) fits = ok((q[c] + q[(c + 2) % 8]) / 2, (q[c + 1] + q[(c + 3) % 8]) / 2, st);
+            if (!fits || !ok((q[0] + q[4]) / 2, (q[1] + q[5]) / 2, st)) {
+              note(`${isDense ? 'dense' : width > 20 && dd > 15 ? 'large' : 'loose'}: ground`);
               break;
             }
             if (clashesWay(q)) {
-              note(`${isDense ? 'dense' : 'loose'}: way`);
+              note(`${isDense ? 'dense' : width > 20 && dd > 15 ? 'large' : 'loose'}: way`);
               continue;
             }
             if (clashesBuilding(q)) {
-              note(`${isDense ? 'dense' : 'loose'}: building`);
+              note(`${isDense ? 'dense' : width > 20 && dd > 15 ? 'large' : 'loose'}: building`);
               continue;
             }
-            note(`${isDense ? 'dense' : 'loose'}: PLACED`);
+            note(`${isDense ? 'dense' : width > 20 && dd > 15 ? 'large' : 'loose'}: PLACED`);
             add(q);
             placed = width;
             break;

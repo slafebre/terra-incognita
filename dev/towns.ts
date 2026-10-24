@@ -174,6 +174,12 @@ for (const input of inputs) {
   const ms = performance.now() - t0;
   let km = 0;
   for (const st of p.streets) for (let i = 2; i < st.xy.length; i += 2) km += Math.hypot(st.xy[i] - st.xy[i - 2], st.xy[i + 1] - st.xy[i - 1]) / 1000;
+  // Large buildings (both sides over 15 m).
+  let large = 0;
+  for (let i = 0; i < p.buildings.length; i += 8) {
+    const b = p.buildings;
+    if (Math.hypot(b[i + 2] - b[i], b[i + 3] - b[i + 1]) > 15 && Math.hypot(b[i + 4] - b[i + 2], b[i + 5] - b[i + 3]) > 15) large++;
+  }
   // Bare street: share of the fronts' sides (sampled every 5 m, 12 m off the centre line) with no building within 15 m.
   let bare = 0;
   let sides = 0;
@@ -236,7 +242,7 @@ for (const input of inputs) {
   writeFileSync(f, svgs[svgs.length - 1]);
   console.log(
     `R=${site.R.toFixed(2)} ${site.id} at ${site.x.toFixed(0)},${site.y.toFixed(0)}: ${p.streets.length} streets, ${km.toFixed(2)} km, ` +
-      `${p.buildings.length / 8} buildings, ${((100 * bare) / Math.max(1, sides)).toFixed(0)} % bare (main roads near the centre: ${((100 * mainBare) / Math.max(1, mainSides)).toFixed(0)} % bare, ${((100 * mainLined) / Math.max(1, mainSides)).toFixed(0)} % lined), plan ${ms.toFixed(0)} ms → ${f}`,
+      `${p.buildings.length / 8} buildings (${large} large), ${((100 * bare) / Math.max(1, sides)).toFixed(0)} % bare (main roads near the centre: ${((100 * mainBare) / Math.max(1, mainSides)).toFixed(0)} % bare, ${((100 * mainLined) / Math.max(1, mainSides)).toFixed(0)} % lined), plan ${ms.toFixed(0)} ms → ${f}`,
   );
 }
 // One SVG of them all, nested in a grid (square, so thumbnailers show it whole).
