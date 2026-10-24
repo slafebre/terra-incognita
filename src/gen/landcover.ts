@@ -3,7 +3,7 @@ import { clamp, gnoise, smoothstep } from '../lib/noise';
 import type { Lattice, SeedView } from './seeds';
 import { erodeSmax } from './terrain';
 import { nearestVertex, vertexPos } from './lattice';
-import { HAMLET, type Site } from './settle';
+import type { Site } from './settle';
 
 /**
  * Land cover as continuous fields on the DEM vertex grid: a class is present
@@ -120,10 +120,10 @@ export function computeCover(cx: number, cy: number, view: SeedView, inp: CoverI
     return top + (bot - top) * fy;
   };
 
-  // Clearings are centred where a settlement's roads meet (its lattice vertex, as its
-  // street plan is), a farm on itself.
+  // Clearings are centred where a settlement's roads meet (its lattice vertex, where
+  // its street plan or farmstead is).
   const clearings = sites.map((st) => {
-    const [x, y] = st.rank <= HAMLET ? vertexPos(nearestVertex(st.x, st.y)) : [st.x, st.y];
+    const [x, y] = vertexPos(nearestVertex(st.x, st.y));
     return { x, y, r: CLEAR_R[st.rank] };
   });
 

@@ -6,8 +6,8 @@ import type { SegmentPath } from '../gen/roads';
 import type { Site } from '../gen/settle';
 import type { TownPlan } from '../gen/town';
 import { cellCoverage, drawCoverSymbols, FILLS } from './landcover';
-import { drawBuildings } from './buildings';
-import { clearUnderBuiltUp, drawBuiltUp, drawChurches, drawRoads, drawSites } from './roads';
+import { drawBuildings, drawFarms } from './buildings';
+import { clearUnderBuiltUp, drawChurches, drawRoads } from './roads';
 import { CONTOURS, STYLE } from './style';
 
 export interface RenderInput {
@@ -197,12 +197,11 @@ export function renderChunk({ cx, cy, dem, cover, water, streams, roads, sites, 
   ctx.stroke(shorePath);
 
   drawStreams(ctx, streams, pxPerM, dpr);
-  drawSites(ctx, sites, cx, cy, pxPerM);
-  drawBuiltUp(ctx, plans, cx, cy, pxPerM);
-  drawBuildings(ctx, plans, cx, cy, pxPerM);
   // Plans may redraw roads through their settlements: theirs replace the network's.
   const redrawn = new Set(plans.flatMap((p) => p.replaced));
   const drawn = [...roads.filter((r) => !redrawn.has(r.key)), ...plans.flatMap((p) => p.roads)];
+  drawBuildings(ctx, plans, cx, cy, pxPerM);
+  drawFarms(ctx, sites, drawn, cx, cy, pxPerM);
   drawRoads(ctx, drawn, plans.flatMap((p) => p.streets), cx, cy, pxPerM, dpr, water);
   drawChurches(ctx, plans, cx, cy, pxPerM, dpr);
   return canvas;

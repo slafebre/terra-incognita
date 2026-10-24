@@ -48,11 +48,6 @@ export const STYLE = {
     /** Bridges: parapet lines (CSS px) a gap away from the way's edge. */
     bridge: { color: 'rgb(40, 34, 30)', deck: 'rgb(255, 255, 255)', gap: 0.8, line: 0.7 },
   },
-  /** Settlement placeholders until buildings exist. */
-  builtUp: 'rgba(196, 160, 150, 0.45)',
-  /** Built-up strips of villages and towns: drawn opaque in a layer, laid down at this alpha. */
-  builtUpLayer: 'rgb(196, 160, 150)',
-  builtUpAlpha: 0.45,
   church: 'rgb(45, 40, 38)',
   /** Building footprints: solid dark red, no outline. */
   building: 'rgb(138, 38, 34)',

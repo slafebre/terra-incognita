@@ -94,9 +94,6 @@ function svg({ input, plan: p }: { input: PlanInput; plan: TownPlan }): string {
     for (let i = 0; i < xy.length; i += 2) d += `${i ? 'L' : 'M'}${xy[i].toFixed(1)} ${xy[i + 1].toFixed(1)}`;
     return d;
   };
-  // Frontage (built-up).
-  for (const f of p.frontage)
-    s += `<path d="${poly(f.xy)}" fill="none" stroke="rgb(214,180,170)" stroke-width="${2 * f.depth}" stroke-linecap="round" stroke-linejoin="round"/>`;
   // Buildings.
   {
     let d = '';

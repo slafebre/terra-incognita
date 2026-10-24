@@ -2,7 +2,7 @@ import { APRON, CELL, CHUNK, DEM_W } from '../lib/constants';
 import { COVER, COVER_SCALE } from '../gen/landcover';
 import { smoothPolyline } from '../lib/polyline';
 import { ROAD_C, ROAD_D, ROAD_N, ROAD_P, ROAD_T, type SegmentPath } from '../gen/roads';
-import { HAMLET, SITE_RADIUS, VILLAGE, type Site } from '../gen/settle';
+import { VILLAGE } from '../gen/settle';
 import { LANE, type Street, type TownPlan } from '../gen/town';
 import { STYLE } from './style';
 
@@ -16,46 +16,6 @@ const STREET_M = [4.5, 3.5];
 const STREET_PX = [1.6, 1.3];
 /** Few passes: heavy smoothing pulls the legs of a hairpin onto each other. */
 export const SMOOTH_PASSES = [2, 1, 1, 1, 1];
-
-/** Built-up placeholders for farms (hamlets, villages and towns have plans). */
-export function drawSites(ctx: Ctx, sites: Site[], cx: number, cy: number, pxPerM: number): void {
-  const p = new Path2D();
-  for (const s of sites) {
-    if (s.rank <= HAMLET) continue;
-    const x = (s.x - cx * CHUNK) * pxPerM;
-    const y = (s.y - cy * CHUNK) * pxPerM;
-    const r = SITE_RADIUS[s.rank] * pxPerM;
-    p.moveTo(x + r, y);
-    p.arc(x, y, r, 0, Math.PI * 2);
-  }
-  ctx.fillStyle = STYLE.builtUp;
-  ctx.fill(p);
-}
-
-/**
- * Built-up land of villages and towns: a strip along their streets and the roads
- * through them. Strips are drawn opaque into a layer, then laid down translucent
- * once, so overlaps don't darken.
- */
-export function drawBuiltUp(ctx: Ctx, plans: TownPlan[], cx: number, cy: number, pxPerM: number): void {
-  if (!plans.length) return;
-  const layer = new OffscreenCanvas(ctx.canvas.width, ctx.canvas.height);
-  const lc = layer.getContext('2d')!;
-  lc.lineCap = 'round';
-  lc.lineJoin = 'round';
-  lc.strokeStyle = STYLE.builtUpLayer;
-  for (const pl of plans)
-    for (const f of pl.frontage) {
-      const p = new Path2D();
-      trace(p, f.xy, cx, cy, pxPerM, 0);
-      lc.lineWidth = 2 * f.depth * pxPerM;
-      lc.stroke(p);
-    }
-  ctx.save();
-  ctx.globalAlpha = STYLE.builtUpAlpha;
-  ctx.drawImage(layer, 0, 0);
-  ctx.restore();
-}
 
 /** Cover cleared under built-up land, and this many metres beyond its edge (a soft margin). */
 const CLEAR_EDGE = 6;
