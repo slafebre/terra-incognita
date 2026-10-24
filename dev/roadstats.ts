@@ -175,7 +175,15 @@ async function segments(R: number): Promise<SegmentPath[]> {
   }
   const byKey = new Map<string, SegmentPath>();
   for (const c of m.chunks.values()) for (const s of c.roads ?? []) byKey.set(s.key, s);
-  return [...byKey.values()];
+  // Sampled every 8 m at most, so what lies under a long straight step is seen.
+  return [...byKey.values()].map((g) => {
+    const out: number[] = [g.xy[0], g.xy[1]];
+    for (let i = 2; i < g.xy.length; i += 2) {
+      const n = Math.max(1, Math.ceil(Math.hypot(g.xy[i] - g.xy[i - 2], g.xy[i + 1] - g.xy[i - 1]) / 8));
+      for (let s = 1; s <= n; s++) out.push(g.xy[i - 2] + ((g.xy[i] - g.xy[i - 2]) * s) / n, g.xy[i - 1] + ((g.xy[i + 1] - g.xy[i - 1]) * s) / n);
+    }
+    return { ...g, xy: Float32Array.from(out) };
+  });
 }
 
 /**
@@ -331,6 +339,11 @@ const unreached = [0, 0, 0, 0];
 /** Roads in lakes per class: [km in water, crossings over WET_RUN m, short clips]; lake share of the area. */
 const wetLen = [[0, 0, 0], [0, 0, 0], [0, 0, 0], [0, 0, 0], [0, 0, 0]];
 const WET_RUN = 30;
+/** Ways ending in a lake, per class (drawn ends no other way shares, in water). */
+const wetEnds = [0, 0, 0, 0, 0];
+/** Ways ending within 24 m of a lake, per class; lattice edges in the area that no chunk draws (near water / elsewhere). */
+const shoreEnds = [0, 0, 0, 0, 0];
+const undrawn = [0, 0];
 let lakeCells = 0, areaCells = 0, wetVerts = 0, allVerts = 0, wetCoarse = 0, wetVertsCoarse = 0, lakeCoarse = 0;
 const wetMarks: { x: number; y: number; a: number }[] = [];
 for (const R of REGIONS) {
@@ -565,6 +578,41 @@ for (const R of REGIONS) {
         }
       console.log(`LAKECMP: lake in both ${both}, only in own-chunk solve ${ownOnly}, only on the map ${mapOnly} (16 m samples); nodes from the nearest own-solve lake: ${mapOnlyDist.join(' ')}`);
     }
+    {
+      const deg = new Map<string, number>();
+      for (const g of segs)
+        for (const i of [0, g.xy.length - 2]) {
+          const k = `${g.xy[i]},${g.xy[i + 1]}`;
+          deg.set(k, (deg.get(k) ?? 0) + 1);
+        }
+      for (const g of segs)
+        for (const i of [0, g.xy.length - 2]) {
+          const x = g.xy[i], y = g.xy[i + 1];
+          if (deg.get(`${x},${y}`) !== 1 || x < area.x0 || x >= area.x1 || y < area.y0 || y >= area.y1 || !(waterAt(x, y) > 0)) continue;
+          wetEnds[g.cls]++;
+          if (process.env.WETLOG) console.log(`  way (class ${g.cls}) ending in a lake at ?at=${Math.round(x)},${Math.round(y)}`);
+        }
+      const nearWater = (x: number, y: number) => {
+        for (const r of [8, 16, 24]) for (let k = 0; k < 8; k++) if (waterAt(x + r * Math.cos((k * Math.PI) / 4), y + r * Math.sin((k * Math.PI) / 4)) > 0) return true;
+        return waterAt(x, y) > 0;
+      };
+      for (const g of segs)
+        for (const i of [0, g.xy.length - 2]) {
+          const x = g.xy[i], y = g.xy[i + 1];
+          if (deg.get(`${x},${y}`) !== 1 || x < area.x0 || x >= area.x1 || y < area.y0 || y >= area.y1 || !nearWater(x, y)) continue;
+          shoreEnds[g.cls]++;
+          if (process.env.WETLOG) console.log(`  way (class ${g.cls}) ending at a lake at ?at=${Math.round(x)},${Math.round(y)}`);
+        }
+      const drawnKeys = new Set<string>();
+      for (const g of segs) for (const k of g.key.split('~')[0].split('+')) drawnKeys.add(k);
+      for (const e of lastEdges) {
+        const mx = (e.route[0] + e.route[2]) / 2, my = (e.route[1] + e.route[3]) / 2;
+        if (mx < area.x0 || mx >= area.x1 || my < area.y0 || my >= area.y1 || drawnKeys.has(e.id)) continue;
+        const wetish = nearWater(mx, my) || nearWater(e.route[0], e.route[1]) || nearWater(e.route[2], e.route[3]);
+        undrawn[wetish ? 0 : 1]++;
+        if (process.env.WETLOG) console.log(`  undrawn edge (class ${e.cls}${wetish ? ', at water' : ''}) at ?at=${Math.round(mx)},${Math.round(my)}`);
+      }
+    }
     for (let y = area.y0; y < area.y1; y += 16)
       for (let x = area.x0; x < area.x1; x += 16) {
         const wv = waterAt(x, y);
@@ -639,7 +687,10 @@ for (const R of REGIONS) {
   console.log(`UNREACHED R=${R} town/village/hamlet/farm: ${unreached.map((u, i) => `${u}/${siteCount[i]}`).join('  ')}`);
   console.log(`GRADE R=${R} share of road over its limit / over 1.5× limit: ` + ['N', 'D', 'C', 'T', 'P'].map((n, i) => `${n} ${((100 * gradeLen[i][1]) / (gradeLen[i][0] || 1)).toFixed(0)}% / ${((100 * gradeLen[i][2]) / (gradeLen[i][0] || 1)).toFixed(0)}% of ${(gradeLen[i][0] / 1000).toFixed(0)} km`).join('  '));
   for (const gl of gradeLen) gl.fill(0);
-  console.log(`LAKES R=${R}: ${((100 * lakeCells) / (areaCells || 1)).toFixed(1)}% of the area is lake, ${wetVerts} of ${allVerts} way vertices in a lake; road in water (km, crossings > ${WET_RUN} m, shore clips): ` + ['N', 'D', 'C', 'T', 'P'].map((n, i) => `${n} ${wetLen[i][0].toFixed(2)} / ${wetLen[i][1]} / ${wetLen[i][2]}`).join('  '));
+  console.log(`LAKES R=${R}: ${((100 * lakeCells) / (areaCells || 1)).toFixed(1)}% of the area is lake, ${wetVerts} of ${allVerts} way vertices in a lake; road in water (km, crossings > ${WET_RUN} m, shore clips): ` + ['N', 'D', 'C', 'T', 'P'].map((n, i) => `${n} ${wetLen[i][0].toFixed(2)} / ${wetLen[i][1]} / ${wetLen[i][2]}`).join('  ') + `; ways ending in a lake N/D/C/T/P ${wetEnds.join('/')}, within 24 m of one ${shoreEnds.join('/')}; undrawn edges at water ${undrawn[0]}, elsewhere ${undrawn[1]}`);
+  wetEnds.fill(0);
+  shoreEnds.fill(0);
+  undrawn.fill(0);
   console.log(`COARSE LAKES R=${R}: ${((100 * lakeCoarse) / (lakeCells || 1)).toFixed(0)}% of lake area, ${wetVertsCoarse} of ${wetVerts} wet vertices, ${wetCoarse.toFixed(2)} km of road in water lie in (or a cell from) a closed coarse basin's lake`);
   for (const wl of wetLen) wl.fill(0);
   lakeCells = 0;

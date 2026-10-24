@@ -841,6 +841,22 @@ export function latticeSegments(edges: RoadEdge[], cx: number, cy: number): Segm
     }
     return { room, obstacles };
   };
+  /** The way beyond vertex (x, y), leaving it away from edge `from`, if it runs into a dead end within SPUR_MAX edges without meeting another way: its vertices, (x, y) first. */
+  const spur = (x: number, y: number, from: string): number[] | undefined => {
+    const pts: number[] = [];
+    let prev = from;
+    for (let n = 0; n <= SPUR_MAX; n++) {
+      pts.push(x, y);
+      const inc = at.get(k2(x, y)) ?? [];
+      if (inc.length === 1) return pts;
+      if (inc.length !== 2) return undefined;
+      const next = inc.find((i) => i.key !== prev)!;
+      prev = next.key;
+      x = next.ox;
+      y = next.oy;
+    }
+    return undefined;
+  };
   const out: SegmentTask[] = [];
   for (const e of edges) {
     const [ax, ay, bx, by] = e.route;
@@ -855,6 +871,8 @@ export function latticeSegments(edges: RoadEdge[], cx: number, cy: number): Segm
       pa: partner.get(`${e.id}@${k2(ax, ay)}`),
       pb: partner.get(`${e.id}@${k2(bx, by)}`),
       ...surroundings(e.route, new Set([e.id])),
+      spurA: spur(ax, ay, e.id),
+      spurB: spur(bx, by, e.id),
     };
     const pc = pieceOf(e);
     if (pc) {
@@ -870,6 +888,8 @@ export function latticeSegments(edges: RoadEdge[], cx: number, cy: number): Segm
         obstacles,
         pa: partner.get(`${first.id}@${k2(pc.pts[0], pc.pts[1])}`),
         pb: partner.get(`${last.id}@${k2(pc.pts[2 * n - 2], pc.pts[2 * n - 1])}`),
+        spurA: spur(pc.pts[0], pc.pts[1], first.id),
+        spurB: spur(pc.pts[2 * n - 2], pc.pts[2 * n - 1], last.id),
       };
     }
     out.push(task);
@@ -879,6 +899,8 @@ export function latticeSegments(edges: RoadEdge[], cx: number, cy: number): Segm
 
 /** Room around a piece is looked for this far (m): every chunk that sees the piece knows all ways that close. */
 const ROOM_REACH = 300;
+/** Dead ends are looked for this many edges beyond an edge's or piece's end (see SegmentTask.spurA). */
+const SPUR_MAX = 4;
 /** Pieces: at most this many edges; a vertex is an anchor with this probability. */
 const PIECE_EDGES = 3;
 const PIECE_ANCHOR = 0.5;
@@ -986,18 +1008,102 @@ export function routeCurves(tasks: SegmentTask[], p: RoadPatch): SegmentPath[] {
    * to its last (both snapped). `pa`/`pb`: the vertices beyond either end, if the road
    * goes on there.
    */
-  const routed = (key: string, cls: RoadClass, pts: number[], pa: [number, number] | undefined, pb: [number, number] | undefined, room: number, obstacles: number[]): SegmentPath => {
+  const routed = (
+    key: string,
+    cls: RoadClass,
+    pts: number[],
+    pa: [number, number] | undefined,
+    pb: [number, number] | undefined,
+    room: number,
+    obstacles: number[],
+    rawA = false,
+    rawB = false,
+  ): SegmentPath => {
     const n = pts.length / 2;
-    const [ax, ay] = snap(pts[0], pts[1]);
-    const [bx, by] = snap(pts[2 * n - 2], pts[2 * n - 1]);
+    const [ax, ay] = rawA ? [pts[0], pts[1]] : snap(pts[0], pts[1]);
+    const [bx, by] = rawB ? [pts[2 * n - 2], pts[2 * n - 1]] : snap(pts[2 * n - 2], pts[2 * n - 1]);
     // Directions at the ends: the shared Catmull–Rom direction there (next vertex
     // minus previous), as the piece or edge on the other side also uses.
     const inDir = pa ? [pts[2] - pa[0], pts[3] - pa[1]] : [bx - ax, by - ay];
     const outDir = pb ? [pb[0] - pts[2 * n - 4], pb[1] - pts[2 * n - 3]] : [bx - ax, by - ay];
     // Each keeps to under half the way to its neighbour: two can't meet.
     const band = Math.min(MICRO_BAND, MICRO_ROOM * Math.min(room, ROOM_REACH));
-    const xy = microRoute(ax, ay, bx, by, inDir, outDir, MAX_GRADE[cls], p, zAt, obstacles, band);
+    // Tracks and footpaths don't cross water at all.
+    const xy = microRoute(ax, ay, bx, by, inDir, outDir, MAX_GRADE[cls], p, zAt, obstacles, band, cls < ROAD_T);
     return { key, cls, xy: Float32Array.from(xy), micro: true };
+  };
+  /** A path with no step longer than 8 m (the water checks look at its points). */
+  const densified = (g: SegmentPath): SegmentPath => {
+    const xy = g.xy;
+    let long = false;
+    for (let i = 2; i < xy.length && !long; i += 2) long = Math.hypot(xy[i] - xy[i - 2], xy[i + 1] - xy[i - 1]) > 8;
+    if (!long) return g;
+    const out: number[] = [xy[0], xy[1]];
+    for (let i = 2; i < xy.length; i += 2) {
+      const m = Math.max(1, Math.ceil(Math.hypot(xy[i] - xy[i - 2], xy[i + 1] - xy[i - 1]) / 8));
+      for (let s = 1; s <= m; s++) out.push(xy[i - 2] + ((xy[i] - xy[i - 2]) * s) / m, xy[i - 1] + ((xy[i + 1] - xy[i - 1]) * s) / m);
+    }
+    return { ...g, xy: Float32Array.from(out) };
+  };
+  /** Dry node beside a lake at world (x, y)? */
+  const shoreAt = (x: number, y: number) => {
+    const i = Math.round(x / NODE) - p.gx;
+    const j = Math.round(y / NODE) - p.gy;
+    return i >= 0 && j >= 0 && i < w && j < h && !isLake(j * w + i) && onShore(i, j);
+  };
+  /**
+   * Is all of a way's run to its dead end (vertices `spur`, as the network placed
+   * them: snapping may move a vertex to the far shore) under water?
+   */
+  const drowned = (spur?: number[]) => {
+    if (!spur || !lakeAt(spur[0], spur[1])) return false;
+    let len = 0;
+    for (let i = 2; i < spur.length; i += 2) len += Math.hypot(spur[i] - spur[i - 2], spur[i + 1] - spur[i - 1]);
+    return wetLength(spur) >= len - 1e-6;
+  };
+  /**
+   * What is drawn of a way (polyline xy from its end A to B). A way must not end in
+   * a lake: where all of it beyond an end is under water (`dA`, `dB`; the end is then
+   * not snapped, so the way heads into the water there), it stops at the first water
+   * coming from the other end, and the shore beside it. Tracks and footpaths don't
+   * cross water: any part still in a lake is left out.
+   */
+  const drawn = (g0: SegmentPath, dA: boolean, dB: boolean): SegmentPath[] => {
+    const g = densified(g0);
+    const xy = g.xy;
+    let s = 0;
+    let e = xy.length / 2 - 1;
+    const wetI = (i: number) => lakeAt(xy[2 * i], xy[2 * i + 1]);
+    const shoreI = (i: number) => shoreAt(xy[2 * i], xy[2 * i + 1]);
+    if (dB) {
+      let i = s;
+      while (i <= e && !wetI(i)) i++;
+      e = i - 1;
+      while (e > s && shoreI(e)) e--;
+    }
+    if (dA) {
+      let i = e;
+      while (i >= s && !wetI(i)) i--;
+      s = i + 1;
+      while (s < e && shoreI(s)) s++;
+    }
+    if (e - s < 1) return [];
+    if (g.cls < ROAD_T) return [s === 0 && e === xy.length / 2 - 1 ? g : { ...g, xy: xy.slice(2 * s, 2 * e + 2) }];
+    // Tracks and footpaths: the dry runs only (a run's ends kept off the shore).
+    const parts: SegmentPath[] = [];
+    let i = s;
+    while (i <= e) {
+      while (i <= e && lakeAt(xy[2 * i], xy[2 * i + 1])) i++;
+      let j = i;
+      while (j + 1 <= e && !lakeAt(xy[2 * j + 2], xy[2 * j + 3])) j++;
+      let a = i;
+      let b = j;
+      if (a > s) while (a < b && shoreAt(xy[2 * a], xy[2 * a + 1])) a++;
+      if (b < e) while (b > a && shoreAt(xy[2 * b], xy[2 * b + 1])) b--;
+      if (b > a) parts.push({ ...g, key: parts.length || a > s || b < e ? `${g.key}~${a}` : g.key, xy: xy.slice(2 * a, 2 * b + 2) });
+      i = j + 1;
+    }
+    return parts;
   };
   const out: SegmentPath[] = [];
   for (const t of tasks) {
@@ -1006,21 +1112,28 @@ export function routeCurves(tasks: SegmentTask[], p: RoadPatch): SegmentPath[] {
     if (t.piece) {
       const pc = t.piece;
       if (serpentineFrame(pc.pts, MAX_GRADE[t.cls], zAt) || wetLength(pc.pts) > WET_MIN) {
-        if (pc.owner) out.push(routed(pc.key, t.cls, pc.pts, pc.pa, pc.pb, pc.room, pc.obstacles));
+        const dA = drowned(pc.spurA);
+        const dB = drowned(pc.spurB);
+        // Wholly in the water a way ends in: the way stops at the shore before it.
+        if ((dA || dB) && drowned(pc.pts)) continue;
+        if (pc.owner) out.push(...drawn(routed(pc.key, t.cls, pc.pts, pc.pa, pc.pb, pc.room, pc.obstacles, dA, dB), dA, dB));
         continue;
       }
     }
-    const c = curveOf(t);
+    const dA = drowned(t.spurA);
+    const dB = drowned(t.spurB);
+    if ((dA || dB) && drowned([t.ax, t.ay, t.bx, t.by])) continue;
+    const c = curveOf(t, dA, dB);
     // Still in a lake after fitting (the band is narrow): only this chunk draws the
-    // edge, so it can go round on its own.
-    if (wetLength(c.xy) > WET_MIN) out.push(routed(t.key, t.cls, [t.ax, t.ay, t.bx, t.by], t.pa, t.pb, t.room, t.obstacles));
-    else out.push(c);
+    // edge, so it can go round on its own. (Not when it heads into one to end there.)
+    const g = !dA && !dB && wetLength(c.xy) > WET_MIN ? routed(t.key, t.cls, [t.ax, t.ay, t.bx, t.by], t.pa, t.pb, t.room, t.obstacles) : c;
+    out.push(...drawn(g, dA, dB));
   }
   return out;
 
-  function curveOf(t: SegmentTask): SegmentPath {
-    const [ax, ay] = snap(t.ax, t.ay);
-    const [bx, by] = snap(t.bx, t.by);
+  function curveOf(t: SegmentTask, rawA = false, rawB = false): SegmentPath {
+    const [ax, ay] = rawA ? [t.ax, t.ay] : snap(t.ax, t.ay);
+    const [bx, by] = rawB ? [t.bx, t.by] : snap(t.bx, t.by);
     const len = Math.hypot(bx - ax, by - ay) || 1;
     const tangent = (px: number, py: number, qx: number, qy: number, partner?: [number, number]): [number, number] => {
       if (!partner) return [(qx - px) * 0.5, (qy - py) * 0.5];
@@ -1239,7 +1352,8 @@ const MDIST = DX.map((dx, i) => Math.hypot(dx, DY[i]) * NODE);
  * the class limit, so where the slope is steep the road zig-zags across it, its legs
  * following the real contours. It stays within a band around the piece, clear of the
  * other ways near it, and goes round lakes — or, where the way round is too long or
- * leaves the band, crosses at a narrow place. A to B are the piece's (snapped) ends.
+ * leaves the band, crosses at a narrow place (only if `water`). A to B are the
+ * piece's (snapped) ends.
  */
 function microRoute(
   ax: number,
@@ -1253,6 +1367,7 @@ function microRoute(
   zAt: (x: number, y: number) => number,
   obstacles: number[],
   band: number,
+  water: boolean,
 ): number[] {
   const { w, h } = p;
   const node = (x: number, y: number) => [Math.round(x / NODE) - p.gx, Math.round(y / NODE) - p.gy];
@@ -1265,7 +1380,14 @@ function microRoute(
   const j1 = Math.min(h - 2, Math.max(ja, jb) + pad);
   const bw = i1 - i0 + 1;
   const bh = j1 - j0 + 1;
-  const straight = () => [ax, ay, bx, by];
+  // No way found: a straight line, sampled like a found one (so what lies under it,
+  // such as water, is seen by the checks after routing).
+  const straight = () => {
+    const m = Math.max(1, Math.ceil(Math.hypot(bx - ax, by - ay) / 8));
+    const xy: number[] = [];
+    for (let s = 0; s <= m; s++) xy.push(ax + ((bx - ax) * s) / m, ay + ((by - ay) * s) / m);
+    return xy;
+  };
   if (bw < 2 || bh < 2) return straight();
   // Allowed nodes: in the band, clear of other ways (near the ends anything goes).
   const ok = new Uint8Array(bw * bh);
@@ -1329,7 +1451,10 @@ function microRoute(
       const g = Math.abs(p.zE[q] - p.zE[k]) / dist;
       let c = cost[st] + dist * (1 + 0.5 * (g / gmax) ** 2) + MICRO_TURN * Math.abs(t);
       if (g > gmax) c += dist * MICRO_STEEP * (g / gmax - 1);
-      if (wet(q)) c += dist * MICRO_WATER + (wet(k) ? 0 : MICRO_BRIDGE);
+      if (wet(q)) {
+        if (!water) continue;
+        c += dist * MICRO_WATER + (wet(k) ? 0 : MICRO_BRIDGE);
+      }
       else if (shore(q)) c += dist * MICRO_SHORE;
       else if (p.A[q] > 1 && p.A[k] <= 1) c += MICRO_STREAM;
       if (nc === lb) c += MICRO_ENDS * turn(d, hOut);

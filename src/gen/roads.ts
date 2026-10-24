@@ -79,6 +79,13 @@ export interface SegmentTask {
   room: number;
   obstacles: number[];
   /**
+   * Where the way beyond an end runs into a dead end without meeting another way
+   * (within a few edges): its vertices [x, y, …], that end first. A way must not end
+   * in a lake, so where all of it is under water the edge stops at the shore.
+   */
+  spurA?: number[];
+  spurB?: number[];
+  /**
    * The run of edges of one road this edge belongs to (vertices in canonical order),
    * if short enough: routed on the fine terrain as one when too steep or crossing a
    * lake, by the chunk owning its middle edge (`owner`). `room`: distance to the
@@ -93,6 +100,9 @@ export interface SegmentTask {
     obstacles: number[];
     pa?: [number, number];
     pb?: [number, number];
+    /** As the edge's, for the piece's ends. */
+    spurA?: number[];
+    spurB?: number[];
   };
 }
 
