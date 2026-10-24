@@ -114,11 +114,11 @@ describe('street plans', () => {
       const { patch: p, site } = inp;
       const all = [...plan.streets.map((s) => s.xy), ...plan.roads.map((r) => r.xy), ...plan.frontage.map((f) => f.xy)];
       for (const xy of all)
-        for (let i = 0; i < xy.length; i += 2) expect(Math.hypot(xy[i] - site.x, xy[i + 1] - site.y)).toBeLessThanOrEqual(PLAN_EXTENT[site.rank]);
+        for (let i = 0; i < xy.length; i += 2) expect(Math.hypot(xy[i] - site.x, xy[i + 1] - site.y), `${site.id} extent`).toBeLessThanOrEqual(PLAN_EXTENT[site.rank]);
       for (const s of plan.streets)
         for (let i = 0; i < s.xy.length; i += 2) {
           const k = (Math.round(s.xy[i + 1] / NODE) - p.gy) * p.w + Math.round(s.xy[i] / NODE) - p.gx;
-          expect(Number.isNaN(p.lake[k])).toBe(true);
+          expect(Number.isNaN(p.lake[k]), `${site.id} street ${plan.streets.indexOf(s)} of ${plan.streets.length} point ${i / 2} of ${s.xy.length / 2} on water`).toBe(true);
         }
     }
   });

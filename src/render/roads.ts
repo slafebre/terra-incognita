@@ -164,7 +164,8 @@ export function drawRoads(
 ): void {
   const paths = [new Path2D(), new Path2D(), new Path2D(), new Path2D(), new Path2D()];
   const streetPaths = [new Path2D(), new Path2D()];
-  for (const s of streets) trace(streetPaths[s.cls], s.xy, cx, cy, pxPerM, 1);
+  // Unsmoothed: streets are crooked, their kinks are meant.
+  for (const s of streets) trace(streetPaths[s.cls], s.xy, cx, cy, pxPerM, 0);
   const bridges = [new Path2D(), new Path2D(), new Path2D(), new Path2D(), new Path2D()];
   /** Over water at chunk pixel (x, y)? Undefined beyond the DEM (another chunk draws that part). */
   const wetAt = (x: number, y: number): boolean | undefined => {

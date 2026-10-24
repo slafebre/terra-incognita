@@ -80,8 +80,13 @@ interface Style {
   steer: number[];
   /** Chance that a branch bends round the centre (back lane). */
   ring: number;
-  /** Heading drift per step (rad). */
-  wander: number;
+  /** Streets run straight for this long (m), then turn by up to `kink` (rad). */
+  run: [number, number];
+  kink: number;
+  /** Branches leave at least this far from other junctions on their side of the parent (m). */
+  block: number;
+  /** Streets keep at least this far apart where they don't meet (m). */
+  gap: number;
   /** Generations of branches off branches. */
   gens: number;
   /** Chance a dead end is kept. */
@@ -94,18 +99,18 @@ interface Style {
 const STEP = 12;
 /** A branch ending this close to another street joins it (m). */
 const SNAP = 20;
-/** Streets keep at least this far apart where they don't meet (m). */
+/** Back lanes keep at least this far from other streets where they don't meet (m). */
 const GAP = 26;
 /** Tracks and footpaths become streets along built-up runs at least this long (m). */
 const UPGRADE_MIN = 30;
 /** Extra rounds of branch points once the first run out. */
 const REFILL = 3;
+/** Street length per area (m/m²) the old core adds to the budget, per rank: about 30–40 m blocks. */
+const OLD_DENSITY = [0.045, 0.035];
 /** Attempts per branch point. */
 const RETRIES = 2;
-/** Branches leave at least this far from other junctions on their parent (m). */
-const BLOCK = 42;
 /** Junction angles below this are refused (rad). */
-const MIN_ANGLE = (32 * Math.PI) / 180;
+const MIN_ANGLE = (38 * Math.PI) / 180;
 /** Gradient limit for streets (soft, refused above HARD × it): steeper in towns and hill country. */
 const GRADE = [0.16, 0.14, 0.14];
 const GRADE_HILL = 0.06;
@@ -226,7 +231,10 @@ export function planTown({ site, roads, patch: p }: PlanInput): TownPlan {
     len: rank === TOWN ? [50, 160] : [50, 200],
     jitter: rank === TOWN ? 0.35 : 0.6,
     steer: [-1, -0.5, -0.25, 0, 0.25, 0.5, 1],
-    wander: 0.12,
+    run: [25, 80],
+    kink: 0.5,
+    block: 42,
+    gap: 26,
     ring: rank === TOWN ? 0.25 : 0.08,
     gens: rank === TOWN ? 4 : strung > 0.6 ? 1 : 2,
     deadEnd: rank === TOWN ? 0.55 : 0.6,
@@ -239,7 +247,10 @@ export function planTown({ site, roads, patch: p }: PlanInput): TownPlan {
     len: [90, 260],
     jitter: 0.05,
     steer: [-0.6, -0.15, 0, 0.15, 0.6],
-    wander: 0.02,
+    run: [60, 160],
+    kink: 0.25,
+    block: 42,
+    gap: 26,
     ring: 0,
     gens: 3,
     deadEnd: 0.5,
@@ -248,8 +259,40 @@ export function planTown({ site, roads, patch: p }: PlanInput): TownPlan {
   };
   const outer: Style = { ...organic, density: 0.35, ring: 0.15, gens: 1, deadEnd: 0.8, depth: 18, cls: LANE };
   const lane: Style = { ...organic, spacing: 40, density: 1, len: [40, 110], jitter: 0.4, ring: 0, gens: 1, deadEnd: 1, depth: 18 };
+  // The old core round the crossroads: a tight mesh of short, crooked streets and
+  // small blocks, most of them meeting others rather than ending.
+  const oldCore = core * (rank === TOWN ? lerp(0.6, 0.75, rand()) : lerp(0.4, 0.55, rand()));
+  const old: Style = {
+    spacing: rank === TOWN ? 30 : 34,
+    density: 1,
+    len: [25, 90],
+    jitter: 0.35,
+    steer: [-1, -0.5, -0.25, 0, 0.25, 0.5, 1],
+    run: [12, 40],
+    kink: 0.6,
+    block: 24,
+    gap: 17,
+    ring: 0,
+    gens: 5,
+    deadEnd: 0.25,
+    depth: rank === TOWN ? 20 : 18,
+    cls: STREET,
+  };
+  if (rank !== HAMLET) budget += OLD_DENSITY[rank] * Math.PI * oldCore * oldCore;
   const styleAt = (d: number): Style | null =>
-    rank === HAMLET ? (d < reach ? lane : null) : d < core ? organic : d < reach ? (rank === TOWN ? suburb : outer) : null;
+    rank === HAMLET
+      ? d < reach
+        ? lane
+        : null
+      : d < oldCore
+        ? old
+        : d < core
+          ? organic
+          : d < reach
+            ? rank === TOWN
+              ? suburb
+              : outer
+            : null;
 
   // --- The network so far: lines with a spatial index of their pieces --------------
   const lines: Line[] = [];
@@ -669,7 +712,22 @@ export function planTown({ site, roads, patch: p }: PlanInput): TownPlan {
         xs.push(b0 * ax + b1 * (ax + nax * k) + b2 * (bx + nbx * k) + b3 * bx + ox * sway);
         ys.push(b0 * ay + b1 * (ay + nay * k) + b2 * (by + nby * k) + b3 * by + oy * sway);
       }
-      tryStreet(xs, ys, st, 1);
+      // Crooked, like the streets: straight runs between a few points of the curve.
+      const kinks = steps >= 10 ? 3 : 2;
+      const at = [0];
+      for (let q = 1; q < kinks; q++) at.push(Math.round(((q + (rand() - 0.5) * 0.4) / kinks) * steps));
+      at.push(steps);
+      const px: number[] = [];
+      const py: number[] = [];
+      for (let q = 1; q < at.length; q++) {
+        const [x0, y0, x1, y1] = [xs[at[q - 1]], ys[at[q - 1]], xs[at[q]], ys[at[q]]];
+        const m = Math.max(1, Math.round(Math.hypot(x1 - x0, y1 - y0) / STEP));
+        for (let t = q === 1 ? 0 : 1; t <= m; t++) {
+          px.push(x0 + ((x1 - x0) * t) / m);
+          py.push(y0 + ((y1 - y0) * t) / m);
+        }
+      }
+      tryStreet(px, py, st, 1);
     }
   };
   if (rank === TOWN) {
@@ -703,6 +761,11 @@ export function planTown({ site, roads, patch: p }: PlanInput): TownPlan {
       no('gens');
       continue;
     }
+    // Not off a bridge.
+    if (wet(P.x, P.y)) {
+      no('bridge');
+      continue;
+    }
     // Pieces near the branch point don't count as obstacles: they're its own junction.
     const home = (_li: number, _s: number, x: number, y: number) => Math.hypot(x - P.x, y - P.y) < 30;
     const other = (li: number) => li !== c.li;
@@ -712,13 +775,14 @@ export function planTown({ site, roads, patch: p }: PlanInput): TownPlan {
     const ny0 = tx * c.side;
     // Not beside a junction on this side already: blocks need some frontage. (A
     // branch opposite another makes a crossroads, which is fine.)
-    if (nearest(P.x, P.y, BLOCK, (li, _s, x, y) => li === c.li || (x - P.x) * nx0 + (y - P.y) * ny0 < 1)) {
+    if (nearest(P.x, P.y, st.block, (li, _s, x, y) => li === c.li || (x - P.x) * nx0 + (y - P.y) * ny0 < 1)) {
       no('junction');
       continue;
     }
     let a = Math.atan2(ny0, nx0) + (rand() * 2 - 1) * st.jitter;
     // Room ahead.
-    if (nearest(P.x + Math.cos(a) * 22, P.y + Math.sin(a) * 22, GAP * 0.8, (li) => li === c.li)) {
+    const ahead0 = Math.min(22, st.gap + 6);
+    if (nearest(P.x + Math.cos(a) * ahead0, P.y + Math.sin(a) * ahead0, st.gap * 0.8, (li) => li === c.li)) {
       no('crowded');
       continue;
     }
@@ -733,16 +797,20 @@ export function planTown({ site, roads, patch: p }: PlanInput): TownPlan {
     let bridged = false;
     let failed = '';
     let stop = 'length';
-    // Streets wander a little: a slowly drifting preferred heading.
-    let drift = 0;
-    const base = a;
+    // Streets run straight, then turn at a kink: crooked, not smoothly curving.
+    let base = a;
+    let runLeft = lerp(st.run[0], st.run[1], rand());
     while (len < maxLen) {
-      drift = Math.max(-0.6, Math.min(0.6, drift + (rand() * 2 - 1) * st.wander));
+      if (runLeft <= 0) {
+        base += (rand() < 0.5 ? -1 : 1) * st.kink * (0.3 + 0.7 * rand());
+        runLeft = lerp(st.run[0], st.run[1], rand());
+      }
+      runLeft -= STEP;
       const x = xs[xs.length - 1];
       const y = ys[ys.length - 1];
       const z = zAt(x, y);
-      // Desired heading: straight on (wandering), or round the centre for a back lane.
-      let want = base + drift;
+      // Desired heading: straight on (to the next kink), or round the centre for a back lane.
+      let want = base;
       if (ring && len > ringAfter) {
         const ra = Math.atan2(y - cy, x - cx);
         // Tangent in the direction we're already turning, pulled back to the start radius.
@@ -825,7 +893,7 @@ export function planTown({ site, roads, patch: p }: PlanInput): TownPlan {
         break;
       }
       // Alongside another street without meeting it: stop short.
-      if (nearest(nx, ny, GAP, home)) {
+      if (nearest(nx, ny, st.gap, home)) {
         stop = 'alongside';
         break;
       }
@@ -896,12 +964,13 @@ export function planTown({ site, roads, patch: p }: PlanInput): TownPlan {
   const streetNear = (x: number, y: number) => nearest(x, y, 70, (li) => lines[li].road || !!lines[li].pruned);
   /** A hamlet's main road: the roads proper (not tracks or paths) through it. */
   const mainRoad = (li: number) => lines[li].road && lines[li].cls <= ROAD_C;
-  const builtAt = (x: number, y: number) => {
+  const builtAt = (x: number, y: number, track = false) => {
     const d = zoneDist(x, y, true);
     if (d >= reach || Math.hypot(x - cx, y - cy) >= hardReach || wet(x, y)) return false;
-    // A hamlet is built up only along its main road and its own streets.
+    // A hamlet is built up only along its main road and its own streets; a track is
+    // only taken in where it runs along the main road.
     if (rank === HAMLET)
-      return !!nearest(x, y, 12, (li) => !mainRoad(li)) || !!nearest(x, y, 25, (li) => lines[li].road || !!lines[li].pruned);
+      return !!nearest(x, y, 12, (li) => !mainRoad(li)) || (!track && !!nearest(x, y, 25, (li) => lines[li].road || !!lines[li].pruned));
     return d < core * 0.8 || !!streetNear(x, y);
   };
 
@@ -914,7 +983,7 @@ export function planTown({ site, roads, patch: p }: PlanInput): TownPlan {
     if (q.cls !== ROAD_T && q.cls !== ROAD_P) continue;
     const n = q.xy.length / 2;
     const inside: boolean[] = [];
-    for (let i = 0; i < n; i++) inside.push(builtAt(q.xy[2 * i], q.xy[2 * i + 1]));
+    for (let i = 0; i < n; i++) inside.push(builtAt(q.xy[2 * i], q.xy[2 * i + 1], true));
     // Built-up runs shorter than UPGRADE_MIN stay tracks (a corner clipped at the edge).
     for (let i = 0; i < n; ) {
       if (!inside[i]) {
