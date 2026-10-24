@@ -1,6 +1,6 @@
 // Dev tool: street plans of villages and towns, as SVG.
 //   npx vite-node dev/towns.ts [per region] [R,R,...]
-// Finds villages (TOWNS=1: towns, HAMLETS=1: hamlets) with a world seed (SEED=n), runs the whole
+// Finds villages (TOWNS=1: towns, HAMLETS=1: hamlets, FARMS=1: farmsteads) with a world seed (SEED=n), runs the whole
 // pipeline in-process around each and writes its plan over the fine terrain:
 // contours, water, roads, streets and built-up frontage. INPUTS=<file> caches the
 // pipeline's output (the plans' inputs), so plans can be tuned without rerunning it. OUT=<prefix> names the
@@ -9,10 +9,11 @@
 import { ChunkManager } from '../src/chunks/manager';
 import { CoarseField, NODE } from '../src/gen/hydro';
 import { SeedStore, SeedView } from '../src/gen/seeds';
-import { HAMLET, Settlements, TOWN, VILLAGE, type Site } from '../src/gen/settle';
+import { FARM, HAMLET, Settlements, TOWN, VILLAGE, type Site } from '../src/gen/settle';
 import { setRegionOverride, Terrain } from '../src/gen/terrain';
 import { NET_REACH } from '../src/gen/roads';
 import { buildingStats } from '../src/gen/buildings';
+import { farmStats, planFarm } from '../src/gen/farm';
 import { LANE, PLAN_EXTENT, planStats, planTown, type TownPlan, type PlanInput } from '../src/gen/town';
 import { marchingSquares } from '../src/lib/contours';
 import { rng } from '../src/lib/hash';
@@ -31,7 +32,7 @@ const { writeFileSync, readFileSync, existsSync } = (await import(/* @vite-ignor
 const PER = Number(process.argv[2] ?? 2);
 const REGIONS = (process.argv[3] ?? '0.15,0.45,0.7').split(',').map(Number);
 const SEED = Number(process.env.SEED ?? 1);
-const RANK = process.env.TOWNS ? TOWN : process.env.HAMLETS ? HAMLET : VILLAGE;
+const RANK = process.env.TOWNS ? TOWN : process.env.HAMLETS ? HAMLET : process.env.FARMS ? FARM : VILLAGE;
 const OUT = process.env.OUT ?? 'towns';
 
 /** Sites of `rank` found from the seeds alone (the pipeline will agree: same world seed). */
@@ -40,7 +41,7 @@ function findSites(R: number, n: number): Site[] {
   const pick = rng(SEED * 31 + Math.round(R * 1000));
   const x = Math.round((pick() - 0.5) * 2e6);
   const y = Math.round((pick() - 0.5) * 2e6);
-  const S = RANK === TOWN ? 30000 : RANK === VILLAGE ? 12000 : 5000;
+  const S = RANK === TOWN ? 30000 : RANK === VILLAGE ? 12000 : RANK === HAMLET ? 5000 : 3000;
   const r = { x0: x, y0: y, x1: x + S, y1: y + S };
   const view = new SeedView(store.payloadFor({ x0: x, y0: y, x1: x + 16, y1: y + 16 }, { x0: x - NET_REACH, y0: y - NET_REACH, x1: x + S + NET_REACH, y1: y + S + NET_REACH }));
   const t = new Terrain(view);
@@ -103,7 +104,9 @@ function svg({ input, plan: p }: { input: PlanInput; plan: TownPlan }): string {
   const y0 = patch.gy * NODE;
   const W = (patch.w - 1) * NODE;
   const H = (patch.h - 1) * NODE;
-  let s = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="${x0} ${y0} ${W} ${H}" width="${Math.round(W / 2)}" height="${Math.round(H / 2)}">`;
+  // Farmsteads are small: framed 260 m round the farm's vertex.
+  const vb = p.rank === FARM ? `${p.x - 130} ${p.y - 130} 260 260` : `${x0} ${y0} ${W} ${H}`;
+  let s = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="${vb}" width="${Math.round(W / 2)}" height="${Math.round(H / 2)}">`;
   s += `<rect x="${x0}" y="${y0}" width="${W}" height="${H}" fill="#fcfaf3"/>`;
   const poly = (xy: ArrayLike<number>) => {
     let d = '';
@@ -190,7 +193,7 @@ if (process.env.INPUTS && existsSync(process.env.INPUTS)) {
 for (const input of inputs) {
   const { site } = input;
   const t0 = performance.now();
-  const p = planTown(input);
+  const p = site.rank === FARM ? planFarm(input) : planTown(input);
   const ms = performance.now() - t0;
   let km = 0;
   for (const st of p.streets) for (let i = 2; i < st.xy.length; i += 2) km += Math.hypot(st.xy[i] - st.xy[i - 2], st.xy[i + 1] - st.xy[i - 1]) / 1000;
@@ -277,3 +280,4 @@ for (const input of inputs) {
 }
 console.log(Object.entries(planStats).sort((a, b) => b[1] - a[1]).map(([k, v]) => `${k} ${v}`).join(", "));
 console.log(Object.entries(buildingStats).sort().map(([k, v]) => `${k} ${v}`).join(', '));
+console.log(Object.entries(farmStats).sort().map(([k, v]) => `${k} ${v}`).join(', '));

@@ -3,10 +3,9 @@ import { marchingSquares } from '../lib/contours';
 import { smoothPolyline } from '../lib/polyline';
 import { COVER } from '../gen/landcover';
 import type { SegmentPath } from '../gen/roads';
-import type { Site } from '../gen/settle';
 import type { TownPlan } from '../gen/town';
 import { cellCoverage, drawCoverSymbols, FILLS } from './landcover';
-import { drawBuildings, drawFarms } from './buildings';
+import { drawBuildings } from './buildings';
 import { clearUnderBuiltUp, drawChurches, drawRoads } from './roads';
 import { CONTOURS, STYLE } from './style';
 
@@ -22,9 +21,7 @@ export interface RenderInput {
   streams: Float32Array;
   /** Road segments that may cross this chunk. */
   roads: SegmentPath[];
-  /** Settlement sites near this chunk. */
-  sites: Site[];
-  /** Street plans of villages and towns that may draw into this chunk. */
+  /** Plans of settlements (street plans, farmsteads) that may draw into this chunk. */
   plans: TownPlan[];
   /** Raster edge length in device pixels. */
   pxSize: number;
@@ -60,7 +57,7 @@ function shadeAndSlope(dem: Float32Array): { shade: Float32Array; slope: Float32
 /** River width in metres for drainage area A (km²). */
 export const riverWidth = (A: number) => 1.1 * Math.pow(A, 0.55);
 
-export function renderChunk({ cx, cy, dem, cover, water, streams, roads, sites, plans, pxSize, dpr }: RenderInput): OffscreenCanvas {
+export function renderChunk({ cx, cy, dem, cover, water, streams, roads, plans, pxSize, dpr }: RenderInput): OffscreenCanvas {
   const canvas = new OffscreenCanvas(pxSize, pxSize);
   const ctx = canvas.getContext('2d')!;
   const pxPerM = pxSize / CHUNK;
@@ -201,7 +198,6 @@ export function renderChunk({ cx, cy, dem, cover, water, streams, roads, sites, 
   const redrawn = new Set(plans.flatMap((p) => p.replaced));
   const drawn = [...roads.filter((r) => !redrawn.has(r.key)), ...plans.flatMap((p) => p.roads)];
   drawBuildings(ctx, plans, cx, cy, pxPerM);
-  drawFarms(ctx, sites, drawn, cx, cy, pxPerM);
   drawRoads(ctx, drawn, plans.flatMap((p) => p.streets), cx, cy, pxPerM, dpr, water);
   drawChurches(ctx, plans, cx, cy, pxPerM, dpr);
   return canvas;

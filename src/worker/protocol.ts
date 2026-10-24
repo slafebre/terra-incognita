@@ -20,7 +20,6 @@ export type TaskRequest =
       water: Float32Array;
       cover: Int8Array;
       roads: SegmentPath[];
-      sites: Site[];
       plans: TownPlan[];
       streams: Float32Array;
       pxSize: number;

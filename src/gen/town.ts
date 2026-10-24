@@ -62,8 +62,8 @@ export interface TownPlan {
   buildings: Float32Array;
 }
 
-/** Everything a plan draws lies within this distance of its site (m), per rank. */
-export const PLAN_EXTENT = [900, 380, 220];
+/** Everything a plan draws lies within this distance of its site (m), per rank (farms: farm.ts). */
+export const PLAN_EXTENT = [900, 380, 220, 300];
 /** Roads and terrain the plan reads: its extent plus this margin (m). */
 export const PLAN_MARGIN = 64;
 /** What a plan draws reaches this far beyond its extent (frontage, line widths; m). */
@@ -117,7 +117,7 @@ export const STREET_CLEAR = [3.5, 3];
 /** Terraces line the main roads out to this many times the old core's radius. */
 const MAIN_DENSE = 1.25;
 /** Ground buildings may stand on (m/m, over 8 m), lowland to mountains: mountain villages climb their slopes. */
-const BUILD_STEEP = [0.55, 0.8];
+export const BUILD_STEEP = [0.55, 0.8];
 /** Hamlets' houses stand further apart. */
 const HAMLET_GAPS = 1.8;
 /** No building this close to the church at a village's or town's centre (m). */
@@ -136,7 +136,7 @@ const GRADE_HILL = 0.06;
 const HARD = 1.6;
 /** Drainage area (km²) above which a street won't cross; below it a stream is bridged at most once. */
 const RIVER_A = 3;
-const STREAM_A = 0.15;
+export const STREAM_A = 0.15;
 
 export interface PlanInput {
   site: Site;
@@ -1120,7 +1120,7 @@ function angDiff(a: number, b: number): number {
   return d;
 }
 
-function hashString(s: string): number {
+export function hashString(s: string): number {
   let h = 0x811c9dc5;
   for (let i = 0; i < s.length; i++) h = hash1(h ^ s.charCodeAt(i));
   return hash3(h, 0x7e57, 0x51e5);

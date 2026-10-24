@@ -1,6 +1,6 @@
 # Topo — infinite generated topographic map
 
-Status: milestones 1–3 implemented; milestone 4 (settlements & roads) in progress, 2026-10-23.
+Status: milestones 1–3 implemented; milestone 4 (settlements & roads) in progress, 2026-10-24.
 
 ## 1. Product requirements (agreed)
 
@@ -160,7 +160,14 @@ Grid overlay
 - These rules are local, so every worker agrees.
 - Measured density: villages about 0.065 per km² (France averages about 1 commune per 16 km²), hamlets about 0.5 per km², farms about 2.5 per km² in the lowlands.
 - Settlements clear the land around them of forest for fields and pasture: out to 1,300 m from a town's centre, 560 m for a village, 200 m for a hamlet, 80 m for a farm (all centred on the crossroads or the farm road's end); fully within 45 % of that, the edge made ragged by noise (±50 % of the distance), and not on locally steep ground (relative to the region), which keeps its woods. Built-up land itself (§3.6) clears woods, vines, marsh and heath exactly when drawn.
-- Farms render as a farmstead where their road ends: a 12 × 8 m house and an 18 × 10 m barn joined in an L, 10 m past the road's end (beside the road where it runs on), decided from the road edges at the farm's lattice vertex alone so every chunk draws it alike. Hamlets, villages and towns get street plans (§3.6); villages and towns have a church at their centre.
+- **Farmsteads** *(as implemented in `src/gen/farm.ts`)*: each farm gets a small plan, made like a street plan (§3.6) from the drawn roads and the fine terrain, so every chunk draws it alike. It stands at the farm's vertex as the drawn roads have it (snapped up to 45 m to gentler ground; ways end there, or a steep piece drawn as one passes through it), in the widest open wedge between the ways meeting there (past the end of a road that ends there, beside one that runs on; other wedges at least 100° wide, or 75 % of the widest, are tried next). Its form follows the mean slope where it will stand:
+  - *steep* (over 16 % in the lowlands, falling to 11 % in the mountains; and 15–50 % of the rest, more in the mountains): one or two small buildings (8–11 × 6–8 m, a 6–10 × 5–7 m shed 3–8 m beside it 60 % of the time), long sides along the contour;
+  - *middling*: a 10–13 × 7–9 m house across the wedge and a 15–22 × 9–11 m barn joined to one end in an L; 35 % a small shed beside them;
+  - *flat* (under 7 %; 85 % of such farms in the lowlands, 15 % from the hills up): a **court** (60 %) — 24–36 × 26–38 m, the house at a back corner facing it, a barn along the rest of the back, stables or barns down one or (80 %) both sides, 30 % closed by a front range with a 4.5–7 m gateway; 65 % a 22–36 × 12–18 m machine shed beside it, 60 % a small outbuilding apart — or a **loose group** (40 %): the house near the road and two to four barns, stables, sheds and machine sheds about a yard, 4–9 m apart.
+
+  Each building must stand on dry ground (6 m from lake nodes, off stream channels), no steeper than village buildings may (55–80 %; large ones 20 %), clear of every way as village buildings are, within 300 m of the site. The frame is mirrored, turned ±17° in wide wedges and set back 7–41 m from the vertex until the whole form fits; otherwise the frame placing most of it wins, and a form whose house finds no place gives way to the L, then to the small form. A farm whose lattice vertex lies in a lake (the fine solves' lakes, which the network can't see: its roads stop at the shore, and the drowned vertex is snapped onto it) is left out, as is one whose house fits nowhere.
+- **Tracks into the fields**: into a wedge at least 110° wide, 75 % of courts, 60 % of groups and 35 % of L farms get a dead-end track from the vertex, 80–300 m long by form. It leaves along the front of the farmstead and turns into the fields past its side (the other side if that gets further), in 10 m steps turning at most 20° each, weighing grade (easy at 8 %, never over the track limit) against its heading; it keeps to its wedge, off water, 4 m from the buildings, 20 m from other ways (those meeting at the vertex only after 40 m) and 80 m from their dead ends (other farms), and is dropped under 50 m.
+- Hamlets, villages and towns get street plans (§3.6); villages and towns have a church at their centre.
 
 ### 3.5 Road network
 
@@ -241,7 +248,7 @@ An edge used by several ways takes the highest class.
 
 **Planned**
 - **Streets** grow from the roads entering the settlement. Old cores get an organic street pattern around a church square. Towns also get grid or cul-de-sac suburbs and an industrial zone near rail or the N road.
-- **Buildings:** farmyards in villages L- or U-shaped, industrial halls; farms' own buildings.
+- **Buildings:** farmyards in villages L- or U-shaped, industrial halls. (Isolated farms have their own forms: §3.4.)
 - **Parcels** subdivide farmland bounded by roads and tracks. Shapes depend on the region: strip fields in lowland, small irregular fields with **hedges** in bocage, terraces on steep slopes. Vineyards go on south-facing slopes at roughly 150–500 m, orchards around villages.
 
 ### 3.7 Land cover

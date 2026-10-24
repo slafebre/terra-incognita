@@ -1,8 +1,9 @@
 import { generateDem } from '../gen/dem';
 import { CoarseField, generatePre, solveHydro } from '../gen/hydro';
 import { latticeCell, routeCurves } from '../gen/lattice';
-import { Settlements } from '../gen/settle';
+import { FARM, Settlements } from '../gen/settle';
 import { Terrain } from '../gen/terrain';
+import { planFarm } from '../gen/farm';
 import { planTown } from '../gen/town';
 import { SeedView } from '../gen/seeds';
 import { renderChunk } from '../render/chunkRender';
@@ -41,7 +42,7 @@ export function runTask(t: TaskRequest): { result: TaskResult; transfer: Transfe
       return { result: { kind: 'roads', result, ms: ms() }, transfer: result.map((r) => r.xy.buffer) };
     }
     case 'plan': {
-      const result = planTown(t.input);
+      const result = t.input.site.rank === FARM ? planFarm(t.input) : planTown(t.input);
       return {
         result: { kind: 'plan', result, ms: ms() },
         transfer: [

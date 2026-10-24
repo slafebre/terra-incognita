@@ -1138,7 +1138,7 @@ const PIECE_EDGES = 3;
 const PIECE_ANCHOR = 0.5;
 
 /** Snap radius (fine nodes) for vertices: onto gentler, dry ground nearby. */
-const VSNAP = 2;
+export const VSNAP = 2;
 /** A vertex with no dry ground within VSNAP moves to the nearest within this (fine nodes): onto the shore. */
 const SHORE_SNAP = 8;
 /** A piece or edge with more than this (m) of its line in a lake is routed around it. */
