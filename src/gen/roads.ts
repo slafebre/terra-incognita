@@ -39,13 +39,6 @@ export const MAX_LEN = [9000, 4500];
 
 /** One used lattice edge. */
 /**
- * How far (m) a fine-routed run may stray left and right of the line from its first
- * to its last vertex (sides by the sign of the cross product): its share of the gap
- * to the nearest ways there, assuming they may be fine-routed too.
- */
-export type Room = [number, number];
-
-/**
  * Where a fine-routed run may go near one of its end vertices, flattened as
  * [vx, vy, direction, half-angle counter-clockwise, half-angle clockwise] (radians):
  * within the wedge between the bisectors to the ways next to it at that vertex.
@@ -54,15 +47,14 @@ export type Room = [number, number];
 export const WEDGE = 5;
 
 /**
- * A neighbouring run (not meeting at an end): which sides of the run it lies on
- * (bits 1 left, 2 right), its distance (m), the share of that gap the run may take
- * if the neighbour is fine-routed too, and the neighbour's vertices and class, so
- * the drawing chunk can tell whether it is (it may take more room if not).
+ * A neighbouring run (not meeting at an end, within ROOM_REACH): its vertices and
+ * class, so the drawing chunk can tell whether it is fine-routed too, and the
+ * run's weight against it: where both may wind, a point is the run's only if its
+ * distance to the run's line is under `weight` × its distance to the neighbour's.
+ * A pair's weights multiply to under 1, so the two can't meet.
  */
 export interface Rival {
-  sides: number;
-  d: number;
-  share: number;
+  weight: number;
   cls: RoadClass;
   pts: number[];
 }

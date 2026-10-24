@@ -338,6 +338,8 @@ let pinR: number[] = [];
 let pinSep: number[] = [];
 let pinLeg: number[] = [];
 let pinKm = 0;
+/** Per class: [hairpins, km of fine-routed way, legs between hairpins]. */
+let pinCls: [number, number, number[]][] = [0, 1, 2, 3, 4].map(() => [0, 0, []]);
 const microGrade = [0, 0, 0];
 const siteCount = [0, 0, 0, 0];
 const gradeLen = [[0, 0, 0], [0, 0, 0], [0, 0, 0], [0, 0, 0], [0, 0, 0]];
@@ -400,9 +402,17 @@ for (const R of REGIONS) {
       // Hairpins as drawn (see `hairpins`).
       const pins: Pin[] = [];
       for (const g of segs) {
-        if (!g.micro || g.cls > 2) continue;
-        for (let i = 1; i < g.xy.length / 2; i++) pinKm += Math.hypot(g.xy[2 * i] - g.xy[2 * i - 2], g.xy[2 * i + 1] - g.xy[2 * i - 1]) / 1000;
-        for (const h of hairpins(g)) {
+        if (!g.micro) continue;
+        let km = 0;
+        for (let i = 1; i < g.xy.length / 2; i++) km += Math.hypot(g.xy[2 * i] - g.xy[2 * i - 2], g.xy[2 * i + 1] - g.xy[2 * i - 1]) / 1000;
+        const pc = pinCls[g.cls];
+        pc[1] += km;
+        const hs = hairpins(g);
+        pc[0] += hs.length;
+        for (const h of hs) if (!Number.isNaN(h.leg)) pc[2].push(h.leg);
+        if (g.cls > 2) continue;
+        pinKm += km;
+        for (const h of hs) {
           pins.push(h);
           pinR.push(h.r);
           pinSep.push(h.sep);
@@ -724,6 +734,8 @@ for (const R of REGIONS) {
   const med = (a: number[]) => (a.length ? [...a].sort((u, v) => u - v)[a.length >> 1] : NaN);
   const q = (a: number[], f: number) => (a.length ? [...a].sort((u, v) => u - v)[Math.floor(f * (a.length - 1))] : NaN);
   console.log(`HAIRPINS R=${R}: ${pinR.length} on ${pinKm.toFixed(1)} km of fine-routed roads; apex radius median ${med(pinR).toFixed(0)} m (p10 ${q(pinR, 0.1).toFixed(0)}, p90 ${q(pinR, 0.9).toFixed(0)}), leg spacing 50 m back median ${med(pinSep).toFixed(0)} m, legs between hairpins median ${med(pinLeg).toFixed(0)} m (p10 ${q(pinLeg, 0.1).toFixed(0)}, p90 ${q(pinLeg, 0.9).toFixed(0)})`);
+  console.log(`HAIRPINS BY CLASS R=${R}: ` + ['N', 'D', 'C', 'T', 'P'].map((c, i) => `${c} ${pinCls[i][0]} on ${pinCls[i][1].toFixed(1)} km, legs ${med(pinCls[i][2]).toFixed(0)} m`).join('  '));
+  pinCls = [0, 1, 2, 3, 4].map(() => [0, 0, []]);
   pinR = [];
   pinSep = [];
   pinLeg = [];
