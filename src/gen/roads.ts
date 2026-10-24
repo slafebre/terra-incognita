@@ -35,10 +35,33 @@ export const MAX_LEN = [9000, 4500];
 
 /** One used lattice edge. */
 /**
- * Distance (m) to the nearest other way left and right of a run of edges (sides of
- * the line from its first to its last vertex, by the sign of the cross product).
+ * How far (m) a fine-routed run may stray left and right of the line from its first
+ * to its last vertex (sides by the sign of the cross product): its share of the gap
+ * to the nearest ways there, assuming they may be fine-routed too.
  */
 export type Room = [number, number];
+
+/**
+ * Where a fine-routed run may go near one of its end vertices, flattened as
+ * [vx, vy, direction, half-angle counter-clockwise, half-angle clockwise] (radians):
+ * within the wedge between the bisectors to the ways next to it at that vertex.
+ * Wedges at a vertex don't overlap, so runs meeting there can't run into each other.
+ */
+export const WEDGE = 5;
+
+/**
+ * A neighbouring run (not meeting at an end): which sides of the run it lies on
+ * (bits 1 left, 2 right), its distance (m), the share of that gap the run may take
+ * if the neighbour is fine-routed too, and the neighbour's vertices and class, so
+ * the drawing chunk can tell whether it is (it may take more room if not).
+ */
+export interface Rival {
+  sides: number;
+  d: number;
+  share: number;
+  cls: RoadClass;
+  pts: number[];
+}
 
 export interface RoadEdge {
   id: string;
@@ -77,22 +100,26 @@ export interface SegmentTask {
   /** The edges it continues into smoothly at either end (their far vertices), if any. */
   pa?: [number, number];
   pb?: [number, number];
-  /** Distance to the nearest other way (m) on either side, and the ways near the edge (as for `piece`), for a detour around a lake. */
-  room: Room;
+  /** The ways near the edge (as for `piece`), for a detour around a lake. */
   obstacles: number[];
+  /** Wedges at its two vertices (see `Wedge`). */
+  wedges: number[];
+  /** Neighbouring runs that may limit its room (see `Rival`). */
+  rivals: Rival[];
   /**
    * The run of edges of one road this edge belongs to (vertices in canonical order),
    * if short enough: routed on the fine terrain as one when too steep or crossing a
-   * lake, by the chunk owning its middle edge (`owner`). `room`: distance to the
-   * nearest other way (m) on either side.
+   * lake, by the chunk owning its middle edge (`owner`).
    */
   piece?: {
     key: string;
     pts: number[];
     owner: boolean;
-    room: Room;
-    /** Other ways near the piece, as segments [ax, ay, bx, by, …] (those meeting it: their far halves). */
+    /** Other ways near the piece, as segments [ax, ay, bx, by, …]. */
     obstacles: number[];
+    /** Wedges at its two end vertices (see `Wedge`). */
+    wedges: number[];
+    rivals: Rival[];
     pa?: [number, number];
     pb?: [number, number];
   };

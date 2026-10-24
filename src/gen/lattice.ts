@@ -16,7 +16,9 @@ import {
   type RoadClass,
   type RoadEdge,
   type RoadPatch,
+  type Rival,
   type Room,
+  WEDGE,
   rngEdge,
   type SegmentPath,
   type SegmentTask,
@@ -782,6 +784,17 @@ export function latticeSegments(edges: RoadEdge[], cx: number, cy: number): Segm
     }
     return { pts, keys: ks };
   };
+  /** The run an edge belongs to (or the edge alone), memoised: what decides whether it's fine-routed. */
+  const pieceMemo = new Map<string, { key: string; pts: number[] }>();
+  const piecePts = (o: RoadEdge) => {
+    let r = pieceMemo.get(o.id);
+    if (!r) {
+      const pc = pieceOf(o);
+      r = pc ? { key: pc.keys.join('+'), pts: pc.pts } : { key: o.id, pts: o.route };
+      for (const k of pc?.keys ?? [o.id]) pieceMemo.set(k, r);
+    }
+    return r;
+  };
   const segDist = (p: number[], q: number[]) => {
     const pd = (x: number, y: number, s: number[]) => {
       const dx = s[2] - s[0];
@@ -800,42 +813,69 @@ export function latticeSegments(edges: RoadEdge[], cx: number, cy: number): Segm
     return Math.abs(mx) < CHUNK / 2 + NEAR && Math.abs(my) < CHUNK / 2 + NEAR;
   });
   /**
-   * Room either side of a run of edges (vertices `pts`, keys `own`): the nearest way
-   * on each side not part of it (of a way meeting it, the far half; sides of its
-   * chord; a way reaching across counts on both), and the ways within ROOM_REACH.
+   * Surroundings of a run of edges (vertices `pts`, keys `own`, class `cls`): the
+   * ways within ROOM_REACH (obstacles), the wedges at its ends (from the ways meeting
+   * it there) and its rivals (the other ways near it, by side of its chord; a way
+   * reaching across counts on both), which limit how far it may stray.
    */
-  const surroundings = (pts: number[], own: Set<string>) => {
+  const surroundings = (pts: number[], own: Set<string>, cls: RoadClass) => {
     const n = pts.length / 2;
-    const ends = new Set<string>();
-    for (let i = 0; i < n; i++) ends.add(k2(pts[2 * i], pts[2 * i + 1]));
-    const room: Room = [ROOM_REACH, ROOM_REACH];
+    const endA = k2(pts[0], pts[1]);
+    const endB = k2(pts[2 * n - 2], pts[2 * n - 1]);
     const obstacles: number[] = [];
     const [cx0, cy0] = [pts[0], pts[1]];
     const [cdx, cdy] = [pts[2 * n - 2] - cx0, pts[2 * n - 1] - cy0];
+    // Directions of the other ways at either end, for the wedges.
+    const atEnd: [number[], number[]] = [[], []];
+    const rivals = new Map<string, Rival>();
     for (const o of local) {
       if (own.has(o.id)) continue;
-      let r = o.route;
-      // A way meeting the run at a vertex: only its far half counts (near the
-      // junction itself they must be close).
-      const atA = ends.has(k2(r[0], r[1]));
-      const atB = ends.has(k2(r[2], r[3]));
-      if (atA && atB) continue;
-      const whole = r;
-      if (atA) r = [(r[0] + r[2]) / 2, (r[1] + r[3]) / 2, r[2], r[3]];
-      else if (atB) r = [r[0], r[1], (r[0] + r[2]) / 2, (r[1] + r[3]) / 2];
+      const r = o.route;
+      const ka = k2(r[0], r[1]);
+      const kb = k2(r[2], r[3]);
+      if ((ka === endA || ka === endB) && (kb === endA || kb === endB)) continue;
+      // A way meeting the run at an end: kept apart by the wedges, not by room.
+      const meets = ka === endA || ka === endB || kb === endA || kb === endB;
+      if (meets) {
+        const [vx, vy, wx, wy] = ka === endA || ka === endB ? r : [r[2], r[3], r[0], r[1]];
+        atEnd[k2(vx, vy) === endA ? 0 : 1].push(Math.atan2(wy - vy, wx - vx));
+      }
       const s0 = sideOf(cdx, cdy, r[0] - cx0, r[1] - cy0);
       const s1 = sideOf(cdx, cdy, r[2] - cx0, r[3] - cy0);
+      let near = false;
       for (let i = 1; i < n; i++) {
         const sgm = [pts[2 * i - 2], pts[2 * i - 1], pts[2 * i], pts[2 * i + 1]];
         if (Math.abs((r[0] + r[2]) / 2 - (sgm[0] + sgm[2]) / 2) > 600 || Math.abs((r[1] + r[3]) / 2 - (sgm[1] + sgm[3]) / 2) > 600) continue;
         const d = segDist(sgm, r);
-        room[s0] = Math.min(room[s0], d);
-        room[s1] = Math.min(room[s1], d);
-        // Obstacles: the whole way, so a fine-routed piece can't wrap round one near the junction.
-        if (d < ROOM_REACH && (obstacles.length < 4 || obstacles[obstacles.length - 4] !== whole[0] || obstacles[obstacles.length - 3] !== whole[1])) obstacles.push(...whole);
+        if (d < ROOM_REACH) near = true;
+        if (meets) continue;
+        // Its share of the gap (each way's share of a gap and the other's sum to under 1).
+        const share = cls < o.cls ? ROOM_SHARE_MAJOR : cls > o.cls ? ROOM_SHARE_MINOR : ROOM_SHARE_EQUAL;
+        if (d < ROOM_REACH) {
+          const pc = piecePts(o);
+          const key = pc.key;
+          const old = rivals.get(key);
+          const sides = (1 << s0) | (1 << s1) | (old?.sides ?? 0);
+          if (!old || d < old.d || share < old.share) rivals.set(key, { sides, d: Math.min(d, old?.d ?? d), share: Math.min(share, old?.share ?? share), cls: o.cls, pts: pc.pts });
+          else old.sides = sides;
+        }
       }
+      if (near) obstacles.push(...r);
     }
-    return { room, obstacles };
+    const wedges: number[] = [];
+    for (const [e, i, j] of [[0, 0, 1], [1, n - 1, n - 2]] as const) {
+      const vx = pts[2 * i], vy = pts[2 * i + 1];
+      const dir = Math.atan2(pts[2 * j + 1] - vy, pts[2 * j] - vx);
+      let ccw = 2 * Math.PI;
+      let cw = 2 * Math.PI;
+      for (const a of atEnd[e]) {
+        const d = (((a - dir) % (2 * Math.PI)) + 2 * Math.PI) % (2 * Math.PI);
+        if (d > 1e-6) ccw = Math.min(ccw, d);
+        if (2 * Math.PI - d > 1e-6) cw = Math.min(cw, 2 * Math.PI - d);
+      }
+      wedges.push(vx, vy, dir, ccw / 2, cw / 2);
+    }
+    return { obstacles, wedges, rivals: [...rivals.values()] };
   };
   const out: SegmentTask[] = [];
   for (const e of edges) {
@@ -850,20 +890,21 @@ export function latticeSegments(edges: RoadEdge[], cx: number, cy: number): Segm
       by,
       pa: partner.get(`${e.id}@${k2(ax, ay)}`),
       pb: partner.get(`${e.id}@${k2(bx, by)}`),
-      ...surroundings(e.route, new Set([e.id])),
+      ...surroundings(e.route, new Set([e.id]), e.cls),
     };
     const pc = pieceOf(e);
     if (pc) {
       const n = pc.pts.length / 2;
-      const { room, obstacles } = surroundings(pc.pts, new Set(pc.keys));
+      const { obstacles, wedges, rivals } = surroundings(pc.pts, new Set(pc.keys), e.cls);
       const first = byKey.get(pc.keys[0])!;
       const last = byKey.get(pc.keys[pc.keys.length - 1])!;
       task.piece = {
         key: pc.keys.join('+'),
         pts: pc.pts,
         owner: pc.keys[Math.floor((pc.keys.length - 1) / 2)] === e.id,
-        room,
         obstacles,
+        wedges,
+        rivals,
         pa: partner.get(`${first.id}@${k2(pc.pts[0], pc.pts[1])}`),
         pb: partner.get(`${last.id}@${k2(pc.pts[2 * n - 2], pc.pts[2 * n - 1])}`),
       };
@@ -878,6 +919,14 @@ const sideOf = (dx: number, dy: number, px: number, py: number): 0 | 1 => (dx * 
 
 /** Room around a piece is looked for this far (m): every chunk that sees the piece knows all ways that close. */
 const ROOM_REACH = 300;
+/**
+ * Share of the gap to a neighbouring way that a fine-routed run may take, against a
+ * way of lower class (a road beside a track), higher class, or the same class. A
+ * pair's shares sum to under 1, so two runs can't meet; roads get room to wind.
+ */
+const ROOM_SHARE_MAJOR = 0.7;
+const ROOM_SHARE_MINOR = 0.2;
+const ROOM_SHARE_EQUAL = 0.45;
 /** Pieces: at most this many edges; a vertex is an anchor with this probability. */
 const PIECE_EDGES = 3;
 const PIECE_ANCHOR = 0.5;
@@ -985,7 +1034,33 @@ export function routeCurves(tasks: SegmentTask[], p: RoadPatch): SegmentPath[] {
    * to its last (both snapped). `pa`/`pb`: the vertices beyond either end, if the road
    * goes on there.
    */
-  const routed = (key: string, cls: RoadClass, pts: number[], pa: [number, number] | undefined, pb: [number, number] | undefined, room: Room, obstacles: number[]): SegmentPath => {
+  /** Whether a neighbouring run may be fine-routed too: steep, near water, or beyond this patch (can't tell). */
+  const active = (r: Rival) => {
+    let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+    for (let i = 0; i < r.pts.length; i += 2) {
+      x0 = Math.min(x0, r.pts[i]);
+      y0 = Math.min(y0, r.pts[i + 1]);
+      x1 = Math.max(x1, r.pts[i]);
+      y1 = Math.max(y1, r.pts[i + 1]);
+    }
+    const m = 48;
+    if (x0 - m < p.gx * NODE || y0 - m < p.gy * NODE || x1 + m > (p.gx + w - 1) * NODE || y1 + m > (p.gy + h - 1) * NODE) return true;
+    return !!serpentineFrame(r.pts, MAX_GRADE[r.cls], zAt) || wetLength(r.pts) > 0;
+  };
+  /**
+   * How far a run may stray either side: a share of the gap to each neighbouring run
+   * that may be fine-routed too (see `Room`), up to its fitted band and clearance of
+   * one that won't.
+   */
+  const bandOf = (rivals: Rival[]): Room => {
+    const band: Room = [MICRO_BAND, MICRO_BAND];
+    for (const r of rivals) {
+      const allowed = active(r) ? r.share * r.d : Math.max(r.share * r.d, r.d - FIT_BAND - MICRO_CLEAR);
+      for (const sd of [0, 1] as const) if (r.sides & (1 << sd)) band[sd] = Math.min(band[sd], allowed);
+    }
+    return band;
+  };
+  const routed = (key: string, cls: RoadClass, pts: number[], pa: [number, number] | undefined, pb: [number, number] | undefined, rivals: Rival[], obstacles: number[], wedges: number[]): SegmentPath => {
     const n = pts.length / 2;
     const [ax, ay] = snap(pts[0], pts[1]);
     const [bx, by] = snap(pts[2 * n - 2], pts[2 * n - 1]);
@@ -993,9 +1068,8 @@ export function routeCurves(tasks: SegmentTask[], p: RoadPatch): SegmentPath[] {
     // minus previous), as the piece or edge on the other side also uses.
     const inDir = pa ? [pts[2] - pa[0], pts[3] - pa[1]] : [bx - ax, by - ay];
     const outDir = pb ? [pb[0] - pts[2 * n - 4], pb[1] - pts[2 * n - 3]] : [bx - ax, by - ay];
-    // Each side keeps under half the way to the nearest way there: two can't meet.
-    const band: Room = [Math.min(MICRO_BAND, MICRO_ROOM * room[0]), Math.min(MICRO_BAND, MICRO_ROOM * room[1])];
-    const xy = microRoute(ax, ay, bx, by, inDir, outDir, MAX_GRADE[cls], p, zAt, obstacles, band, cls);
+    const band = bandOf(rivals);
+    const xy = microRoute(ax, ay, bx, by, inDir, outDir, MAX_GRADE[cls], p, zAt, obstacles, band, cls, wedges);
     return { key, cls, xy: Float32Array.from(xy), micro: true };
   };
   const out: SegmentPath[] = [];
@@ -1005,14 +1079,14 @@ export function routeCurves(tasks: SegmentTask[], p: RoadPatch): SegmentPath[] {
     if (t.piece) {
       const pc = t.piece;
       if (serpentineFrame(pc.pts, MAX_GRADE[t.cls], zAt) || wetLength(pc.pts) > WET_MIN) {
-        if (pc.owner) out.push(routed(pc.key, t.cls, pc.pts, pc.pa, pc.pb, pc.room, pc.obstacles));
+        if (pc.owner) out.push(routed(pc.key, t.cls, pc.pts, pc.pa, pc.pb, pc.rivals, pc.obstacles, pc.wedges));
         continue;
       }
     }
     const c = curveOf(t);
     // Still in a lake after fitting (the band is narrow): only this chunk draws the
     // edge, so it can go round on its own.
-    if (wetLength(c.xy) > WET_MIN) out.push(routed(t.key, t.cls, [t.ax, t.ay, t.bx, t.by], t.pa, t.pb, t.room, t.obstacles));
+    if (wetLength(c.xy) > WET_MIN) out.push(routed(t.key, t.cls, [t.ax, t.ay, t.bx, t.by], t.pa, t.pb, t.rivals, t.obstacles, t.wedges));
     else out.push(c);
   }
   return out;
@@ -1216,8 +1290,6 @@ function fitToTerrain(
 /** Micro routing: search band either side of the piece (m), clearance kept from other
  * ways (m) except this near the piece's ends (m). */
 const MICRO_BAND = 200;
-/** …and at most this share of the room to the nearest other way. */
-const MICRO_ROOM = 0.45;
 const MICRO_CLEAR = 24;
 const MICRO_FREE = 48;
 /** Clearance (m) from the road's continuation beyond either end of a piece. */
@@ -1332,6 +1404,7 @@ function microRoute(
   obstacles: number[],
   band: Room,
   cls: RoadClass,
+  wedges: number[],
 ): number[] {
   const { w, h } = p;
   const node = (x: number, y: number) => [Math.round(x / NODE) - p.gx, Math.round(y / NODE) - p.gy];
@@ -1355,6 +1428,9 @@ function microRoute(
     return Math.hypot(x - s[o] - t * dx, y - s[o + 1] - t * dy);
   };
   const ab = [ax, ay, bx, by];
+  // Wedges from the snapped ends, where the search starts and stops.
+  wedges = wedges.slice();
+  if (wedges.length >= 2 * WEDGE) [wedges[0], wedges[1], wedges[WEDGE], wedges[WEDGE + 1]] = [ax, ay, bx, by];
   const ray = (x: number, y: number, dx: number, dy: number) => {
     const L = Math.hypot(dx, dy) || 1;
     return [x + (dx / L) * MICRO_BEYOND * 1.5, y + (dy / L) * MICRO_BEYOND * 1.5, x + (dx / L) * MICRO_FREE * 1.5, y + (dy / L) * MICRO_FREE * 1.5];
@@ -1371,6 +1447,7 @@ function microRoute(
       if (segDistTo(x, y, beyondA, 0) < MICRO_BEYOND || segDistTo(x, y, beyondB, 0) < MICRO_BEYOND) continue;
       const dA = Math.hypot(x - ax, y - ay);
       const dB = Math.hypot(x - bx, y - by);
+      if (!inWedges(wedges, x, y)) continue;
       const nearEnd = dA < MICRO_FREE || dB < MICRO_FREE;
       // Clear of other ways; near the ends only a little (junctions are close), and
       // right at the junction not at all.
@@ -1490,6 +1567,22 @@ function microRoute(
   // lie behind them. Rounded, that back-step would be a small curl.
   trimSpikes(outPts);
   return filleted(outPts, MICRO_RADIUS[cls]);
+}
+
+/** Wedges are narrowed to this share, so runs in neighbouring wedges keep a gap. */
+const WEDGE_SHARE = 0.9;
+
+/** Inside every wedge (see `Wedge`), or within MICRO_JUNCTION of its vertex? */
+function inWedges(wedges: number[], x: number, y: number): boolean {
+  for (let o = 0; o + WEDGE - 1 < wedges.length; o += WEDGE) {
+    const dx = x - wedges[o];
+    const dy = y - wedges[o + 1];
+    if (Math.hypot(dx, dy) < MICRO_JUNCTION) continue;
+    let rel = Math.atan2(dy, dx) - wedges[o + 2];
+    rel -= 2 * Math.PI * Math.round(rel / (2 * Math.PI));
+    if (rel > WEDGE_SHARE * wedges[o + 3] || -rel > WEDGE_SHARE * wedges[o + 4]) return false;
+  }
+  return true;
 }
 
 /** Drops points next to either end where the line doubles back (> 90°) within a short end segment. */
