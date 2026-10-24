@@ -18,7 +18,6 @@ import {
   type RoadEdge,
   type RoadPatch,
   type Rival,
-  type Room,
   WEDGE,
   rngEdge,
   type SegmentPath,
@@ -93,6 +92,9 @@ const TRACK_GAP = 200;
 const TRACK_ALT = 2300;
 const TRACK_STEEP = 0.5;
 const TRACK_REACH = 1200;
+/** On ground steeper than TRACK_SPACE_SLOPE (500 m baseline), track seeds keep TRACK_SPACE (m) apart. */
+const TRACK_SPACE = 300;
+const TRACK_SPACE_SLOPE = 0.15;
 /** Track density falls by up to TRACK_THIN over this range of slope (500 m baseline). */
 const TRACK_THIN = 0.85;
 const TRACK_THIN_SLOPE = [0.1, 0.35];
@@ -670,19 +672,32 @@ export function latticeCell(gx: number, gy: number, field: CoarseField, set: Set
       [...roadVertices([])].map((v) => pos(v)),
       512,
     );
-    const box = { x0: x0 - trackM, y0: y0 - trackM, x1: x1 + trackM, y1: y1 + trackM };
-    const seeds: number[] = [];
+    // Candidates TRACK_SPACE beyond the seeds' box, so every cell spaces a seed alike.
+    const m = trackM + TRACK_SPACE;
+    const box = { x0: x0 - m, y0: y0 - m, x1: x1 + m, y1: y1 + m };
+    const cands: { v: number; x: number; y: number; h: number; slope: number }[] = [];
     for (const v of verticesIn(box)) {
       const p = pos(v);
       // Fewer on steep ground: mountain slopes are crossed by few ways, which then
       // have room to wind (see microRoute).
       const gx = field.z(p.x + 250, p.y) - field.z(p.x - 250, p.y);
       const gy = field.z(p.x, p.y + 250) - field.z(p.x, p.y - 250);
-      const thin = 1 - TRACK_THIN * smoothstep(TRACK_THIN_SLOPE[0], TRACK_THIN_SLOPE[1], Math.hypot(gx, gy) / 500);
-      if (hash3(0x7ac4, vi(v), vj(v)) / 4294967296 >= TRACK_DENSITY * thin) continue;
+      const slope = Math.hypot(gx, gy) / 500;
+      const thin = 1 - TRACK_THIN * smoothstep(TRACK_THIN_SLOPE[0], TRACK_THIN_SLOPE[1], slope);
+      const h = hash3(0x7ac4, vi(v), vj(v)) / 4294967296;
+      if (h >= TRACK_DENSITY * thin) continue;
       if (p.z > TRACK_ALT || roadPts.near(p.x, p.y, TRACK_GAP).length || p.wet) continue;
       if (neighbours(v).some((w) => edgeGrade(field, v, w) > TRACK_STEEP)) continue;
-      seeds.push(v);
+      cands.push({ v, x: p.x, y: p.y, h, slope });
+    }
+    // On steep ground, one seed per TRACK_SPACE (the lowest hash): neighbouring seeds
+    // on a slope would each run a track down it, side by side.
+    const candGrid = new Grid(cands, 512);
+    const seeds: number[] = [];
+    for (const c of cands) {
+      if (!inBox(c, trackM)) continue;
+      if (c.slope > TRACK_SPACE_SLOPE && candGrid.near(c.x, c.y, TRACK_SPACE).some((o) => o !== c && o.h < c.h && Math.hypot(o.x - c.x, o.y - c.y) < TRACK_SPACE)) continue;
+      seeds.push(c.v);
     }
     const pT = forest(roadVertices([]), farmM, TRACK_REACH * COST_CAP, ROAD_T, seeds);
     for (const v of seeds) follow(pT, v, ROAD_T);
@@ -831,16 +846,13 @@ export function latticeSegments(edges: RoadEdge[], cx: number, cy: number): Segm
   /**
    * Surroundings of a run of edges (vertices `pts`, keys `own`, class `cls`): the
    * ways within ROOM_REACH (obstacles), the wedges at its ends (from the ways meeting
-   * it there) and its rivals (the other ways near it, by side of its chord; a way
-   * reaching across counts on both), which limit how far it may stray.
+   * it there) and its rivals (the other ways near it), which limit where it may go.
    */
   const surroundings = (pts: number[], own: Set<string>, cls: RoadClass) => {
     const n = pts.length / 2;
     const endA = k2(pts[0], pts[1]);
     const endB = k2(pts[2 * n - 2], pts[2 * n - 1]);
     const obstacles: number[] = [];
-    const [cx0, cy0] = [pts[0], pts[1]];
-    const [cdx, cdy] = [pts[2 * n - 2] - cx0, pts[2 * n - 1] - cy0];
     // Directions of the other ways at either end, for the wedges.
     const atEnd: [number[], number[]] = [[], []];
     const rivals = new Map<string, Rival>();
@@ -856,8 +868,6 @@ export function latticeSegments(edges: RoadEdge[], cx: number, cy: number): Segm
         const [vx, vy, wx, wy] = ka === endA || ka === endB ? r : [r[2], r[3], r[0], r[1]];
         atEnd[k2(vx, vy) === endA ? 0 : 1].push(Math.atan2(wy - vy, wx - vx));
       }
-      const s0 = sideOf(cdx, cdy, r[0] - cx0, r[1] - cy0);
-      const s1 = sideOf(cdx, cdy, r[2] - cx0, r[3] - cy0);
       let near = false;
       for (let i = 1; i < n; i++) {
         const sgm = [pts[2 * i - 2], pts[2 * i - 1], pts[2 * i], pts[2 * i + 1]];
@@ -865,15 +875,10 @@ export function latticeSegments(edges: RoadEdge[], cx: number, cy: number): Segm
         const d = segDist(sgm, r);
         if (d < ROOM_REACH) near = true;
         if (meets) continue;
-        // Its share of the gap (each way's share of a gap and the other's sum to under 1).
-        const share = cls < o.cls ? ROOM_SHARE_MAJOR : cls > o.cls ? ROOM_SHARE_MINOR : ROOM_SHARE_EQUAL;
-        if (d < ROOM_REACH) {
+        if (d < ROOM_REACH && !rivals.has(piecePts(o).key)) {
           const pc = piecePts(o);
-          const key = pc.key;
-          const old = rivals.get(key);
-          const sides = (1 << s0) | (1 << s1) | (old?.sides ?? 0);
-          if (!old || d < old.d || share < old.share) rivals.set(key, { sides, d: Math.min(d, old?.d ?? d), share: Math.min(share, old?.share ?? share), cls: o.cls, pts: pc.pts });
-          else old.sides = sides;
+          const weight = cls < o.cls ? RIVAL_MAJOR : cls > o.cls ? RIVAL_MINOR : RIVAL_EQUAL;
+          rivals.set(pc.key, { weight, cls: o.cls, pts: pc.pts });
         }
       }
       if (near) obstacles.push(...r);
@@ -950,19 +955,16 @@ export function latticeSegments(edges: RoadEdge[], cx: number, cy: number): Segm
   return out;
 }
 
-/** Side (0 left, 1 right) of a point (px, py) relative to a direction (dx, dy), both from one origin. */
-const sideOf = (dx: number, dy: number, px: number, py: number): 0 | 1 => (dx * py - dy * px >= 0 ? 0 : 1);
-
 /** Room around a piece is looked for this far (m): every chunk that sees the piece knows all ways that close. */
 const ROOM_REACH = 300;
 /**
- * Share of the gap to a neighbouring way that a fine-routed run may take, against a
- * way of lower class (a road beside a track), higher class, or the same class. A
- * pair's shares sum to under 1, so two runs can't meet; roads get room to wind.
+ * Weight of a fine-routed run against a neighbouring run that may wind too (see
+ * `Rival`): of lower class (a road beside a track), higher class, or the same.
+ * A pair's weights multiply to under 1; roads get the room to wind.
  */
-const ROOM_SHARE_MAJOR = 0.7;
-const ROOM_SHARE_MINOR = 0.2;
-const ROOM_SHARE_EQUAL = 0.45;
+const RIVAL_MAJOR = 1.5;
+const RIVAL_MINOR = 0.6;
+const RIVAL_EQUAL = 0.9;
 /** Dead ends are looked for this many edges beyond an edge's or piece's end (see SegmentTask.spurA). */
 const SPUR_MAX = 4;
 /** Pieces: at most this many edges; a vertex is an anchor with this probability. */
@@ -1085,19 +1087,6 @@ export function routeCurves(tasks: SegmentTask[], p: RoadPatch): SegmentPath[] {
     if (x0 - m < p.gx * NODE || y0 - m < p.gy * NODE || x1 + m > (p.gx + w - 1) * NODE || y1 + m > (p.gy + h - 1) * NODE) return true;
     return !!serpentineFrame(r.pts, MAX_GRADE[r.cls], zAt) || wetLength(r.pts) > 0;
   };
-  /**
-   * How far a run may stray either side: a share of the gap to each neighbouring run
-   * that may be fine-routed too (see `Room`), up to its fitted band and clearance of
-   * one that won't.
-   */
-  const bandOf = (rivals: Rival[]): Room => {
-    const band: Room = [MICRO_BAND, MICRO_BAND];
-    for (const r of rivals) {
-      const allowed = active(r) ? r.share * r.d : Math.max(r.share * r.d, r.d - FIT_BAND - MICRO_CLEAR);
-      for (const sd of [0, 1] as const) if (r.sides & (1 << sd)) band[sd] = Math.min(band[sd], allowed);
-    }
-    return band;
-  };
   const routed = (
     key: string,
     cls: RoadClass,
@@ -1117,8 +1106,8 @@ export function routeCurves(tasks: SegmentTask[], p: RoadPatch): SegmentPath[] {
     // minus previous), as the piece or edge on the other side also uses.
     const inDir = pa ? [pts[2] - pa[0], pts[3] - pa[1]] : [bx - ax, by - ay];
     const outDir = pb ? [pb[0] - pts[2 * n - 4], pb[1] - pts[2 * n - 3]] : [bx - ax, by - ay];
-    const band = bandOf(rivals);
-    const xy = microRoute(ax, ay, bx, by, inDir, outDir, MAX_GRADE[cls], p, zAt, obstacles, band, cls, wedges);
+    const near = rivals.map((r) => ({ ...r, active: active(r) }));
+    const xy = microRoute(ax, ay, bx, by, inDir, outDir, MAX_GRADE[cls], p, zAt, obstacles, pts, near, cls, wedges);
     return { key, cls, xy: Float32Array.from(xy), micro: true };
   };
   /** A path with no step longer than 8 m (the water checks look at its points). */
@@ -1416,9 +1405,12 @@ function fitToTerrain(
   }
 }
 
-/** Micro routing: search band either side of the piece (m), clearance kept from other
- * ways (m) except this near the piece's ends (m). */
-const MICRO_BAND = 200;
+/**
+ * Micro routing: search band either side of the piece (m) by class — how far a
+ * switchback's legs reach: long on roads, short on footpaths — then clearance kept
+ * from other ways (m) except this near the piece's ends (m).
+ */
+const MICRO_BAND = [250, 220, 200, 60, 25];
 const MICRO_CLEAR = 24;
 const MICRO_FREE = 48;
 /** Clearance (m) from the road's continuation beyond either end of a piece. */
@@ -1427,7 +1419,11 @@ const MICRO_BEYOND = 10;
 const MICRO_JUNCTION = 12;
 /** Costs (m-equivalent): per 45° of turn, per unit of over-limit gradient per m, for
  * leaving off the road's arriving/leaving direction (per 45°), entering a stream bed. */
-const MICRO_TURN = 20;
+/**
+ * Turn cost by class (per 45°): a hairpin on a wide road is costly to build, so main
+ * roads turn back seldom, on long legs; a footpath zig-zags in short ones.
+ */
+const MICRO_TURN = [60, 45, 25, 15, 6];
 const MICRO_STEEP = 25;
 const MICRO_ENDS = 20;
 const MICRO_STREAM = 15;
@@ -1532,7 +1528,8 @@ function microRoute(
   p: RoadPatch,
   zAt: (x: number, y: number) => number,
   obstacles: number[],
-  band: Room,
+  own: number[],
+  rivals: (Rival & { active: boolean })[],
   cls: RoadClass,
   wedges: number[],
 ): number[] {
@@ -1542,7 +1539,7 @@ function microRoute(
   const node = (x: number, y: number) => [Math.round(x / NODE) - p.gx, Math.round(y / NODE) - p.gy];
   const [ia, ja] = node(ax, ay);
   const [ib, jb] = node(bx, by);
-  const pad = Math.ceil(Math.max(band[0], band[1], MICRO_FREE) / NODE);
+  const pad = Math.ceil(Math.max(MICRO_BAND[cls], MICRO_FREE) / NODE);
   const i0 = Math.max(1, Math.min(ia, ib) - pad);
   const j0 = Math.max(1, Math.min(ja, jb) - pad);
   const i1 = Math.min(w - 2, Math.max(ia, ib) + pad);
@@ -1567,6 +1564,24 @@ function microRoute(
     return Math.hypot(x - s[o] - t * dx, y - s[o + 1] - t * dy);
   };
   const ab = [ax, ay, bx, by];
+  const polyDist = (x: number, y: number, pl: number[]) => {
+    let d = Infinity;
+    for (let o = 0; o + 3 < pl.length; o += 2) d = Math.min(d, segDistTo(x, y, pl, o));
+    return d;
+  };
+  /**
+   * Is (x, y) this run's to use? Against a rival that may wind too, it must be nearer
+   * this run's line than `weight` × the rival's; against one that won't, it must
+   * keep its fitted band and clearance away unless nearer this line than that one.
+   */
+  const ownSide = (x: number, y: number) => {
+    const dP = polyDist(x, y, own);
+    for (const r of rivals) {
+      const dQ = polyDist(x, y, r.pts);
+      if (r.active ? dP > r.weight * dQ : dQ < FIT_BAND + MICRO_CLEAR && dP > dQ) return false;
+    }
+    return true;
+  };
   // Wedges from the snapped ends, where the search starts and stops.
   wedges = wedges.slice();
   if (wedges.length >= 2 * WEDGE) [wedges[0], wedges[1], wedges[WEDGE], wedges[WEDGE + 1]] = [ax, ay, bx, by];
@@ -1580,7 +1595,8 @@ function microRoute(
     for (let li = 0; li < bw; li++) {
       const x = (p.gx + li + i0) * NODE;
       const y = (p.gy + lj + j0) * NODE;
-      if (segDistTo(x, y, ab, 0) > Math.max(band[sideOf(bx - ax, by - ay, x - ax, y - ay)], MICRO_FREE)) continue;
+      if (segDistTo(x, y, ab, 0) > Math.max(MICRO_BAND[cls], MICRO_FREE)) continue;
+      if (!ownSide(x, y)) continue;
       // Never across the road's own continuation beyond either end (a tight turn there
       // would curl round it, losing height in a loop).
       if (segDistTo(x, y, beyondA, 0) < MICRO_BEYOND || segDistTo(x, y, beyondB, 0) < MICRO_BEYOND) continue;
@@ -1637,7 +1653,7 @@ function microRoute(
       const q = (nj + j0) * w + ni + i0;
       const dist = MDIST16[d];
       const g = Math.abs(p.zE[q] - p.zE[k]) / dist;
-      let c = cost[st] + dist * (1 + 0.5 * (g / gmax) ** 2) + (MICRO_TURN / 2) * Math.abs(t);
+      let c = cost[st] + dist * (1 + 0.5 * (g / gmax) ** 2) + (MICRO_TURN[cls] / 2) * Math.abs(t);
       if (g > gmax) c += dist * MICRO_STEEP * (g / gmax - 1);
       if (wet(q)) {
         if (!water) continue;
@@ -1708,7 +1724,32 @@ function microRoute(
   // The search ran between the grid nodes nearest the ends; the ends themselves may
   // lie behind them. Rounded, that back-step would be a small curl.
   trimSpikes(outPts);
+  cutLoops(outPts);
   return filleted(outPts, MICRO_RADIUS[cls]);
+}
+
+/**
+ * Removes loops where a polyline crosses itself (the search's states carry a heading,
+ * so a path can come back over its own track): the part between the two crossing
+ * segments goes, and the line passes through the crossing point.
+ */
+function cutLoops(pts: number[]): void {
+  for (let changed = true; changed; ) {
+    changed = false;
+    const n = pts.length / 2;
+    for (let i = 0; i + 1 < n && !changed; i++)
+      for (let j = n - 2; j >= i + 2 && !changed; j--) {
+        const [x1, y1, x2, y2] = [pts[2 * i], pts[2 * i + 1], pts[2 * i + 2], pts[2 * i + 3]];
+        const [x3, y3, x4, y4] = [pts[2 * j], pts[2 * j + 1], pts[2 * j + 2], pts[2 * j + 3]];
+        const den = (x2 - x1) * (y4 - y3) - (y2 - y1) * (x4 - x3);
+        if (Math.abs(den) < 1e-9) continue;
+        const t = ((x3 - x1) * (y4 - y3) - (y3 - y1) * (x4 - x3)) / den;
+        const u = ((x3 - x1) * (y2 - y1) - (y3 - y1) * (x2 - x1)) / den;
+        if (t <= 0 || t >= 1 || u <= 0 || u >= 1) continue;
+        pts.splice(2 * i + 2, 2 * (j - i), x1 + t * (x2 - x1), y1 + t * (y2 - y1));
+        changed = true;
+      }
+  }
 }
 
 /** Wedges are narrowed to this share, so runs in neighbouring wedges keep a gap. */
