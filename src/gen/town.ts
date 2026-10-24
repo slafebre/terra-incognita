@@ -1,7 +1,8 @@
 import { hash1, hash3, rng } from '../lib/hash';
 import { lerp, smoothstep } from '../lib/noise';
-import { placeBuildings, type Way } from './buildings';
+import { placeBuildings, segQuadDist, type Way } from './buildings';
 import { NODE } from './hydro';
+import { RESERVOIR, TOWER, type Poi } from './poi';
 import { nearestVertex, vertexPos } from './lattice';
 import { ROAD_C, ROAD_P, ROAD_T, type RoadPatch, type SegmentPath } from './roads';
 import { HAMLET, TOWN, VILLAGE, type Rank, type Site } from './settle';
@@ -68,6 +69,8 @@ export interface TownPlan {
   buildings: Float32Array;
   /** One per building: 1 for an industrial one (a shed, a hall). */
   industrial: Uint8Array;
+  /** Its points of interest (a water tower, a reservoir). */
+  pois: Poi[];
 }
 
 /** Everything a plan draws lies within this distance of its site (m), per rank (farms: farm.ts). */
@@ -130,6 +133,12 @@ export const BUILD_STEEP = [0.55, 0.8];
 const HAMLET_GAPS = 1.8;
 /** No building this close to the church at a village's or town's centre (m). */
 const CHURCH_CLEAR = 10;
+/** Water towers: chance per (town, village), on the highest free ground from the old core out to the reach, TOWER_CLEAR m from ways and buildings and within TOWER_ACCESS m of a way. In the mountains (from R = TOWER_MOUNTAIN), a reservoir uphill instead, with RESERVOIR_CHANCE. */
+const TOWER_CHANCE = [1, 0.75];
+const TOWER_MOUNTAIN = 0.52;
+const RESERVOIR_CHANCE = 0.6;
+const TOWER_CLEAR = 15;
+const TOWER_ACCESS = 100;
 /** Chance per outer plot of a large building (a factory, a store), per rank; on main roads LARGE_MAIN times that; not within LARGE_FROM times the old core's radius. */
 const LARGE_CHANCE = [0.07, 0.025, 0];
 const LARGE_MAIN = 2.5;
@@ -1455,6 +1464,35 @@ export function planTown({ site, roads, patch: p }: PlanInput): TownPlan {
     steep: lerp(BUILD_STEEP[0], BUILD_STEEP[1], mount),
   });
 
+  // --- Water tower (in the mountains, a reservoir uphill) --------------------------
+  const pois: Poi[] = [];
+  const mountain = site.R >= TOWER_MOUNTAIN;
+  if (rank !== HAMLET && rand() < (mountain ? RESERVOIR_CHANCE : TOWER_CHANCE[rank])) {
+    const r0 = Math.max(oldCore, 60);
+    const r1 = Math.min(reach, extent - 40);
+    const cands: { x: number; y: number; z: number }[] = [];
+    for (let j = 1; j < h - 1; j++)
+      for (let i = 1; i < w - 1; i++) {
+        const x = (p.gx + i) * NODE;
+        const y = (p.gy + j) * NODE;
+        const d = Math.hypot(x - cx, y - cy);
+        if (d < r0 || d > r1 || wet(x, y) || areaAt(x, y) > STREAM_A || inEstate(x, y, IND_KEEP)) continue;
+        cands.push({ x, y, z: p.zE[j * w + i] });
+      }
+    cands.sort((a, b) => b.z - a.z || a.x - b.x || a.y - b.y);
+    const gone = (li: number) => !!lines[li].pruned;
+    for (const c of cands) {
+      if (nearest(c.x, c.y, TOWER_CLEAR, gone) || !nearest(c.x, c.y, TOWER_ACCESS, gone)) continue;
+      let clear = true;
+      for (let k = 0; k < buildings.length && clear; k += 8)
+        if (Math.abs(buildings[k] - c.x) < 100 && Math.abs(buildings[k + 1] - c.y) < 100 && segQuadDist(c.x, c.y, c.x, c.y, Array.from(buildings.subarray(k, k + 8))) < TOWER_CLEAR) clear = false;
+      if (!clear) continue;
+      pois.push({ kind: mountain ? RESERVOIR : TOWER, x: c.x, y: c.y });
+      no(mountain ? 'RESERVOIR' : 'TOWER');
+      break;
+    }
+  }
+
   return {
     id: site.id,
     rank,
@@ -1467,6 +1505,7 @@ export function planTown({ site, roads, patch: p }: PlanInput): TownPlan {
     frontage,
     buildings,
     industrial,
+    pois,
   };
 }
 

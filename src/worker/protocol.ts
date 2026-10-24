@@ -1,5 +1,6 @@
 import type { DemPatch, DemResult } from '../gen/dem';
 import type { HydroResult, HydroWindow, PreResult } from '../gen/hydro';
+import type { PoiPatch } from '../gen/poi';
 import type { NetCell, RoadPatch, SegmentPath, SegmentTask } from '../gen/roads';
 import type { SeedPayload } from '../gen/seeds';
 import type { Site } from '../gen/settle';
@@ -21,6 +22,8 @@ export type TaskRequest =
       cover: Int8Array;
       roads: SegmentPath[];
       plans: TownPlan[];
+      /** Fine nodes round the chunk for its points of interest (none if a solve was missing). */
+      poi?: PoiPatch;
       streams: Float32Array;
       pxSize: number;
       dpr: number;

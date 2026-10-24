@@ -2,11 +2,13 @@ import { APRON, CELL, CELLS, CHUNK, DEM_W } from '../lib/constants';
 import { marchingSquares } from '../lib/contours';
 import { smoothPolyline } from '../lib/polyline';
 import { COVER } from '../gen/landcover';
+import { placePois, type PoiPatch } from '../gen/poi';
 import type { SegmentPath } from '../gen/roads';
 import type { TownPlan } from '../gen/town';
 import { cellCoverage, drawCoverSymbols, FILLS } from './landcover';
 import { drawBuildings } from './buildings';
 import { clearUnderBuiltUp, drawChurches, drawRoads } from './roads';
+import { drawPois } from './symbols';
 import { CONTOURS, STYLE } from './style';
 
 export interface RenderInput {
@@ -23,6 +25,8 @@ export interface RenderInput {
   roads: SegmentPath[];
   /** Plans of settlements (street plans, farmsteads) that may draw into this chunk. */
   plans: TownPlan[];
+  /** Fine nodes round the chunk, for its points of interest. */
+  poi?: PoiPatch;
   /** Raster edge length in device pixels. */
   pxSize: number;
   /** Device pixels per CSS pixel (line widths are specified in CSS px). */
@@ -57,7 +61,7 @@ function shadeAndSlope(dem: Float32Array): { shade: Float32Array; slope: Float32
 /** River width in metres for drainage area A (km²). */
 export const riverWidth = (A: number) => 1.1 * Math.pow(A, 0.55);
 
-export function renderChunk({ cx, cy, dem, cover, water, streams, roads, plans, pxSize, dpr }: RenderInput): OffscreenCanvas {
+export function renderChunk({ cx, cy, dem, cover, water, streams, roads, plans, poi, pxSize, dpr }: RenderInput): OffscreenCanvas {
   const canvas = new OffscreenCanvas(pxSize, pxSize);
   const ctx = canvas.getContext('2d')!;
   const pxPerM = pxSize / CHUNK;
@@ -200,6 +204,9 @@ export function renderChunk({ cx, cy, dem, cover, water, streams, roads, plans, 
   drawBuildings(ctx, plans, cx, cy, pxPerM, dpr);
   drawRoads(ctx, drawn, plans.flatMap((p) => p.streets), cx, cy, pxPerM, dpr, water);
   drawChurches(ctx, plans, cx, cy, pxPerM, dpr);
+  // Points of interest: the chunk's own (hilltops, wayside crosses, springs) and the plans' (water towers).
+  const pois = [...(poi ? placePois({ cx, cy, patch: poi, roads: drawn, plans }) : []), ...plans.flatMap((p) => p.pois)];
+  drawPois(ctx, pois, cx, cy, pxPerM, dpr);
   return canvas;
 }
 

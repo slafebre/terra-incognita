@@ -14,6 +14,7 @@ import {
   type PreResult,
 } from '../gen/hydro';
 import { latticeSegments } from '../gen/lattice';
+import { POI_PAD, type PoiPatch } from '../gen/poi';
 import { NET_CELL, NET_REACH, ROAD_PAD, type NetCell, type RoadEdge, type RoadPatch, type SegmentPath } from '../gen/roads';
 import { expand, intersects, SeedStore, type Rect } from '../gen/seeds';
 import { TOWN, type Site } from '../gen/settle';
@@ -540,6 +541,7 @@ export class ChunkManager {
         const streams = c.streams!.slice();
         const roads: SegmentPath[] = [];
         this.ring(c, (n) => (roads.push(...n!.roads!), true));
+        const poi = this.poiPatch(c);
         task = {
           kind,
           cx: c.cx,
@@ -550,10 +552,12 @@ export class ChunkManager {
           streams,
           roads,
           plans: this.plansFor(c)!,
+          poi,
           pxSize: this.pxSize,
           dpr: Math.min(this.dpr, DPR_MAX),
         };
         transfer = [dem.buffer, water.buffer, cover.buffer, streams.buffer];
+        if (poi) transfer.push(poi.zE.buffer, poi.A.buffer, poi.lake.buffer, poi.rec.buffer, poi.R.buffer);
         break;
       }
     }
@@ -674,6 +678,29 @@ export class ChunkManager {
         p.zE[o] = own.hydro.zE[k];
         p.A[o] = own.hydro.A[k];
         p.lake[o] = own.hydro.lake[k];
+      }
+    return p;
+  }
+
+  /**
+   * Fine nodes round a chunk (± POI_PAD, each from its own chunk's solve) for its
+   * points of interest, with receivers and region as the DEM's streams read them.
+   * Undefined if a solve is missing (the chunks within two of it normally have theirs:
+   * their neighbours' roads needed them).
+   */
+  private poiPatch(c: Chunk): PoiPatch | undefined {
+    const w = NODES + 2 * POI_PAD;
+    const base = this.nodePatch(c.cx * NODES - POI_PAD, c.cy * NODES - POI_PAD, w, w);
+    if (!base) return undefined;
+    const p: PoiPatch = { ...base, rec: new Int8Array(w * w), R: new Float32Array(w * w) };
+    for (let j = 0; j < w; j++)
+      for (let i = 0; i < w; i++) {
+        const gx = p.gx + i;
+        const gy = p.gy + j;
+        const own = this.get(Math.floor(gx / NODES), Math.floor(gy / NODES))!;
+        if (!own.pre) return undefined;
+        p.rec[j * w + i] = own.hydro!.rec[(gy - (own.cy * NODES - CORE_PAD)) * CORE + (gx - (own.cx * NODES - CORE_PAD))];
+        p.R[j * w + i] = own.pre.R[(gy - own.cy * NODES) * NODES + (gx - own.cx * NODES)];
       }
     return p;
   }

@@ -4,7 +4,8 @@ import { nearestVertex, vertexPos } from '../src/gen/lattice';
 import { ROAD_C, ROAD_D, ROAD_T, type RoadClass, type RoadPatch, type SegmentPath } from '../src/gen/roads';
 import { HAMLET, TOWN, VILLAGE, type Rank, type Site } from '../src/gen/settle';
 import { PLAN_EXTENT, PLAN_MARGIN, planTown, ROAD_CLEAR, STREET_CLEAR, type PlanInput, type TownPlan } from '../src/gen/town';
-import { quadsOverlap, segQuadDist } from '../src/gen/buildings';
+import { quadsOverlap, segPointDist, segQuadDist } from '../src/gen/buildings';
+import { RESERVOIR, TOWER } from '../src/gen/poi';
 import { rng } from '../src/lib/hash';
 import { APRON, CELL, CHUNK, DEM_W } from '../src/lib/constants';
 import { COVER, COVER_FIELDS, COVER_SCALE } from '../src/gen/landcover';
@@ -357,5 +358,32 @@ describe('street plans', () => {
     }
     // On a steady 13 % slope, none.
     for (const i of [0, 1, 2]) expect(planTown(input(TOWN, i, 4)).industrial.some(Boolean), `steep town ${i}`).toBe(false);
+  });
+
+  it('give villages and towns a water tower (a reservoir in the mountains) on free ground near a way', () => {
+    let towers = 0;
+    let settlements = 0;
+    for (const { name, inp, plan } of plans) {
+      if (name.startsWith('hamlet')) {
+        expect(plan.pois, name).toEqual([]);
+        continue;
+      }
+      settlements++;
+      for (const t of plan.pois) {
+        expect(t.kind, name).toBe(inp.site.R >= 0.52 ? RESERVOIR : TOWER); // (in the mountains, a reservoir)
+        towers++;
+        const replaced = new Set(plan.replaced);
+        const ways = [...inp.roads.filter((r) => !replaced.has(r.key)), ...plan.roads, ...plan.streets].map((r) => r.xy);
+        let nearest = Infinity;
+        for (const xy of ways) for (let k = 2; k < xy.length; k += 2) nearest = Math.min(nearest, segPointDist(xy[k - 2], xy[k - 1], xy[k], xy[k + 1], t.x, t.y));
+        expect(nearest, name).toBeGreaterThanOrEqual(15);
+        expect(nearest, name).toBeLessThanOrEqual(100);
+        const b = plan.buildings;
+        for (let k = 0; k < b.length; k += 8) expect(segQuadDist(t.x, t.y, t.x, t.y, Array.from(b.subarray(k, k + 8))), name).toBeGreaterThanOrEqual(15);
+        expect(Math.hypot(t.x - inp.site.x, t.y - inp.site.y), name).toBeLessThanOrEqual(PLAN_EXTENT[inp.site.rank]);
+      }
+    }
+    console.log(`water towers: ${towers} in ${settlements} villages and towns`);
+    expect(towers).toBeGreaterThan(settlements / 2);
   });
 });

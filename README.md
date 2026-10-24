@@ -28,6 +28,7 @@ Dev tools:
 - `npx vite-node dev/detours.ts [R] [cells]` finds main-road detours in net cells alone and compares the direct lattice edge's cost with the detour's.
 - `npx vite-node dev/terraincmp.ts [areas] [R,R,…]` runs the pipeline on seeded areas and compares the coarse surface (what roads and settlements plan on) with the map's: heights and slopes over 256/512 m (with the best a 256 m sampling could do), height differences by drainage area, and the share of filled flats.
 - `npx vite-node dev/towns.ts [per region] [R,R,…]` runs the pipeline around villages (`TOWNS=1`: towns, `HAMLETS=1`: hamlets, `FARMS=1`: farmsteads, framed 260 m round each, with counts of the forms chosen and why buildings were refused) found with a world seed (`SEED=n`, same as `?seed=n`) and writes each one's street plan as SVG over the fine terrain, plus a sheet of all (`OUT=<prefix>`). `INPUTS=<file>` caches the plans' inputs, so the plans can be tuned without rerunning the pipeline.
+- `npx vite-node dev/pois.ts [km] [R,R,…]` runs the pipeline over a km × km area per region (`SEED=n`) and counts the points of interest each chunk draws (hilltop chapels and crosses, triangulation points, wayside crosses, springs, water towers, reservoirs) per km²; `LOG=1` lists them as `?at=` positions.
 - `npx vite-node dev/tilespread.ts [R,R,…]` measures how much overlapping coarse tiles disagree, by drainage area.
 
 Controls: drag or arrow keys/WASD to pan, pinch, ctrl/⌘+wheel, trackpad pinch or +/- to zoom (0.5×–2×).

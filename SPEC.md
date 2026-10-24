@@ -278,7 +278,18 @@ An edge used by several ways takes the highest class.
 
 ### 3.8 Point symbols
 
-Church (one per village, cathedral-sized in towns), chapel, wayside cross at junctions, watermill on streams, windmill in lowland, spot heights at summits and junctions, triangulation point on major summits, viewpoints, and power lines with pylons connecting towns via substations.
+*(As implemented in `src/gen/poi.ts`, drawn by `src/render/symbols.ts`.)*
+
+- **Church** at the centre of every village and town (§3.6).
+- **Decided per chunk, at render time**, from the fine nodes round the chunk (± 46 nodes, each from its own chunk's solve, with receivers and region: the values the DEM's streams read), the ways drawn in the 3 × 3 chunks round it and the plans drawing into it. A chunk decides every point within 16 m of it, each from data within 680 m of the point (nodes) or seen alike by every chunk near it (ways, the plans' buildings and streets), so a symbol straddling a border is drawn whole by both chunks (`test/poi.test.ts`). Fixed chances come from a hash of the node or place.
+  - **Hilltops:** a node higher than every node within 240 m (ties by hash), dry, standing at least 15 m above the mean of the ground 240 m round it, with no building within 20 m or street within 12 m. A *major summit* is also the highest within 640 m and 40 m above the ground 480 m round. On a hilltop: a **chapel** (20 % in lowland and hills, falling to 10 % in the mountains; not in alpine country, and only where a way passes within 120 m), else a **cross** (22 %, 20 % in the mountains; 55 % on a major summit from R = 0.52: summit crosses), else on a major summit a **triangulation point** (60 %).
+  - **Wayside crosses** (calvaries): at 20 % of junctions where three or more ways meet, one of them a road (N, D or C), in the widest gap between them, the ways' clearance (6 / 5 / 4 / 2.5 / 1.5 m by class) over the half-gap's sine plus 5 m out (at most 30 m), off water and built-up land (as hilltops). Crosses at village entrances are thus common.
+  - **Springs:** at stream heads (a node carrying a stream, by the DEM's threshold, that no stream flows into), from the hills up (R ≥ 0.25): 25 % rising to 50 % in alpine country.
+- **Decided by the plans** (§3.6): a **water tower** for every town and 75 % of villages, on the highest dry node from the old core (at least 60 m) out to the reach (and 40 m inside the extent), 15 m from every way and building and within 100 m of a way, off industrial estates; in the mountains (R ≥ 0.52) a **reservoir** (blue square) there instead, for 60 % of villages and towns.
+- **Symbols** (CSS px, ink as the church's): chapel, a 1.5 px open circle under a cross; cross, a Latin cross 6 px tall; triangulation point, a 5.6 px triangle with a dot; spring, a blue ring of 1.9 px with a dot; water tower, a 2.4 px ring round a dot; reservoir, a 3.4 px blue square. Drawn last, over the roads.
+- **Measured** (`dev/pois.ts`, seed 1, 9.4 km² per region): lowland 0.95 crosses, 0.11 chapels, 0.11 triangulation points, 0.21 water towers per km²; hills 0.64 crosses, 0.21 chapels, 0.53 springs; mountains 0.64 crosses, 0.21 triangulation points, 0.95 springs.
+
+**Planned:** cemeteries beside villages, watermills on streams, windmills in the lowlands, caves at the foot of cliffs, ruins on hilltops, viewpoints, wind turbines on open ridges, spot heights (they need text, which the map doesn't draw), and power lines with pylons connecting towns via substations.
 
 ## 4. Rendering (IGN Top25 adapted to 1:10k)
 

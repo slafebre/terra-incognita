@@ -126,7 +126,7 @@ export function planFarm({ site, roads, patch: p }: PlanInput): TownPlan {
   // --- Where the farmstead stands -------------------------------------------------------
   const sorted = [...roads].sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
   const [vx, vy] = vertexPos(nearestVertex(site.x, site.y));
-  const empty: TownPlan = { id: site.id, rank: FARM, x: vx, y: vy, streets: [], replaced: [], roads: [], frontage: [], buildings: new Float32Array(0), industrial: new Uint8Array(0) };
+  const empty: TownPlan = { id: site.id, rank: FARM, x: vx, y: vy, streets: [], replaced: [], roads: [], frontage: [], buildings: new Float32Array(0), industrial: new Uint8Array(0), pois: [] };
   // A farm the fine terrain puts in a lake isn't there: the network can't see those
   // lakes, and its roads stop at the shore (a drowned vertex is snapped onto it).
   if (wet(vx, vy)) return note('in a lake'), empty;
