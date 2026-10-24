@@ -23,7 +23,7 @@ const task = (cls: RoadClass, ax: number, ay: number, bx: number, by: number, ex
   ay,
   bx,
   by,
-  room: Infinity,
+  room: [300, 300],
   obstacles: [],
   ...extra,
 });
