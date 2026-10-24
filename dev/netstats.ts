@@ -1,26 +1,30 @@
 // Dev tool: road network statistics per net cell (no fine routing).
 //   npx vite-node dev/netstats.ts [cells per region] [R,R,...]
+// SEED=n picks the cells and seeds the world reproducibly (to compare changes).
 import { CoarseField } from '../src/gen/hydro';
 import { latticeCell } from '../src/gen/lattice';
 import { NET_CELL, NET_REACH, ROAD_C, ROAD_D, ROAD_N } from '../src/gen/roads';
 import { SeedStore, SeedView } from '../src/gen/seeds';
 import { Settlements } from '../src/gen/settle';
 import { setRegionOverride, Terrain } from '../src/gen/terrain';
+import { rng } from '../src/lib/hash';
 
-declare const process: { argv: string[] };
+declare const process: { argv: string[]; env: Record<string, string | undefined> };
 
 const CELLS = Number(process.argv[2] ?? 3);
 const REGIONS = (process.argv[3] ?? '0.2,0.35,0.5').split(',').map(Number);
+const SEED = process.env.SEED === undefined ? undefined : Number(process.env.SEED);
 
 for (const R of REGIONS) {
   setRegionOverride(R);
+  const pick = SEED === undefined ? Math.random : rng(SEED * 31 + Math.round(R * 1000));
   let ms = 0, sites = 0;
   const km = [0, 0, 0, 0, 0];
   for (let n = 0; n < CELLS; n++) {
-    const gx = Math.round((Math.random() - 0.5) * 200);
-    const gy = Math.round((Math.random() - 0.5) * 200);
+    const gx = Math.round((pick() - 0.5) * 200);
+    const gy = Math.round((pick() - 0.5) * 200);
     const x0 = gx * NET_CELL, y0 = gy * NET_CELL;
-    const store = new SeedStore();
+    const store = new SeedStore(SEED);
     const c = { x0: x0 - NET_REACH, y0: y0 - NET_REACH, x1: x0 + NET_CELL + NET_REACH, y1: y0 + NET_CELL + NET_REACH };
     const view = new SeedView(store.payloadFor({ x0, y0, x1: x0 + 16, y1: y0 + 16 }, c));
     const t = new Terrain(view);

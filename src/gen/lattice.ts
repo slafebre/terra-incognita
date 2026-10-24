@@ -45,13 +45,16 @@ import type { Terrain } from './terrain';
  *  4. Shortcuts: neighbouring settlements that the roads so far join only by a long
  *     way round get a direct minor road, or a footpath where a road would be too steep.
  *  5. Farm roads: grown like hamlet roads, from all roads so far.
- *  6. Tracks: scattered points far from any road get a track back to the network,
+ *  6. Links: neighbouring settlements, farms included, that the roads join only by
+ *     a long way round get a track, or a footpath where a track would be too steep.
+ *  7. Tracks: scattered points far from any road get a track back to the network,
  *     grown as one forest so nearby tracks merge.
  *
  * Output: every used lattice edge, owned by the cell holding its midpoint. Geometry
  * comes later (routeCurves): one smooth curve per edge, through the two vertices,
  * with directions at each vertex shared by the roads that continue through it, then
- * shifted up to 32 m sideways to fit the fine terrain.
+ * shifted up to 32 m sideways to fit the fine terrain. Tracks and footpaths are
+ * drawn as straight runs instead, a few edges at a time, bent to an easy grade.
  */
 
 export const LATTICE = 150;
@@ -85,6 +88,23 @@ const SHORT_RATIO = 2;
 const SHORT_DETOUR = 1.6;
 const SHORT_STEEP = 1.3;
 const SHORT_EXTRA = 400;
+/** A footpath (shortcut or link) may wind this much more: across a slope it follows the contours. */
+const PATH_DETOUR = 1.4;
+/** Links: as shortcuts, between any neighbouring settlements (farms included), as a
+ * track or else a footpath. */
+const LINK_MIN = 250;
+const LINK_MAX = 1200;
+const LINK_RATIO = 1.8;
+const LINK_DETOUR = 1.5;
+const LINK_EXTRA = 400;
+/** How far (m) a link's path may stray from its midpoint: half its corridor's |pa| + |pb|. */
+const LINK_HALF = (CORRIDOR * LINK_MAX + LINK_EXTRA) / 2;
+/**
+ * Grade a class would rather keep to (slope penalties of the network and of the fine
+ * routing): the limit itself for roads; tracks and footpaths, driven and walked slowly,
+ * traverse a slope along its contours rather than climb it straight.
+ */
+const EASY_GRADE = [MAX_GRADE[ROAD_N], MAX_GRADE[ROAD_D], MAX_GRADE[ROAD_C], 0.1, 0.18];
 /** Tracks: share of vertices that want one, if no road within TRACK_GAP (m); not above
  * TRACK_ALT (m), nor where every way out is steeper than TRACK_STEEP; reach (m). */
 const TRACK_DENSITY = 0.14;
@@ -92,6 +112,8 @@ const TRACK_GAP = 200;
 const TRACK_ALT = 2300;
 const TRACK_STEEP = 0.5;
 const TRACK_REACH = 1200;
+/** A track (or track link) whose way averages a slope penalty above this (× length) is left out. */
+const TRACK_STEEPNESS = 6;
 /** On ground steeper than TRACK_SPACE_SLOPE (500 m baseline), track seeds keep TRACK_SPACE (m) apart. */
 const TRACK_SPACE = 300;
 const TRACK_SPACE_SLOPE = 0.15;
@@ -224,12 +246,13 @@ function edgeCost(field: CoarseField, u: number, v: number, cls: RoadClass): num
  * Coarse terrain along edge u–v. The coarse surface does not predict the map's
  * slopes at the scale of one edge (the detailed erosion that makes them only runs
  * near the view), so steepness is judged over a longer baseline: the slope along
- * the edge's direction across SLOPE_BASE m around its middle. Plus whether it
- * crosses a stream (much more drainage under its middle than at its ends).
+ * the edge's direction across SLOPE_BASE m around its middle; also between its own
+ * vertices (`local`). Plus whether it crosses a stream (much more drainage under its
+ * middle than at its ends).
  */
 const SLOPE_BASE = 500;
-const terrainCache = new WeakMap<CoarseField, Map<number, { grade: number; stream: number }>>();
-function edgeTerrain(field: CoarseField, u: number, v: number): { grade: number; stream: number } {
+const terrainCache = new WeakMap<CoarseField, Map<number, { grade: number; local: number; stream: number }>>();
+function edgeTerrain(field: CoarseField, u: number, v: number): { grade: number; local: number; stream: number } {
   let m = terrainCache.get(field);
   if (!m) terrainCache.set(field, (m = new Map()));
   const lo = Math.min(u, v);
@@ -246,6 +269,7 @@ function edgeTerrain(field: CoarseField, u: number, v: number): { grade: number;
   const mid = field.area(mx, my);
   r = {
     grade: Math.abs(field.z(mx + dx, my + dy) - field.z(mx - dx, my - dy)) / SLOPE_BASE,
+    local: Math.abs(b.z - a.z) / len,
     stream: mid > 2 * Math.max(a.area, b.area) ? mid : 0,
   };
   m.set(key, r);
@@ -255,9 +279,23 @@ function edgeTerrain(field: CoarseField, u: number, v: number): { grade: number;
 function edgeGrade(field: CoarseField, u: number, v: number): number {
   return edgeTerrain(field, u, v).grade;
 }
-/** Slope penalty weight and cap (× length): soft — at this scale it is only a tendency. */
+/**
+ * The gradient class `cls` sees on edge u–v: tracks and footpaths also the slope
+ * between the edge's own vertices — the long baseline, reaching across a valley
+ * floor, reads a valley side as gentle.
+ */
+function classGrade(field: CoarseField, u: number, v: number, cls: RoadClass): number {
+  const t = edgeTerrain(field, u, v);
+  return cls >= ROAD_T ? Math.max(t.grade, t.local) : t.grade;
+}
+/**
+ * Slope penalty weight and cap (× length) by class: soft — at this scale it is only a
+ * tendency. Tracks and footpaths are capped much higher: under a low cap, an edge
+ * steeper still costs less per metre of height, and they ran straight down the slope
+ * instead of across it.
+ */
 const SLOPE_W = 1.5;
-const SLOPE_CAP = 6;
+const SLOPE_CAP = [6, 6, 6, 30, 12];
 /** Crossing a stream draining more than BRIDGE_AREA km² costs a bridge (m), more for a river. */
 const BRIDGE_AREA = 1;
 const BRIDGE_COST = 40;
@@ -270,8 +308,9 @@ function edgeCostRaw(field: CoarseField, u: number, v: number, cls: RoadClass): 
   const a = vdata(field, u);
   const b = vdata(field, v);
   const len = Math.hypot(b.x - a.x, b.y - a.y);
-  const { grade: g, stream } = edgeTerrain(field, u, v);
-  let c = len * Math.min(SLOPE_CAP, 1 + SLOPE_W * (g / MAX_GRADE[cls]) ** 2);
+  const { stream } = edgeTerrain(field, u, v);
+  const g = classGrade(field, u, v, cls);
+  let c = len * Math.min(SLOPE_CAP[cls], 1 + SLOPE_W * (g / EASY_GRADE[cls]) ** 2);
   if (stream > BRIDGE_AREA) c += BRIDGE_COST * (1 + Math.log10(stream / BRIDGE_AREA));
   c *= 1 - (VALLEY_BONUS * (a.valley + b.valley)) / 2;
   // Water under the edge (after the valley discount: lakes lie on valley floors).
@@ -305,10 +344,13 @@ export function latticeCell(gx: number, gy: number, field: CoarseField, set: Set
   // Regions (margins around the cell): farm roads that may pass through the cell,
   // the hamlet roads they grow from, the main roads those grow from.
   // Each stage grows from the previous one, so each needs the previous known a bit
-  // further out: tracks that may cross the cell, the roads they grow from, farm
-  // roads, the shortcuts and hamlet roads those grow from, the main roads below.
+  // further out: tracks that may cross the cell, the roads and links they grow from
+  // (and keep away from), the farm roads that decide the links, the shortcuts and
+  // hamlet roads those grow from, the main roads below.
   const trackM = TRACK_REACH;
-  const farmM = trackM + TRACK_REACH;
+  const trackForestM = trackM + TRACK_REACH;
+  const linkM = trackForestM + LINK_HALF;
+  const farmM = linkM + (LINK_RATIO * LINK_MAX) / 2;
   const farmForestM = farmM + FARM_REACH;
   const shortM = farmForestM + SHORT_MAX / 2;
   const hamletM = shortM + (SHORT_RATIO * SHORT_MAX) / 2;
@@ -589,6 +631,17 @@ export function latticeCell(gx: number, gy: number, field: CoarseField, set: Set
     const vs = way(from);
     for (let i = 1; i < vs.length; i++) use(vs[i - 1], vs[i], k);
   };
+  /** Mean slope penalty of a class along a path (edges as vertex pairs), × length. */
+  const steepness = (edges: [number, number][], k: RoadClass) => {
+    let L = 0;
+    let c = 0;
+    for (const [u, v] of edges) {
+      const l = dist(pos(u), pos(v));
+      L += l;
+      c += l * Math.min(SLOPE_CAP[k], 1 + SLOPE_W * (classGrade(field, u, v, k) / EASY_GRADE[k]) ** 2);
+    }
+    return L > 0 ? c / L : 1;
+  };
 
   // 3. Hamlet roads.
   const tvNear = tv.filter((s) => inBox(s, hamletForestM));
@@ -597,11 +650,14 @@ export function latticeCell(gx: number, gy: number, field: CoarseField, set: Set
   const pA = forest(roadVertices(tvNear), hamletForestM, HAMLET_REACH * COST_CAP, ROAD_C, hv);
   for (const v of hv) follow(pA, v, ROAD_C);
 
-  // 4. Shortcuts: neighbouring settlements (Gabriel pairs) that the roads so far
-  // join only by a long way round get a direct minor road — or, where that would
-  // be too steep, a footpath. Decided on main and hamlet roads only, never on other
-  // shortcuts, so every cell decides each pair alike.
-  {
+  /**
+   * Shortcuts between neighbouring sites (Gabriel pairs min–max apart, midpoint within
+   * margin m) that the ways so far join only by a way round longer than `ratio` × their
+   * distance: the corridor path of the first of `classes` that is no longer than
+   * `detour` × the distance nor steeper than SHORT_STEEP × its limit. Decided on the
+   * ways so far only, never on each other, so every cell decides each pair alike.
+   */
+  const shortcuts = (sites: Site[], m: number, min: number, max: number, ratio: number, detour: number, extra: number, classes: RoadClass[]) => {
     const adj = new Map<number, [number, number][]>();
     for (const e of cls.values()) {
       const L = dist(pos(e.u), pos(e.v));
@@ -632,31 +688,39 @@ export function latticeCell(gx: number, gy: number, field: CoarseField, set: Set
       }
       return Infinity;
     };
-    const settled = [...tv.filter((s) => inBox(s, shortM + SHORT_MAX / 2)), ...hamlets.filter((s) => inBox(s, shortM + SHORT_MAX / 2))];
-    const grid = new Grid(settled, 1024);
+    const grid = new Grid(sites, 1024);
     const added: [number, number, RoadClass][] = [];
-    for (const a of settled)
-      for (const b of grid.near(a.x, a.y, SHORT_MAX)) {
+    for (const a of sites)
+      for (const b of grid.near(a.x, a.y, max)) {
         if (a.id >= b.id) continue;
         const d = dist(a, b);
-        if (d < SHORT_MIN || !inBox({ x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 }, shortM)) continue;
+        if (d < min || !inBox({ x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 }, m)) continue;
         const mx = (a.x + b.x) / 2;
         const my = (a.y + b.y) / 2;
         if (grid.near(mx, my, d / 2 - 1e-6).some((c) => c !== a && c !== b)) continue; // Gabriel
         const va = nearestVertex(a.x, a.y);
         const vb = nearestVertex(b.x, b.y);
-        if (netDist(va, vb, SHORT_RATIO * d) <= SHORT_RATIO * d) continue;
-        for (const k of [ROAD_C, ROAD_P] as RoadClass[]) {
-          const p = corridorPath(k, a, b, SHORT_EXTRA);
+        if (va === vb || netDist(va, vb, ratio * d) <= ratio * d) continue;
+        for (const k of classes) {
+          const p = corridorPath(k, a, b, extra);
           if (!p) continue;
           const len = p.reduce((s, [u, v]) => s + dist(pos(u), pos(v)), 0);
-          const steep = p.some(([u, v]) => edgeGrade(field, u, v) > SHORT_STEEP * MAX_GRADE[k]);
-          if (len > SHORT_DETOUR * d || steep) continue;
+          const steep = p.some(([u, v]) => classGrade(field, u, v, k) > SHORT_STEEP * MAX_GRADE[k]);
+          if (len > detour * (k === ROAD_P ? PATH_DETOUR : 1) * d || steep || (k === ROAD_T && steepness(p, k) > TRACK_STEEPNESS)) continue;
           for (const [u, v] of p) added.push([u, v, k]);
           break;
         }
       }
-    for (const [u, v, k] of added) use(u, v, k);
+    return added;
+  };
+
+  // 4. Shortcuts: neighbouring settlements (Gabriel pairs) that the roads so far
+  // join only by a long way round get a direct minor road — or, where that would
+  // be too steep, a footpath. Decided on main and hamlet roads only, never on other
+  // shortcuts, so every cell decides each pair alike.
+  {
+    const settled = [...tv.filter((s) => inBox(s, shortM + SHORT_MAX / 2)), ...hamlets.filter((s) => inBox(s, shortM + SHORT_MAX / 2))];
+    for (const [u, v, k] of shortcuts(settled, shortM, SHORT_MIN, SHORT_MAX, SHORT_RATIO, SHORT_DETOUR, SHORT_EXTRA, [ROAD_C, ROAD_P])) use(u, v, k);
   }
 
   // 5. Farm roads.
@@ -665,11 +729,32 @@ export function latticeCell(gx: number, gy: number, field: CoarseField, set: Set
   const pB = forest(roadVertices([...tvNear, ...hamlets]), farmForestM, FARM_REACH * COST_CAP, ROAD_C, fv);
   for (const v of fv) follow(pB, v, ROAD_C);
 
-  // 6. Tracks: scattered points of open land and forest far from any road get a
-  // track back to the network, grown as one forest so nearby tracks merge.
+  // 6. Links: neighbouring settlements, farms included, joined by the roads only the
+  // long way round get a track across — or a footpath where a track would be too
+  // steep. Farmland is crossed by a mesh of tracks, not only the trees of farm roads.
+  const links = new Map<string, { u: number; v: number; c: RoadClass }>();
   {
+    const near = (s: Site) => inBox(s, linkM + LINK_MAX / 2);
+    const all = [...tv.filter(near), ...hamlets.filter(near), ...farms.filter(near)];
+    for (const [u, v, k] of shortcuts(all, linkM, LINK_MIN, LINK_MAX, LINK_RATIO, LINK_DETOUR, LINK_EXTRA, [ROAD_T, ROAD_P])) {
+      const key = edgeKey(u, v);
+      const e = links.get(key);
+      if (!e || k < e.c) links.set(key, { u, v, c: k });
+    }
+  }
+
+  // 7. Tracks: scattered points of open land and forest far from any road get a
+  // track back to the network (or a track link), grown as one forest so nearby
+  // tracks merge.
+  {
+    const linkVerts = new Set<number>();
+    const trackLinks = new Set<number>();
+    for (const e of links.values()) {
+      linkVerts.add(e.u).add(e.v);
+      if (e.c === ROAD_T) trackLinks.add(e.u).add(e.v);
+    }
     const roadPts = new Grid(
-      [...roadVertices([])].map((v) => pos(v)),
+      [...roadVertices([]), ...linkVerts].map((v) => pos(v)),
       512,
     );
     // Candidates TRACK_SPACE beyond the seeds' box, so every cell spaces a seed alike.
@@ -699,9 +784,16 @@ export function latticeCell(gx: number, gy: number, field: CoarseField, set: Set
       if (c.slope > TRACK_SPACE_SLOPE && candGrid.near(c.x, c.y, TRACK_SPACE).some((o) => o !== c && o.h < c.h && Math.hypot(o.x - c.x, o.y - c.y) < TRACK_SPACE)) continue;
       seeds.push(c.v);
     }
-    const pT = forest(roadVertices([]), farmM, TRACK_REACH * COST_CAP, ROAD_T, seeds);
-    for (const v of seeds) follow(pT, v, ROAD_T);
+    const pT = forest(new Set([...roadVertices([]), ...trackLinks]), trackForestM, TRACK_REACH * COST_CAP, ROAD_T, seeds);
+    for (const v of seeds) {
+      // A track that would have to run down a steep slope (the way back to the network
+      // offers no gentler line) is left out: mountain slopes keep few tracks.
+      const vs = pT(v);
+      const edges = vs.slice(1).map((w, i): [number, number] => [vs[i], w]);
+      if (steepness(edges, ROAD_T) <= TRACK_STEEPNESS) follow(pT, v, ROAD_T);
+    }
   }
+  for (const e of links.values()) use(e.u, e.v, e.c);
 
   // Owned edges: midpoint in the cell.
   const edges: RoadEdge[] = [];
@@ -1085,7 +1177,8 @@ export function routeCurves(tasks: SegmentTask[], p: RoadPatch): SegmentPath[] {
     }
     const m = 48;
     if (x0 - m < p.gx * NODE || y0 - m < p.gy * NODE || x1 + m > (p.gx + w - 1) * NODE || y1 + m > (p.gy + h - 1) * NODE) return true;
-    return !!serpentineFrame(r.pts, MAX_GRADE[r.cls], zAt) || wetLength(r.pts) > 0;
+    // Tracks and footpaths are routed where too steep for their easy grade.
+    return (r.cls >= ROAD_T ? !!serpentineFrame(r.pts, EASY_GRADE[r.cls], zAt, true) : !!serpentineFrame(r.pts, MAX_GRADE[r.cls], zAt)) || wetLength(r.pts) > 0;
   };
   const routed = (
     key: string,
@@ -1185,6 +1278,22 @@ export function routeCurves(tasks: SegmentTask[], p: RoadPatch): SegmentPath[] {
   };
   const out: SegmentPath[] = [];
   for (const t of tasks) {
+    // Tracks and footpaths: drawn a piece at a time (or an edge with no piece) by the
+    // chunk owning its middle edge — straight from end to end, fitted to an easy grade,
+    // so they run straight across flat land and bend with the contours on a slope.
+    // Where that is too steep, wet or too close to another way: routed.
+    if (t.cls >= ROAD_T) {
+      const pc = t.piece ?? { key: t.key, pts: [t.ax, t.ay, t.bx, t.by], owner: true, pa: t.pa, pb: t.pb, rivals: t.rivals, obstacles: t.obstacles, wedges: t.wedges, spurA: t.spurA, spurB: t.spurB };
+      const dA = drowned(pc.spurA);
+      const dB = drowned(pc.spurB);
+      if ((dA || dB) && drowned(pc.pts)) continue;
+      if (!pc.owner) continue;
+      const g =
+        (!serpentineFrame(pc.pts, EASY_GRADE[t.cls], zAt, true) && chordsOf(pc.key, t.cls, pc.pts, pc.pa, pc.pb, pc.rivals, pc.obstacles, pc.wedges, dA, dB)) ||
+        routed(pc.key, t.cls, pc.pts, pc.pa, pc.pb, pc.rivals, pc.obstacles, pc.wedges, dA, dB);
+      out.push(...drawn(g, dA, dB));
+      continue;
+    }
     // A piece too steep for its class, or crossing a lake: drawn once, routed on the
     // fine terrain, by the chunk owning its middle edge.
     if (t.piece) {
@@ -1208,6 +1317,108 @@ export function routeCurves(tasks: SegmentTask[], p: RoadPatch): SegmentPath[] {
     out.push(...drawn(g, dA, dB));
   }
   return out;
+
+  /**
+   * A track or footpath piece drawn as straight runs, each shifted sideways to keep an
+   * easy, even grade (along the contours): from end to end where that line stays in
+   * the room the piece may use (see roomOf), else broken at one or more of its
+   * vertices — down to each edge on its own, which keeps to the lattice as closely as
+   * a curve would. Null where a run has water under it.
+   */
+  function chordsOf(
+    key: string,
+    cls: RoadClass,
+    pts: number[],
+    pa: [number, number] | undefined,
+    pb: [number, number] | undefined,
+    rivals: Rival[],
+    obstacles: number[],
+    wedges: number[],
+    rawA: boolean,
+    rawB: boolean,
+  ): SegmentPath | null {
+    const n = pts.length / 2;
+    const near = rivals.map((r) => ({ ...r, active: active(r) }));
+    /** Do other ways meet the piece at its end e (0: first, 1: last)? Its wedge there is then narrower than all round. */
+    const junction = (e: number) => wedges.length >= 2 * WEDGE && Math.min(wedges[e * WEDGE + 3], wedges[e * WEDGE + 4]) < Math.PI - 1e-6;
+    const end = (i: number) => (i === 0 && rawA) || (i === n - 1 && rawB) ? [pts[2 * i], pts[2 * i + 1]] : snap(pts[2 * i], pts[2 * i + 1]);
+    /** The run from vertex i to vertex j, fitted; null if wet, or (unless `force`) out of room. */
+    const run = (i: number, j: number, force: boolean): number[] | null => {
+      const own = pts.slice(2 * i, 2 * j + 2);
+      // The road's direction beyond the run's ends, for roomOf.
+      const inDir = i > 0 ? [pts[2 * i + 2] - pts[2 * i - 2], pts[2 * i + 3] - pts[2 * i - 1]] : pa ? [pts[2] - pa[0], pts[3] - pa[1]] : [pts[2] - pts[0], pts[3] - pts[1]];
+      const outDir =
+        j < n - 1
+          ? [pts[2 * j + 2] - pts[2 * j - 2], pts[2 * j + 3] - pts[2 * j - 1]]
+          : pb
+            ? [pb[0] - pts[2 * n - 4], pb[1] - pts[2 * n - 3]]
+            : [pts[2 * n - 2] - pts[2 * n - 4], pts[2 * n - 1] - pts[2 * n - 3]];
+      // Wedges only at the piece's own ends (inside it, the road just goes on).
+      const wd = wedges.length >= 2 * WEDGE ? [...(i === 0 ? wedges.slice(0, WEDGE) : []), ...(j === n - 1 ? wedges.slice(WEDGE) : [])] : [];
+      const [ax, ay] = end(i);
+      const [bx, by] = end(j);
+      // At a junction, leave along the edge (nearly): skewed, the run could graze the
+      // way it meets there.
+      if (!force) {
+        const skew = (px: number, py: number, qx: number, qy: number, rx: number, ry: number) =>
+          Math.acos(Math.max(-1, Math.min(1, ((qx - px) * (rx - px) + (qy - py) * (ry - py)) / (Math.hypot(qx - px, qy - py) * Math.hypot(rx - px, ry - py) || 1))));
+        if (i === 0 && junction(0) && skew(pts[0], pts[1], pts[2], pts[3], pts[2 * j], pts[2 * j + 1]) > CHORD_SKEW) return null;
+        if (j === n - 1 && junction(1) && skew(pts[2 * j], pts[2 * j + 1], pts[2 * j - 2], pts[2 * j - 1], pts[2 * i], pts[2 * i + 1]) > CHORD_SKEW) return null;
+      }
+      const xy = chordOf(ax, ay, bx, by, cls, force ? null : roomOf(ax, ay, bx, by, inDir, outDir, obstacles, own, near, cls, wd));
+      return xy;
+    };
+    // Breaks: none; then each single vertex; then every vertex.
+    const tries: number[][] = [[]];
+    for (let k = 1; k < n - 1; k++) tries.push([k]);
+    if (n > 3) tries.push(Array.from({ length: n - 2 }, (_, k) => k + 1));
+    for (let ti = 0; ti < tries.length; ti++) {
+      const cuts = [0, ...tries[ti], n - 1];
+      const last = ti === tries.length - 1;
+      const out: number[] = [];
+      let ok = true;
+      for (let c = 1; c < cuts.length && ok; c++) {
+        // Single edges are always allowed: they keep to the lattice.
+        const r = run(cuts[c - 1], cuts[c], last || cuts[c] - cuts[c - 1] === 1);
+        if (!r) ok = false;
+        else out.push(...(out.length ? r.slice(2) : r));
+      }
+      if (ok) return { key, cls, xy: Float32Array.from(out) };
+      if (last) return null;
+    }
+    return null;
+  }
+
+  /**
+   * A straight run from A to B, shifted sideways to keep an easy, even grade; null if
+   * it has water under it or (with `room`) leaves it.
+   */
+  function chordOf(ax: number, ay: number, bx: number, by: number, cls: RoadClass, room: ((x: number, y: number) => boolean) | null): number[] | null {
+    const len = Math.hypot(bx - ax, by - ay);
+    if (len < 1) return [ax, ay, bx, by];
+    const m = Math.max(2, Math.ceil(len / FIT_STEP));
+    const xs: number[] = [];
+    const ys: number[] = [];
+    for (let s = 0; s <= m; s++) {
+      xs.push(ax + ((bx - ax) * s) / m);
+      ys.push(ay + ((by - ay) * s) / m);
+    }
+    fitToTerrain(xs, ys, MAX_GRADE[cls], zAt, wetCost, EASY_GRADE[cls]);
+    const xy: number[] = [];
+    for (let s = 0; s <= m; s++) xy.push(xs[s], ys[s]);
+    if (wetLength(xy) > 0) return null;
+    if (room) for (let s = 1; s < m; s++) if (!room(xs[s], ys[s])) return null;
+    return xy;
+  }
+
+  /** Fitting penalty at world (x, y): in a lake, beside one, on a stream bed. */
+  function wetCost(x: number, y: number): number {
+    const i = Math.round(x / NODE) - p.gx;
+    const j = Math.round(y / NODE) - p.gy;
+    if (i < 0 || j < 0 || i >= w || j >= h) return 0;
+    const k = j * w + i;
+    return isLake(k) ? FIT_WATER : onShore(i, j) ? FIT_SHORE : p.A[k] > 1 ? FIT_STREAM : 0;
+  }
 
   function curveOf(t: SegmentTask, rawA = false, rawB = false): SegmentPath {
     const [ax, ay] = rawA ? [t.ax, t.ay] : snap(t.ax, t.ay);
@@ -1241,13 +1452,7 @@ export function routeCurves(tasks: SegmentTask[], p: RoadPatch): SegmentPath[] {
       xs.push(h00 * ax + h10 * t0x + h01 * bx + h11 * t1x);
       ys.push(h00 * ay + h10 * t0y + h01 * by + h11 * t1y);
     }
-    fitToTerrain(xs, ys, MAX_GRADE[t.cls], zAt, (x, y) => {
-      const i = Math.round(x / NODE) - p.gx;
-      const j = Math.round(y / NODE) - p.gy;
-      if (i < 0 || j < 0 || i >= w || j >= h) return 0;
-      const k = j * w + i;
-      return isLake(k) ? FIT_WATER : onShore(i, j) ? FIT_SHORE : p.A[k] > 1 ? FIT_STREAM : 0;
-    });
+    fitToTerrain(xs, ys, MAX_GRADE[t.cls], zAt, wetCost);
     const xy = new Float32Array(2 * (n + 1));
     for (let s = 0; s <= n; s++) {
       xy[2 * s] = xs[s];
@@ -1265,12 +1470,14 @@ const SERP_UPHILL = 0.5;
  * Whether a piece (vertices `pts`) is too steep for `gmax` on the fine terrain, and if
  * so its frame: e1 along the contour, e2 across it towards the piece's end. Uses
  * only the piece's own vertices and terrain inside it, so every chunk that sees the
- * piece decides alike.
+ * piece decides alike. A piece running mostly along the contours doesn't count,
+ * unless `anyWay`.
  */
 function serpentineFrame(
   pts: number[],
   gmax: number,
   zAt: (x: number, y: number) => number,
+  anyWay = false,
 ): { e1: [number, number]; e2: [number, number] } | null {
   const n = pts.length / 2;
   const ax = pts[0];
@@ -1295,7 +1502,7 @@ function serpentineFrame(
   let e2: [number, number] = [gx / G, gy / G];
   if ((bx - ax) * e2[0] + (by - ay) * e2[1] < 0) e2 = [-e2[0], -e2[1]];
   const L = Math.hypot(bx - ax, by - ay);
-  if ((bx - ax) * e2[0] + (by - ay) * e2[1] < SERP_UPHILL * L) return null; // mostly along the contour
+  if (!anyWay && (bx - ax) * e2[0] + (by - ay) * e2[1] < SERP_UPHILL * L) return null; // mostly along the contour
   return { e1: [-e2[1], e2[0]], e2 };
 }
 
@@ -1312,6 +1519,14 @@ const FIT_STREAM = 6;
 const FIT_GRADE = 4;
 const FIT_SMOOTH = 8;
 const FIT_SHIFT = 2;
+/**
+ * Tracks and footpaths, fitted to an easy grade: weight of the grade against it (per m,
+ * besides the length itself), and the band (m), widening over FIT_RAMP m from each
+ * end (from nothing, and leaving the ends straight on) — room to bend with the contours.
+ */
+const FIT_EASY = 3;
+const FIT_EASY_BAND = 64;
+const FIT_RAMP = 120;
 
 /**
  * Fits a drawn edge to the fine terrain: each interior sample may move sideways
@@ -1328,10 +1543,12 @@ function fitToTerrain(
   gmax: number,
   zAt: (x: number, y: number) => number,
   wet: (x: number, y: number) => number,
+  easy?: number,
 ): void {
   const n = xs.length - 1;
   if (n < 3) return;
-  const K = Math.round(FIT_BAND / FIT_OFFSET);
+  const B = easy ? FIT_EASY_BAND : FIT_BAND;
+  const K = Math.round(B / FIT_OFFSET);
   const offs: number[] = [];
   for (let k = -K; k <= K; k++) offs.push(k * FIT_OFFSET);
   const O = offs.length;
@@ -1345,7 +1562,7 @@ function fitToTerrain(
     const L = Math.hypot(dx, dy) || 1;
     nx.push(-dy / L);
     ny.push(dx / L);
-    band.push(FIT_BAND * Math.sin((Math.PI * s) / n) ** 2);
+    band.push(easy ? B * Math.sin((Math.PI / 2) * Math.min(1, (FIT_STEP * Math.min(s, n - s)) / FIT_RAMP)) ** 2 : B * Math.sin((Math.PI * s) / n) ** 2);
   }
   const px = (s: number, o: number) => xs[s] + offs[o] * nx[s];
   const py = (s: number, o: number) => ys[s] + offs[o] * ny[s];
@@ -1357,7 +1574,7 @@ function fitToTerrain(
     for (let o = 0; o < O; o++) {
       const ok = Math.abs(offs[o]) <= band[s] + 1e-6;
       z[s].push(ok ? zAt(px(s, o), py(s, o)) : NaN);
-      node[s].push(ok ? wet(px(s, o), py(s, o)) + FIT_SHIFT * (offs[o] / FIT_BAND) ** 2 : Infinity);
+      node[s].push(ok ? wet(px(s, o), py(s, o)) + FIT_SHIFT * (offs[o] / B) ** 2 : Infinity);
     }
   }
   const cost: number[][] = [node[0].slice()];
@@ -1370,8 +1587,14 @@ function fitToTerrain(
       for (let q = 0; q < O; q++) {
         if (cost[s - 1][q] === Infinity) continue;
         const ds = Math.hypot(px(s, o) - px(s - 1, q), py(s, o) - py(s - 1, q)) || 1;
-        const over = Math.max(0, Math.abs(z[s][o] - z[s - 1][q]) / ds - gmax) / gmax;
-        const v = cost[s - 1][q] + node[s][o] + ds * FIT_GRADE * over * over + (FIT_SMOOTH * (offs[o] - offs[q]) ** 2) / ds;
+        const g = Math.abs(z[s][o] - z[s - 1][q]) / ds;
+        const over = Math.max(0, g - gmax) / gmax;
+        const v =
+          cost[s - 1][q] +
+          node[s][o] +
+          ds * FIT_GRADE * over * over +
+          (easy ? ds * (1 + FIT_EASY * (g / easy) ** 2) : 0) +
+          (FIT_SMOOTH * (offs[o] - offs[q]) ** 2) / ds;
         if (v < c[o]) {
           c[o] = v;
           f[o] = q;
@@ -1425,6 +1648,9 @@ const MICRO_JUNCTION = 12;
  */
 const MICRO_TURN = [60, 45, 25, 15, 6];
 const MICRO_STEEP = 25;
+/** Weight of the grade (against the class's easy grade) per m: tracks and footpaths would
+ * rather zig-zag than climb straight. */
+const MICRO_GRADE_W = [0.5, 0.5, 0.5, 1.5, 1.5];
 const MICRO_ENDS = 20;
 const MICRO_STREAM = 15;
 /** Water: per m of lake (a bridge or causeway), plus per crossing; per m on a dry node beside a lake. */
@@ -1442,6 +1668,11 @@ const DY16 = [0, 1, 1, 2, 1, 2, 1, 1, 0, -1, -1, -2, -1, -2, -1, -1];
 const MDIST16 = DX16.map((dx, i) => Math.hypot(dx, DY16[i]) * NODE);
 /** Largest radius (m) of a bend on a fine-routed piece, by class: hairpins are tight. */
 const MICRO_RADIUS = [20, 15, 11, 8, 5];
+/** Largest angle (rad) between a track's or footpath's straight run and its edge at a junction. */
+const CHORD_SKEW = (12 * Math.PI) / 180;
+/** Tracks and footpaths straighten their searched path over up to STRAIGHT_SPAN nodes, keeping within STRAIGHT_TOL (m, by class) of it. */
+const STRAIGHT_SPAN = 48;
+const STRAIGHT_TOL = [0, 0, 0, 24, 20];
 /** Spacing (m) of points on fine-routed pieces: the renderer's smoothing (±3 points) then only softens them. */
 const MICRO_STEP = 2;
 
@@ -1563,54 +1794,9 @@ function microRoute(
     const t = Math.max(0, Math.min(1, ((x - s[o]) * dx + (y - s[o + 1]) * dy) / (dx * dx + dy * dy || 1)));
     return Math.hypot(x - s[o] - t * dx, y - s[o + 1] - t * dy);
   };
-  const ab = [ax, ay, bx, by];
-  const polyDist = (x: number, y: number, pl: number[]) => {
-    let d = Infinity;
-    for (let o = 0; o + 3 < pl.length; o += 2) d = Math.min(d, segDistTo(x, y, pl, o));
-    return d;
-  };
-  /**
-   * Is (x, y) this run's to use? Against a rival that may wind too, it must be nearer
-   * this run's line than `weight` × the rival's; against one that won't, it must
-   * keep its fitted band and clearance away unless nearer this line than that one.
-   */
-  const ownSide = (x: number, y: number) => {
-    const dP = polyDist(x, y, own);
-    for (const r of rivals) {
-      const dQ = polyDist(x, y, r.pts);
-      if (r.active ? dP > r.weight * dQ : dQ < FIT_BAND + MICRO_CLEAR && dP > dQ) return false;
-    }
-    return true;
-  };
-  // Wedges from the snapped ends, where the search starts and stops.
-  wedges = wedges.slice();
-  if (wedges.length >= 2 * WEDGE) [wedges[0], wedges[1], wedges[WEDGE], wedges[WEDGE + 1]] = [ax, ay, bx, by];
-  const ray = (x: number, y: number, dx: number, dy: number) => {
-    const L = Math.hypot(dx, dy) || 1;
-    return [x + (dx / L) * MICRO_BEYOND * 1.5, y + (dy / L) * MICRO_BEYOND * 1.5, x + (dx / L) * MICRO_FREE * 1.5, y + (dy / L) * MICRO_FREE * 1.5];
-  };
-  const beyondA = ray(ax, ay, -inDir[0], -inDir[1]);
-  const beyondB = ray(bx, by, outDir[0], outDir[1]);
+  const allowed = roomOf(ax, ay, bx, by, inDir, outDir, obstacles, own, rivals, cls, wedges);
   for (let lj = 0; lj < bh; lj++)
-    for (let li = 0; li < bw; li++) {
-      const x = (p.gx + li + i0) * NODE;
-      const y = (p.gy + lj + j0) * NODE;
-      if (segDistTo(x, y, ab, 0) > Math.max(MICRO_BAND[cls], MICRO_FREE)) continue;
-      if (!ownSide(x, y)) continue;
-      // Never across the road's own continuation beyond either end (a tight turn there
-      // would curl round it, losing height in a loop).
-      if (segDistTo(x, y, beyondA, 0) < MICRO_BEYOND || segDistTo(x, y, beyondB, 0) < MICRO_BEYOND) continue;
-      const dA = Math.hypot(x - ax, y - ay);
-      const dB = Math.hypot(x - bx, y - by);
-      if (!inWedges(wedges, x, y)) continue;
-      const nearEnd = dA < MICRO_FREE || dB < MICRO_FREE;
-      // Clear of other ways; near the ends only a little (junctions are close), and
-      // right at the junction not at all.
-      const need = !nearEnd ? MICRO_CLEAR : Math.min(dA, dB) < MICRO_JUNCTION ? 0 : MICRO_BEYOND;
-      let clear = true;
-      if (need > 0) for (let o = 0; o + 3 < obstacles.length && clear; o += 4) if (segDistTo(x, y, obstacles, o) < need) clear = false;
-      if (clear) ok[lj * bw + li] = 1;
-    }
+    for (let li = 0; li < bw; li++) if (allowed((p.gx + li + i0) * NODE, (p.gy + lj + j0) * NODE)) ok[lj * bw + li] = 1;
   const la = (ja - j0) * bw + (ia - i0);
   const lb = (jb - j0) * bw + (ib - i0);
   if (la < 0 || lb < 0 || la >= bw * bh || lb >= bw * bh) return straight();
@@ -1653,7 +1839,7 @@ function microRoute(
       const q = (nj + j0) * w + ni + i0;
       const dist = MDIST16[d];
       const g = Math.abs(p.zE[q] - p.zE[k]) / dist;
-      let c = cost[st] + dist * (1 + 0.5 * (g / gmax) ** 2) + (MICRO_TURN[cls] / 2) * Math.abs(t);
+      let c = cost[st] + dist * (1 + MICRO_GRADE_W[cls] * (g / EASY_GRADE[cls]) ** 2) + (MICRO_TURN[cls] / 2) * Math.abs(t);
       if (g > gmax) c += dist * MICRO_STEEP * (g / gmax - 1);
       if (wet(q)) {
         if (!water) continue;
@@ -1686,12 +1872,38 @@ function microRoute(
   pts[pts.length - 2] = bx;
   pts[pts.length - 1] = by;
   // Straighten the 8-direction staircase where the shortcut keeps to the limit and
-  // clear of other ways; hairpins survive because they're needed.
+  // clear of other ways; hairpins survive because they're needed. Tracks and footpaths
+  // straighten much further — wherever the straight line climbs no worse than the
+  // searched path and stays where it may go — so they run straight on the flat (the
+  // search's 16 headings would leave doglegs) and follow the contours on a slope.
+  const soft = cls >= ROAD_T;
+  /** Cost of a straight run, as the search counts it (sampled every 8 m). */
+  const runCost = (x0: number, y0: number, x1: number, y1: number) => {
+    const len = Math.hypot(x1 - x0, y1 - y0);
+    const m = Math.max(1, Math.ceil(len / 8));
+    let c = 0;
+    let zp = zAt(x0, y0);
+    for (let s2 = 1; s2 <= m; s2++) {
+      const z = zAt(x0 + ((x1 - x0) * s2) / m, y0 + ((y1 - y0) * s2) / m);
+      const g = Math.abs(z - zp) / (len / m);
+      c += (len / m) * (1 + MICRO_GRADE_W[cls] * (g / EASY_GRADE[cls]) ** 2 + (g > gmax ? MICRO_STEEP * (g / gmax - 1) : 0));
+      zp = z;
+    }
+    return c;
+  };
+  const okAt = (x: number, y: number) => {
+    const li = Math.round(x / NODE) - p.gx - i0;
+    const lj = Math.round(y / NODE) - p.gy - j0;
+    return li >= 0 && lj >= 0 && li < bw && lj < bh && ok[lj * bw + li] === 1;
+  };
   const n = pts.length / 2;
+  // Cost of the searched path from its start to each point.
+  const along = [0];
+  for (let k2 = 1; k2 < n && soft; k2++) along.push(along[k2 - 1] + runCost(pts[2 * k2 - 2], pts[2 * k2 - 1], pts[2 * k2], pts[2 * k2 + 1]));
   const outPts: number[] = [pts[0], pts[1]];
   let i = 0;
   while (i < n - 1) {
-    let j = Math.min(n - 1, i + 12);
+    let j = Math.min(n - 1, i + (soft ? STRAIGHT_SPAN : 12));
     for (; j > i + 1; j--) {
       const x0 = pts[2 * i];
       const y0 = pts[2 * i + 1];
@@ -1702,17 +1914,23 @@ function microRoute(
       // Close to the searched path (a hairpin is never cut)…
       let good = true;
       for (let k2 = i + 1; k2 < j && good; k2++) {
+        if (soft) {
+          if (segDistTo(pts[2 * k2], pts[2 * k2 + 1], [x0, y0, x1, y1], 0) > STRAIGHT_TOL[cls]) good = false;
+          continue;
+        }
         const u = (k2 - i) / (j - i);
         if (Math.hypot(pts[2 * k2] - (x0 + (x1 - x0) * u), pts[2 * k2 + 1] - (y0 + (y1 - y0) * u)) > 10) good = false;
       }
-      // …and within the limit all along, and not across water the path went round.
+      // …and within the limit all along (tracks and footpaths: no dearer than the
+      // path, and where it may go), and not across water the path went round.
+      if (good && soft && runCost(x0, y0, x1, y1) > along[j] - along[i]) good = false;
       const dry = !wetCell.slice(i, j + 1).some((x) => x);
       let zp = zAt(x0, y0);
       for (let s2 = 1; s2 <= m && good; s2++) {
         const sx = x0 + ((x1 - x0) * s2) / m;
         const sy = y0 + ((y1 - y0) * s2) / m;
         const z = zAt(sx, sy);
-        if (Math.abs(z - zp) / (len / m) > gmax * 1.1) good = false;
+        if (soft ? s2 < m && !okAt(sx, sy) : Math.abs(z - zp) / (len / m) > gmax * 1.1) good = false;
         if (dry && wet((Math.round(sy / NODE) - p.gy) * w + Math.round(sx / NODE) - p.gx)) good = false;
         zp = z;
       }
@@ -1726,6 +1944,74 @@ function microRoute(
   trimSpikes(outPts);
   cutLoops(outPts);
   return filleted(outPts, MICRO_RADIUS[cls]);
+}
+
+/** Distance from (x, y) to segment o of the flat list s ([ax, ay, bx, by, …]). */
+function segDist(x: number, y: number, s: number[], o: number): number {
+  const dx = s[o + 2] - s[o];
+  const dy = s[o + 3] - s[o + 1];
+  const t = Math.max(0, Math.min(1, ((x - s[o]) * dx + (y - s[o + 1]) * dy) / (dx * dx + dy * dy || 1)));
+  return Math.hypot(x - s[o] - t * dx, y - s[o + 1] - t * dy);
+}
+
+/**
+ * Where a run from A to B (vertices `own`) may go: within its band either side of
+ * the line A–B; against a rival that may wind too, nearer this run's line than
+ * `weight` × the rival's; against one that won't, its fitted band and clearance away
+ * unless nearer this line; never across the road's own continuation beyond either
+ * end; within the wedges at its ends; and clear of other ways (near the ends only a
+ * little, as junctions are close, and right at the junction not at all).
+ */
+function roomOf(
+  ax: number,
+  ay: number,
+  bx: number,
+  by: number,
+  inDir: number[],
+  outDir: number[],
+  obstacles: number[],
+  own: number[],
+  rivals: (Rival & { active: boolean })[],
+  cls: RoadClass,
+  wedges: number[],
+): (x: number, y: number) => boolean {
+  const ab = [ax, ay, bx, by];
+  const polyDist = (x: number, y: number, pl: number[]) => {
+    let d = Infinity;
+    for (let o = 0; o + 3 < pl.length; o += 2) d = Math.min(d, segDist(x, y, pl, o));
+    return d;
+  };
+  const ownSide = (x: number, y: number) => {
+    const dP = polyDist(x, y, own);
+    for (const r of rivals) {
+      const dQ = polyDist(x, y, r.pts);
+      if (r.active ? dP > r.weight * dQ : dQ < FIT_BAND + MICRO_CLEAR && dP > dQ) return false;
+    }
+    return true;
+  };
+  // Wedges from the snapped ends, where the run starts and stops.
+  wedges = wedges.slice();
+  if (wedges.length >= 2 * WEDGE) [wedges[0], wedges[1], wedges[WEDGE], wedges[WEDGE + 1]] = [ax, ay, bx, by];
+  const ray = (x: number, y: number, dx: number, dy: number) => {
+    const L = Math.hypot(dx, dy) || 1;
+    return [x + (dx / L) * MICRO_BEYOND * 1.5, y + (dy / L) * MICRO_BEYOND * 1.5, x + (dx / L) * MICRO_FREE * 1.5, y + (dy / L) * MICRO_FREE * 1.5];
+  };
+  const beyondA = ray(ax, ay, -inDir[0], -inDir[1]);
+  const beyondB = ray(bx, by, outDir[0], outDir[1]);
+  return (x, y) => {
+    if (segDist(x, y, ab, 0) > Math.max(MICRO_BAND[cls], MICRO_FREE)) return false;
+    if (!ownSide(x, y)) return false;
+    // Never across the road's own continuation beyond either end (a tight turn there
+    // would curl round it, losing height in a loop).
+    if (segDist(x, y, beyondA, 0) < MICRO_BEYOND || segDist(x, y, beyondB, 0) < MICRO_BEYOND) return false;
+    if (!inWedges(wedges, x, y)) return false;
+    const dA = Math.hypot(x - ax, y - ay);
+    const dB = Math.hypot(x - bx, y - by);
+    const nearEnd = dA < MICRO_FREE || dB < MICRO_FREE;
+    const need = !nearEnd ? MICRO_CLEAR : Math.min(dA, dB) < MICRO_JUNCTION ? 0 : MICRO_BEYOND;
+    if (need > 0) for (let o = 0; o + 3 < obstacles.length; o += 4) if (segDist(x, y, obstacles, o) < need) return false;
+    return true;
+  };
 }
 
 /**

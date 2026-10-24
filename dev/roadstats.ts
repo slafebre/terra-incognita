@@ -705,6 +705,14 @@ for (const R of REGIONS) {
       }
     if (process.env.DUMP) svg(segs, `${process.env.DUMP}-R${R}-${a}.svg`);
     if (process.env.SHEET) sheet(segs, lp, `${process.env.SHEET}-R${R}-${a}.svg`);
+    if (process.env.LOOPLOG)
+      lp.forEach((l, n) => {
+        const near = segs.filter((g) => {
+          for (let i = 0; i < g.xy.length; i += 2) if (Math.hypot(g.xy[i] - l.x, g.xy[i + 1] - l.y) < 40) return true;
+          return false;
+        });
+        console.log(`LOOP ${n} ${(l.a / 1e4).toFixed(2)} ha at ${l.x.toFixed(0)},${l.y.toFixed(0)}: ${near.map((g) => `${'NDCTP'[g.cls]}${g.micro ? '*' : ''}(${g.key.split('+').length}) ${g.xy[0].toFixed(0)},${g.xy[1].toFixed(0)}>${g.xy[g.xy.length - 2].toFixed(0)},${g.xy[g.xy.length - 1].toFixed(0)} n${g.xy.length / 2}`).join(' | ')}`);
+      });
     if (process.env.LOOPZOOM) {
       // Close-ups of loops: every drawn vertex, micro pieces marked.
       const out = [`<svg xmlns="http://www.w3.org/2000/svg" width="${4 * 300}" height="${Math.ceil(lp.length / 4) * 300}" style="background:#fff">`];
