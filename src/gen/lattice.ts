@@ -197,7 +197,7 @@ export function nearestVertex(x: number, y: number): number {
 }
 
 /** Vertices whose positions fall in a rectangle. */
-function verticesIn(r: { x0: number; y0: number; x1: number; y1: number }): number[] {
+export function verticesIn(r: { x0: number; y0: number; x1: number; y1: number }): number[] {
   const out: number[] = [];
   for (let j = Math.floor((r.y0 - JITTER) / ROW); j <= Math.ceil((r.y1 + JITTER) / ROW); j++)
     for (let i = Math.floor((r.x0 - JITTER) / LATTICE) - 1; i <= Math.ceil((r.x1 + JITTER) / LATTICE); i++) {

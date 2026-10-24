@@ -2,6 +2,7 @@ import { APRON, CELL, CELLS, CHUNK, DEM_W } from '../lib/constants';
 import { marchingSquares } from '../lib/contours';
 import { smoothPolyline } from '../lib/polyline';
 import { COVER } from '../gen/landcover';
+import { layFields } from '../gen/fields';
 import { placePois, type PoiPatch } from '../gen/poi';
 import type { SegmentPath } from '../gen/roads';
 import type { TownPlan } from '../gen/town';
@@ -9,6 +10,8 @@ import { cellCoverage, drawCoverSymbols, FILLS } from './landcover';
 import { drawBuildings } from './buildings';
 import { clearUnderBuiltUp, drawChurches, drawRoads } from './roads';
 import { drawPois } from './symbols';
+import { drawFields } from './fields';
+import { coverAt } from './landcover';
 import { CONTOURS, STYLE } from './style';
 
 export interface RenderInput {
@@ -25,8 +28,10 @@ export interface RenderInput {
   roads: SegmentPath[];
   /** Plans of settlements (street plans, farmsteads) that may draw into this chunk. */
   plans: TownPlan[];
-  /** Fine nodes round the chunk, for its points of interest. */
+  /** Fine nodes round the chunk, for its points of interest and field parcels. */
   poi?: PoiPatch;
+  /** Lattice edges carrying ways near the chunk ([ax, ay, bx, by] each): its field parcels' blocks. */
+  edges: number[][];
   /** Raster edge length in device pixels. */
   pxSize: number;
   /** Device pixels per CSS pixel (line widths are specified in CSS px). */
@@ -41,7 +46,7 @@ const LY = -Math.cos(alt) * Math.cos(az);
 const LZ = Math.sin(alt);
 
 /** Per-vertex shadow amount (0 = none, 1 = full) and slope (m/m). */
-function shadeAndSlope(dem: Float32Array): { shade: Float32Array; slope: Float32Array } {
+export function shadeAndSlope(dem: Float32Array): { shade: Float32Array; slope: Float32Array } {
   const shade = new Float32Array(DEM_W * DEM_W);
   const slope = new Float32Array(DEM_W * DEM_W);
   for (let j = 1; j < DEM_W - 1; j++) {
@@ -58,10 +63,24 @@ function shadeAndSlope(dem: Float32Array): { shade: Float32Array; slope: Float32
   return { shade, slope };
 }
 
+/** Farmland tests for field parcels, from a chunk's grids (world metres): open land (no woods, rock, heath, marsh or water), and slope. */
+export function farmlandTests(cx: number, cy: number, cover: Int8Array, water: Float32Array, slope: Float32Array) {
+  const vertex = (x: number, y: number) => {
+    const i = Math.min(DEM_W - 1, Math.max(0, Math.round((x - cx * CHUNK) / CELL) + APRON));
+    const j = Math.min(DEM_W - 1, Math.max(0, Math.round((y - cy * CHUNK) / CELL) + APRON));
+    return j * DEM_W + i;
+  };
+  const notFarmland = [COVER.forest, COVER.rock, COVER.scree, COVER.glacier, COVER.heath, COVER.wetland];
+  return {
+    open: (x: number, y: number) => water[vertex(x, y)] <= 0 && notFarmland.every((f) => coverAt(cover, f, x - cx * CHUNK, y - cy * CHUNK) <= 0),
+    slope: (x: number, y: number) => slope[vertex(x, y)],
+  };
+}
+
 /** River width in metres for drainage area A (km²). */
 export const riverWidth = (A: number) => 1.1 * Math.pow(A, 0.55);
 
-export function renderChunk({ cx, cy, dem, cover, water, streams, roads, plans, poi, pxSize, dpr }: RenderInput): OffscreenCanvas {
+export function renderChunk({ cx, cy, dem, cover, water, streams, roads, plans, poi, edges, pxSize, dpr }: RenderInput): OffscreenCanvas {
   const canvas = new OffscreenCanvas(pxSize, pxSize);
   const ctx = canvas.getContext('2d')!;
   const pxPerM = pxSize / CHUNK;
@@ -185,6 +204,16 @@ export function renderChunk({ cx, cy, dem, cover, water, streams, roads, plans, 
 
   drawCoverSymbols(ctx, { cx, cy, dem, water, cover, pxPerM, dpr });
 
+  // Plans may redraw roads through their settlements: theirs replace the network's.
+  const redrawn = new Set(plans.flatMap((p) => p.replaced));
+  const drawn = [...roads.filter((r) => !redrawn.has(r.key)), ...plans.flatMap((p) => p.roads)];
+
+  // --- Field parcels and hedges (on farmland: no woods, rock, heath, marsh or water) ----
+  if (poi) {
+    const fields = layFields({ cx, cy, edges, patch: poi, roads: drawn, plans, ...farmlandTests(cx, cy, cover, water, slope) });
+    drawFields(ctx, fields, cx, cy, pxPerM, dpr);
+  }
+
   // --- Lake shorelines --------------------------------------------------
   const shore = marchingSquares(water, DEM_W, APRON - 1, APRON - 1, APRON + CELLS + 1, APRON + CELLS + 1, 1000, (L) => L === 0);
   const shorePath = new Path2D();
@@ -198,9 +227,6 @@ export function renderChunk({ cx, cy, dem, cover, water, streams, roads, plans, 
   ctx.stroke(shorePath);
 
   drawStreams(ctx, streams, pxPerM, dpr);
-  // Plans may redraw roads through their settlements: theirs replace the network's.
-  const redrawn = new Set(plans.flatMap((p) => p.replaced));
-  const drawn = [...roads.filter((r) => !redrawn.has(r.key)), ...plans.flatMap((p) => p.roads)];
   drawBuildings(ctx, plans, cx, cy, pxPerM, dpr);
   drawRoads(ctx, drawn, plans.flatMap((p) => p.streets), cx, cy, pxPerM, dpr, water);
   drawChurches(ctx, plans, cx, cy, pxPerM, dpr);

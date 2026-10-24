@@ -24,6 +24,8 @@ export type TaskRequest =
       plans: TownPlan[];
       /** Fine nodes round the chunk for its points of interest (none if a solve was missing). */
       poi?: PoiPatch;
+      /** Lattice edges carrying ways near the chunk ([ax, ay, bx, by] each). */
+      edges: number[][];
       streams: Float32Array;
       pxSize: number;
       dpr: number;

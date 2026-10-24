@@ -14,6 +14,7 @@ import {
   type PreResult,
 } from '../gen/hydro';
 import { latticeSegments } from '../gen/lattice';
+import { FIELD_PAD, FIELD_REACH } from '../gen/fields';
 import { POI_PAD, type PoiPatch } from '../gen/poi';
 import { NET_CELL, NET_REACH, ROAD_PAD, type NetCell, type RoadEdge, type RoadPatch, type SegmentPath } from '../gen/roads';
 import { expand, intersects, SeedStore, type Rect } from '../gen/seeds';
@@ -553,6 +554,7 @@ export class ChunkManager {
           roads,
           plans: this.plansFor(c)!,
           poi,
+          edges: this.fieldEdges(c),
           pxSize: this.pxSize,
           dpr: Math.min(this.dpr, DPR_MAX),
         };
@@ -682,6 +684,15 @@ export class ChunkManager {
     return p;
   }
 
+  /** Lattice edges carrying ways within FIELD_REACH of a chunk (its field parcels' blocks), as their two vertices. */
+  private fieldEdges(c: Chunk): number[][] {
+    const r = expand(chunkRect(c.cx, c.cy), FIELD_REACH);
+    const inR = (x: number, y: number) => x >= r.x0 && x < r.x1 && y >= r.y0 && y < r.y1;
+    return this.edgesNear(chunkRect(c.cx, c.cy))
+      .filter((e) => inR(e.route[0], e.route[1]) || inR(e.route[2], e.route[3]))
+      .map((e) => e.route);
+  }
+
   /**
    * Fine nodes round a chunk (± POI_PAD, each from its own chunk's solve) for its
    * points of interest, with receivers and region as the DEM's streams read them.
@@ -689,8 +700,10 @@ export class ChunkManager {
    * their neighbours' roads needed them).
    */
   private poiPatch(c: Chunk): PoiPatch | undefined {
-    const w = NODES + 2 * POI_PAD;
-    const base = this.nodePatch(c.cx * NODES - POI_PAD, c.cy * NODES - POI_PAD, w, w);
+    // (Field parcels read it too, a little further out.)
+    const pad = Math.max(POI_PAD, FIELD_PAD);
+    const w = NODES + 2 * pad;
+    const base = this.nodePatch(c.cx * NODES - pad, c.cy * NODES - pad, w, w);
     if (!base) return undefined;
     const p: PoiPatch = { ...base, rec: new Int8Array(w * w), R: new Float32Array(w * w) };
     for (let j = 0; j < w; j++)

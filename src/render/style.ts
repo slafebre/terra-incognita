@@ -49,6 +49,14 @@ export const STYLE = {
     bridge: { color: 'rgb(40, 34, 30)', deck: 'rgb(255, 255, 255)', gap: 0.8, line: 0.7 },
   },
   church: 'rgb(45, 40, 38)',
+  /** Field parcels: unhedged edges faint and thin; hedges as rows of green dots (CSS px). */
+  fields: {
+    edge: 'rgba(120, 104, 80, 0.32)',
+    edgeWidth: 0.5,
+    hedge: 'rgb(70, 125, 55)',
+    hedgeDot: 0.8,
+    hedgeSpacing: 2.4,
+  },
   /** Building footprints: solid dark red (hsl 2.3°, 60.5 %, 33.7 %), no outline. */
   building: 'rgb(138, 38, 34)',
   /** …large ones (from `buildingLargeFrom` m²: halls, sheds, stores), lighter: the same hue and saturation at 62 % lightness, edged in `building` as wide as a road casing. */
