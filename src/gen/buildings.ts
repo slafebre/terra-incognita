@@ -39,7 +39,9 @@ export interface BuildingInput {
 
 /** Footprint sizes (m): along the street × back from it, and the gap to the next. */
 const DENSE = { w: [6, 11], d: [9, 14], setback: 0.4, alley: 0.15, alleyW: [3, 6] };
-const LOOSE = { w: [8, 13], d: [7, 11], setback: [3, 8], gap: [6, 22], barn: 0.12, barnW: [14, 22], barnD: [9, 12] };
+const LOOSE = { w: [8, 13], d: [7, 11], setback: [3, 8], gap: [5, 16], barn: 0.12, barnW: [14, 22], barnD: [9, 12] };
+/** Where a house won't fit, a small one close to the street (w, d, setback; m). */
+const SMALL = { w: [6, 8], d: [6, 8], setback: [1.5, 3] };
 /** Steps (m) after a footprint that didn't fit. */
 const RETRY_STEP = [2, 4];
 /** Buildings may share walls: overlaps this small don't count (m). */
@@ -52,6 +54,10 @@ const NARROW = 0.55;
 const MIN_WIDTH = 4;
 
 const CELL = 16;
+
+/** Debugging: why footprints were refused, summed over calls. */
+export const buildingStats: Record<string, number> = {};
+const note = (k: string) => (buildingStats[k] = (buildingStats[k] ?? 0) + 1);
 
 export function placeBuildings({ fronts, ways, dense, ok, rand, gapScale = 1 }: BuildingInput): Float32Array {
   // Way pieces in a grid, for clearance tests.
@@ -162,11 +168,22 @@ export function placeBuildings({ fronts, ways, dense, ok, rand, gapScale = 1 }: 
           setback = lerp(LOOSE.setback[0], LOOSE.setback[1], rand());
           gap = lerp(LOOSE.gap[0], LOOSE.gap[1], rand()) * gapScale;
         }
-        if (s + w > L) break;
-        // A row that won't take a full plot here takes a narrower one (bends, corners).
+        if (s + MIN_WIDTH > L) break;
+        // A row that won't take a full plot here takes a narrower one (bends, corners);
+        // where a house won't fit, a small one close to the street may (no stretch of
+        // street left bare for want of room behind it).
+        const tries: [number, number, number][] = isDense
+          ? [
+              [w, d, setback],
+              [w * NARROW, d, setback],
+            ]
+          : [
+              [w, d, setback],
+              [lerp(SMALL.w[0], SMALL.w[1], rand()), lerp(SMALL.d[0], SMALL.d[1], rand()), lerp(SMALL.setback[0], SMALL.setback[1], rand())],
+            ];
         let placed = 0;
-        for (const width of isDense ? [w, w * NARROW] : [w]) {
-          if (width < MIN_WIDTH) break;
+        for (const [width, dd, sb] of tries) {
+          if (width < MIN_WIDTH || s + width > L) continue;
           // Square to the street at the middle of the plot.
           const [ax, ay] = at(s);
           const [bx, by] = at(s + width);
@@ -178,15 +195,26 @@ export function placeBuildings({ fronts, ways, dense, ok, rand, gapScale = 1 }: 
           ty /= tl;
           const nx = -ty * side;
           const ny = tx * side;
-          const off = clearAt(mx, my) + setback;
-          for (const depth of [d, d * SHALLOW]) {
+          const off = clearAt(mx, my) + sb;
+          for (const depth of [dd, dd * SHALLOW]) {
             if (depth < MIN_DEPTH) break;
             // As stored (Float32): tests then agree with what's drawn.
             const q = rect(mx, my, tx, ty, nx, ny, width, off, depth).map(Math.fround);
             let fits = true;
             for (let c = 0; c < 8 && fits; c += 2) fits = ok(q[c], q[c + 1]);
-            if (!fits || !ok((q[0] + q[4]) / 2, (q[1] + q[5]) / 2)) break;
-            if (clashesWay(q) || clashesBuilding(q)) continue;
+            if (!fits || !ok((q[0] + q[4]) / 2, (q[1] + q[5]) / 2)) {
+              note(`${isDense ? 'dense' : 'loose'}: ground`);
+              break;
+            }
+            if (clashesWay(q)) {
+              note(`${isDense ? 'dense' : 'loose'}: way`);
+              continue;
+            }
+            if (clashesBuilding(q)) {
+              note(`${isDense ? 'dense' : 'loose'}: building`);
+              continue;
+            }
+            note(`${isDense ? 'dense' : 'loose'}: PLACED`);
             add(q);
             placed = width;
             break;

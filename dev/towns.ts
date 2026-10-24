@@ -11,6 +11,7 @@ import { SeedStore, SeedView } from '../src/gen/seeds';
 import { HAMLET, Settlements, TOWN, VILLAGE, type Site } from '../src/gen/settle';
 import { setRegionOverride, Terrain } from '../src/gen/terrain';
 import { NET_REACH } from '../src/gen/roads';
+import { buildingStats } from '../src/gen/buildings';
 import { LANE, PLAN_EXTENT, planStats, planTown, type TownPlan, type PlanInput } from '../src/gen/town';
 import { marchingSquares } from '../src/lib/contours';
 import { rng } from '../src/lib/hash';
@@ -101,7 +102,7 @@ function svg({ input, plan: p }: { input: PlanInput; plan: TownPlan }): string {
     let d = '';
     const b = p.buildings;
     for (let i = 0; i < b.length; i += 8) d += `M${b[i].toFixed(1)} ${b[i + 1].toFixed(1)}L${b[i + 2].toFixed(1)} ${b[i + 3].toFixed(1)}L${b[i + 4].toFixed(1)} ${b[i + 5].toFixed(1)}L${b[i + 6].toFixed(1)} ${b[i + 7].toFixed(1)}Z`;
-    s += `<path d="${d}" fill="rgb(150,110,100)" stroke="rgb(95,70,64)" stroke-width="0.6"/>`;
+    s += `<path d="${d}" fill="rgb(138,38,34)"/>`;
   }
   // Lakes and streams.
   for (let j = 0; j < patch.h; j++)
@@ -173,12 +174,35 @@ for (const input of inputs) {
   const ms = performance.now() - t0;
   let km = 0;
   for (const st of p.streets) for (let i = 2; i < st.xy.length; i += 2) km += Math.hypot(st.xy[i] - st.xy[i - 2], st.xy[i + 1] - st.xy[i - 1]) / 1000;
+  // Bare street: share of the fronts' sides (sampled every 5 m, 12 m off the centre line) with no building within 15 m.
+  let bare = 0;
+  let sides = 0;
+  {
+    const b = p.buildings;
+    const cs: [number, number][] = [];
+    for (let i = 0; i < b.length; i += 8) cs.push([(b[i] + b[i + 4]) / 2, (b[i + 1] + b[i + 5]) / 2]);
+    for (const fr of p.frontage) {
+      const xy = fr.xy;
+      for (let i = 2; i < xy.length; i += 2) {
+        const dx = xy[i] - xy[i - 2];
+        const dy = xy[i + 1] - xy[i - 1];
+        const l = Math.hypot(dx, dy) || 1;
+        for (let t = 0; t < l; t += 5)
+          for (const sd of [1, -1]) {
+            const x = xy[i - 2] + (dx * t) / l - (dy / l) * 12 * sd;
+            const y = xy[i - 1] + (dy * t) / l + (dx / l) * 12 * sd;
+            sides++;
+            if (!cs.some(([qx, qy]) => Math.abs(qx - x) < 15 && Math.abs(qy - y) < 15)) bare++;
+          }
+      }
+    }
+  }
   const f = `${OUT}-R${site.R.toFixed(2)}-${site.id.replace(/[:,]/g, '_')}.svg`;
   svgs.push(svg({ input, plan: p }));
   writeFileSync(f, svgs[svgs.length - 1]);
   console.log(
     `R=${site.R.toFixed(2)} ${site.id} at ${site.x.toFixed(0)},${site.y.toFixed(0)}: ${p.streets.length} streets, ${km.toFixed(2)} km, ` +
-      `${p.buildings.length / 8} buildings, plan ${ms.toFixed(0)} ms → ${f}`,
+      `${p.buildings.length / 8} buildings, ${((100 * bare) / Math.max(1, sides)).toFixed(0)} % bare, plan ${ms.toFixed(0)} ms → ${f}`,
   );
 }
 // One SVG of them all, nested in a grid (square, so thumbnailers show it whole).
@@ -192,3 +216,4 @@ for (const input of inputs) {
   writeFileSync(`${OUT}-sheet.svg`, sheet + '</svg>');
 }
 console.log(Object.entries(planStats).sort((a, b) => b[1] - a[1]).map(([k, v]) => `${k} ${v}`).join(", "));
+console.log(Object.entries(buildingStats).sort().map(([k, v]) => `${k} ${v}`).join(', '));

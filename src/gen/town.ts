@@ -118,8 +118,8 @@ export const STREET_CLEAR = [3.5, 3];
 const HAMLET_GAPS = 1.8;
 /** No building this close to the church at a village's or town's centre (m). */
 const CHURCH_CLEAR = 10;
-/** No building on ground steeper than this (m/m, over 8 m). */
-const BUILD_STEEP = 0.4;
+/** No building on ground steeper than this (m/m, over 8 m): mountain villages climb their slopes. */
+const BUILD_STEEP = 0.55;
 /** Attempts per branch point. */
 const RETRIES = 2;
 /** Junction angles below this are refused (rad). */

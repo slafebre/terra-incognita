@@ -54,10 +54,8 @@ export const STYLE = {
   builtUpLayer: 'rgb(196, 160, 150)',
   builtUpAlpha: 0.45,
   church: 'rgb(45, 40, 38)',
-  /** Building footprints. */
-  building: 'rgb(176, 130, 118)',
-  buildingEdge: 'rgb(118, 84, 76)',
-  buildingEdgeWidth: 0.5,
+  /** Building footprints: solid dark red, no outline. */
+  building: 'rgb(138, 38, 34)',
 
   grid: 'rgba(30, 110, 210, 0.55)',
   gridLabel: 'rgb(30, 100, 200)',

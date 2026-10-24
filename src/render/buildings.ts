@@ -4,8 +4,8 @@ import { STYLE } from './style';
 
 type Ctx = OffscreenCanvasRenderingContext2D;
 
-/** Building footprints of the plans: filled, with a thin darker edge. */
-export function drawBuildings(ctx: Ctx, plans: TownPlan[], cx: number, cy: number, pxPerM: number, dpr: number): void {
+/** Building footprints of the plans, filled. */
+export function drawBuildings(ctx: Ctx, plans: TownPlan[], cx: number, cy: number, pxPerM: number): void {
   const p = new Path2D();
   const ox = cx * CHUNK;
   const oy = cy * CHUNK;
@@ -25,8 +25,4 @@ export function drawBuildings(ctx: Ctx, plans: TownPlan[], cx: number, cy: numbe
   }
   ctx.fillStyle = STYLE.building;
   ctx.fill(p);
-  ctx.strokeStyle = STYLE.buildingEdge;
-  ctx.lineWidth = STYLE.buildingEdgeWidth * dpr;
-  ctx.lineJoin = 'miter';
-  ctx.stroke(p);
 }
