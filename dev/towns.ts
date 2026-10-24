@@ -15,6 +15,8 @@ import { NET_REACH } from '../src/gen/roads';
 import { buildingStats } from '../src/gen/buildings';
 import { LANE, PLAN_EXTENT, planStats, planTown, type TownPlan, type PlanInput } from '../src/gen/town';
 import { marchingSquares } from '../src/lib/contours';
+import { quadArea } from '../src/render/buildings';
+import { STYLE } from '../src/render/style';
 import { rng } from '../src/lib/hash';
 import type { TaskRequest, TaskResult } from '../src/worker/protocol';
 import { runTask } from '../src/worker/tasks';
@@ -110,12 +112,17 @@ function svg({ input, plan: p }: { input: PlanInput; plan: TownPlan }): string {
     for (let i = 0; i < xy.length; i += 2) d += `${i ? 'L' : 'M'}${xy[i].toFixed(1)} ${xy[i + 1].toFixed(1)}`;
     return d;
   };
-  // Buildings.
-  {
+  // Buildings, large ones lighter (as the app draws them).
+  for (const big of [false, true]) {
     let d = '';
     const b = p.buildings;
-    for (let i = 0; i < b.length; i += 8) d += `M${b[i].toFixed(1)} ${b[i + 1].toFixed(1)}L${b[i + 2].toFixed(1)} ${b[i + 3].toFixed(1)}L${b[i + 4].toFixed(1)} ${b[i + 5].toFixed(1)}L${b[i + 6].toFixed(1)} ${b[i + 7].toFixed(1)}Z`;
-    s += `<path d="${d}" fill="rgb(138,38,34)"/>`;
+    for (let i = 0; i < b.length; i += 8)
+      if (quadArea(b, i) >= STYLE.buildingLargeFrom === big)
+        d += `M${b[i].toFixed(1)} ${b[i + 1].toFixed(1)}L${b[i + 2].toFixed(1)} ${b[i + 3].toFixed(1)}L${b[i + 4].toFixed(1)} ${b[i + 5].toFixed(1)}L${b[i + 6].toFixed(1)} ${b[i + 7].toFixed(1)}Z`;
+    // (Large ones edged as roads are cased: 1.5 m here, inside the footprint.)
+    s += big
+      ? `<clipPath id="big-${p.id.replace(/\W/g, '_')}"><path d="${d}"/></clipPath><path d="${d}" fill="${STYLE.buildingLarge}" stroke="${STYLE.building}" stroke-width="3" clip-path="url(#big-${p.id.replace(/\W/g, '_')})"/>`
+      : `<path d="${d}" fill="${STYLE.building}"/>`;
   }
   // Lakes and streams.
   for (let j = 0; j < patch.h; j++)
@@ -194,11 +201,13 @@ for (const input of inputs) {
   const ms = performance.now() - t0;
   let km = 0;
   for (const st of p.streets) for (let i = 2; i < st.xy.length; i += 2) km += Math.hypot(st.xy[i] - st.xy[i - 2], st.xy[i + 1] - st.xy[i - 1]) / 1000;
-  // Large buildings (both sides over 15 m).
+  // Large buildings (drawn lighter), and the largest outside industrial estates.
   let large = 0;
+  let biggest = 0;
   for (let i = 0; i < p.buildings.length; i += 8) {
-    const b = p.buildings;
-    if (Math.hypot(b[i + 2] - b[i], b[i + 3] - b[i + 1]) > 15 && Math.hypot(b[i + 4] - b[i + 2], b[i + 5] - b[i + 3]) > 15) large++;
+    const a = quadArea(p.buildings, i);
+    if (a >= STYLE.buildingLargeFrom) large++;
+    if (!p.industrial[i / 8]) biggest = Math.max(biggest, a);
   }
   // Bare street: share of the fronts' sides (sampled every 5 m, 12 m off the centre line) with no building within 15 m.
   let bare = 0;
@@ -262,7 +271,7 @@ for (const input of inputs) {
   writeFileSync(f, svgs[svgs.length - 1]);
   console.log(
     `R=${site.R.toFixed(2)} ${site.id} at ${site.x.toFixed(0)},${site.y.toFixed(0)}: ${p.streets.length} streets, ${km.toFixed(2)} km, ` +
-      `${p.buildings.length / 8} buildings (${large} large), ${((100 * bare) / Math.max(1, sides)).toFixed(0)} % bare (main roads near the centre: ${((100 * mainBare) / Math.max(1, mainSides)).toFixed(0)} % bare, ${((100 * mainLined) / Math.max(1, mainSides)).toFixed(0)} % lined), plan ${ms.toFixed(0)} ms → ${f}`,
+      `${p.buildings.length / 8} buildings (${large} large, largest outside estates ${biggest.toFixed(0)} m²), ${p.industrial.reduce((t, v) => t + v, 0)} industrial, ${((100 * bare) / Math.max(1, sides)).toFixed(0)} % bare (main roads near the centre: ${((100 * mainBare) / Math.max(1, mainSides)).toFixed(0)} % bare, ${((100 * mainLined) / Math.max(1, mainSides)).toFixed(0)} % lined), plan ${ms.toFixed(0)} ms → ${f}`,
   );
 }
 // One SVG of them all, nested in a grid (square, so thumbnailers show it whole).

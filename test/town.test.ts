@@ -15,7 +15,7 @@ import { clearUnderBuiltUp } from '../src/render/roads';
  * small lake, and four roads meeting at the settlement's lattice vertex — a through
  * D road, a C road and a track.
  */
-function input(rank: Rank, i: number): PlanInput {
+function input(rank: Rank, i: number, relief = 1): PlanInput {
   const [vx, vy] = vertexPos(nearestVertex(4000 + 2000 * i, 3000));
   const site: Site = { id: `${rank}:${i},0`, rank, x: vx + 20, y: vy - 12, z: 100, R: 0.2 + 0.05 * i };
   const r = PLAN_EXTENT[rank] + PLAN_MARGIN;
@@ -28,7 +28,7 @@ function input(rank: Rank, i: number): PlanInput {
       const x = (gx + k) * NODE - vx;
       const y = (gy + j) * NODE - vy;
       const o = j * w + k;
-      patch.zE[o] = 100 + 0.03 * x + 0.015 * y + 3 * Math.sin(x / 90) * Math.cos(y / 120);
+      patch.zE[o] = 100 + relief * (0.03 * x + 0.015 * y + 3 * Math.sin(x / 90) * Math.cos(y / 120));
       // A stream crossing east of the centre, a lake to the south-west.
       patch.A[o] = Math.abs(x - 140 - 0.3 * y) < 10 ? 0.8 : 0.01;
       patch.lake[o] = Math.hypot(x + 160, y - 150) < 50 ? 95 : NaN;
@@ -82,6 +82,8 @@ function distTo(xy: Float32Array, x: number, y: number): number {
 const cases = [
   ...[0, 1, 2, 3, 4, 5, 6, 7].map((i) => ({ name: `village ${i}`, inp: input(VILLAGE, i) })),
   ...[0, 1, 2].map((i) => ({ name: `town ${i}`, inp: input(TOWN, i) })),
+  // Flatter land, where towns lay out industrial estates.
+  ...[0, 1, 2].map((i) => ({ name: `town ${i} (flat)`, inp: input(TOWN, i, 0.3) })),
   ...[0, 1, 2, 3, 4, 5, 6, 7].map((i) => ({ name: `hamlet ${i}`, inp: input(HAMLET, i) })),
 ];
 const plans = cases.map((c) => ({ ...c, plan: planTown(c.inp) }));
@@ -317,5 +319,43 @@ describe('street plans', () => {
       expect(terraced, name).toBeGreaterThan(0.1 * n);
       expect(n - terraced, name).toBeGreaterThan(0.2 * n);
     }
+  });
+
+  it('lay out industrial estates in towns on flat ground only', () => {
+    const area = (b: ArrayLike<number>, i: number) =>
+      Math.hypot(b[i + 2] - b[i], b[i + 3] - b[i + 1]) * Math.hypot(b[i + 4] - b[i + 2], b[i + 5] - b[i + 3]);
+    const median = (a: number[]) => [...a].sort((m, n) => m - n)[Math.floor(a.length / 2)];
+    for (const i of [0, 1, 2]) {
+      const inp = input(TOWN, i, 0.3);
+      const plan = planTown(inp);
+      const b = plan.buildings;
+      expect(plan.industrial.length).toBe(b.length / 8);
+      const { patch: p } = inp;
+      const z = (x: number, y: number) => {
+        const k = (Math.round(y / NODE) - p.gy) * p.w + Math.round(x / NODE) - p.gx;
+        return [p.zE[k], p.zE[k + 1] - p.zE[k - 1], p.zE[k + p.w] - p.zE[k - p.w]];
+      };
+      const ind: number[] = [];
+      const house: number[] = [];
+      for (let j = 0; j < b.length; j += 8) {
+        if (!plan.industrial[j / 8]) {
+          house.push(area(b, j));
+          continue;
+        }
+        ind.push(area(b, j));
+        // On flat ground: no slope over 6 % at any corner.
+        for (let c = 0; c < 8; c += 2) {
+          const [, gx, gy] = z(b[j + c], b[j + c + 1]);
+          expect(Math.hypot(gx, gy) / (2 * NODE), `flat town ${i} building ${j / 8}`).toBeLessThanOrEqual(0.06 + 1e-6);
+        }
+      }
+      console.log(`flat town ${i}: ${ind.length} industrial buildings, median ${median(ind).toFixed(0)} m² (houses ${median(house).toFixed(0)} m²)`);
+      expect(ind.length, `flat town ${i}`).toBeGreaterThanOrEqual(10);
+      // Sheds and halls: several times a house, but not all huge.
+      expect(median(ind)).toBeGreaterThan(3 * median(house));
+      expect(median(ind)).toBeLessThan(1500);
+    }
+    // On a steady 13 % slope, none.
+    for (const i of [0, 1, 2]) expect(planTown(input(TOWN, i, 4)).industrial.some(Boolean), `steep town ${i}`).toBe(false);
   });
 });

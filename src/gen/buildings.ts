@@ -12,12 +12,15 @@ import { lerp } from '../lib/noise';
  *    now and then a gap for an alley or a yard;
  *  - loose (everywhere else): detached houses set back from the street with
  *    gardens between them, now and then a barn; in the outer parts, now and then
- *    a large building (a factory, a newer store) set further back.
+ *    a large building (a factory, a newer store) set further back;
+ *  - industrial (fronts in an industrial estate): sheds and halls set back from
+ *    the estate's streets, filling its land.
  * A footprint is kept only if it stays clear of every road and street (by its
  * half width and a margin), of other buildings, of water and of steep ground;
  * one that clashes with a street behind it is tried shallower first.
  *
- * Output: four corners per building, [x0, y0, … x3, y3] each, in world metres.
+ * Output: four corners per building, [x0, y0, … x3, y3] each, in world metres, and
+ * which of them are industrial.
  */
 
 /** A drawn way, kept clear by `clear` metres either side of its centre line. */
@@ -27,13 +30,13 @@ export interface Way {
 }
 
 export interface BuildingInput {
-  /** Polylines built up on both sides, in the order they are to be built (`main`: a main road). */
-  fronts: { xy: Float32Array; main: boolean }[];
+  /** Polylines built up on both sides, in the order they are to be built (`main`: a main road; `ind`: in an industrial estate). */
+  fronts: { xy: Float32Array; main: boolean; ind?: boolean }[];
   ways: Way[];
   /** Is (x, y) in the dense zone (on a main road, or a street)? */
   dense: (x: number, y: number, main: boolean) => boolean;
-  /** Can a building corner stand at (x, y), on ground no steeper than `steep` (m/m)? (Dry, inside the plan.) */
-  ok: (x: number, y: number, steep: number) => boolean;
+  /** Can a building corner stand at (x, y), on ground no steeper than `steep` (m/m)? (Dry, inside the plan; `ind`: an industrial building.) */
+  ok: (x: number, y: number, steep: number, ind: boolean) => boolean;
   /** Chance that a loose plot at (x, y) takes a large building (a factory, a store). */
   large: (x: number, y: number, main: boolean) => number;
   rand: () => number;
@@ -47,7 +50,11 @@ export interface BuildingInput {
 const DENSE = { w: [6, 11], d: [9, 14], setback: 0.4, alley: 0.15, alleyW: [3, 6] };
 const LOOSE = { w: [8, 13], d: [7, 11], setback: [3, 8], gap: [5, 16], barn: 0.12, barnW: [14, 22], barnD: [9, 12] };
 /** Large buildings in the outer parts: factories, newer stores (m); they want gentle ground. */
-const LARGE = { w: [25, 60], d: [18, 40], setback: [8, 15], gap: [10, 25], steep: 0.2, smaller: 0.7 };
+const LARGE = { w: [18, 36], d: [14, 26], setback: [6, 12], gap: [8, 20], steep: 0.2, smaller: 0.7 };
+/** Industrial buildings: sheds and halls (m); one that won't fit tries narrower, then shallower. */
+const INDUSTRIAL = { w: [16, 42], d: [14, 30], setback: [4, 10], gap: [5, 14], yard: 0.15, yardW: [15, 30], steep: 0.12, narrower: 0.6, minW: 10 };
+/** …now and then (HALL.chance) a hall (m). */
+const HALL = { chance: 0.15, w: [40, 70], d: [25, 40] };
 /** Where a house won't fit, a small one close to the street (w, d, setback; m). */
 const SMALL = { w: [6, 8], d: [6, 8], setback: [1.5, 3] };
 /** Steps (m) after a footprint that didn't fit. */
@@ -67,7 +74,7 @@ const CELL = 16;
 export const buildingStats: Record<string, number> = {};
 const note = (k: string) => (buildingStats[k] = (buildingStats[k] ?? 0) + 1);
 
-export function placeBuildings({ fronts, ways, dense, ok, large, rand, gapScale = 1, steep: STEEP = 0.55 }: BuildingInput): Float32Array {
+export function placeBuildings({ fronts, ways, dense, ok, large, rand, gapScale = 1, steep: STEEP = 0.55 }: BuildingInput): { buildings: Float32Array; industrial: Uint8Array } {
   // Way pieces in a grid, for clearance tests.
   const wayGrid = new Map<number, number[]>();
   const key = (i: number, j: number) => (i + 32768) * 65536 + (j + 32768);
@@ -112,6 +119,7 @@ export function placeBuildings({ fronts, ways, dense, ok, large, rand, gapScale 
 
   // Buildings placed so far, in a grid by bounding box.
   const out: number[] = [];
+  const kinds: number[] = [];
   const bGrid = new Map<number, number[]>();
   const clashesBuilding = (q: number[]) => {
     const [x0, y0, x1, y1] = bbox(q);
@@ -125,9 +133,10 @@ export function placeBuildings({ fronts, ways, dense, ok, large, rand, gapScale 
         }
     return false;
   };
-  const add = (q: number[]) => {
+  const add = (q: number[], ind: boolean) => {
     const b = out.length / 8;
     out.push(...q);
+    kinds.push(ind ? 1 : 0);
     const [x0, y0, x1, y1] = bbox(q);
     for (let j = Math.floor(y0 / CELL); j <= Math.floor(y1 / CELL); j++)
       for (let i = Math.floor(x0 / CELL); i <= Math.floor(x1 / CELL); i++) {
@@ -138,7 +147,7 @@ export function placeBuildings({ fronts, ways, dense, ok, large, rand, gapScale 
       }
   };
 
-  for (const { xy, main } of fronts) {
+  for (const { xy, main, ind = false } of fronts) {
     const n = xy.length / 2;
     if (n < 2) continue;
     const S = [0];
@@ -155,14 +164,21 @@ export function placeBuildings({ fronts, ways, dense, ok, large, rand, gapScale 
       let s = rand() * 4;
       while (s < L - 4) {
         const [px, py] = at(s);
-        const isDense = dense(px, py, main);
+        const isDense = !ind && dense(px, py, main);
         let w: number;
         let d: number;
         let setback: number;
         let gap: number;
         let steep = STEEP;
-        const isLarge = !isDense && rand() < large(px, py, main);
-        if (isLarge) {
+        const isLarge = !ind && !isDense && rand() < large(px, py, main);
+        if (ind) {
+          const hall = rand() < HALL.chance;
+          w = hall ? lerp(HALL.w[0], HALL.w[1], rand()) : lerp(INDUSTRIAL.w[0], INDUSTRIAL.w[1], rand());
+          d = hall ? lerp(HALL.d[0], HALL.d[1], rand()) : lerp(INDUSTRIAL.d[0], INDUSTRIAL.d[1], rand());
+          setback = lerp(INDUSTRIAL.setback[0], INDUSTRIAL.setback[1], rand());
+          gap = rand() < INDUSTRIAL.yard ? lerp(INDUSTRIAL.yardW[0], INDUSTRIAL.yardW[1], rand()) : lerp(INDUSTRIAL.gap[0], INDUSTRIAL.gap[1], rand());
+          steep = INDUSTRIAL.steep;
+        } else if (isLarge) {
           w = lerp(LARGE.w[0], LARGE.w[1], rand());
           d = lerp(LARGE.d[0], LARGE.d[1], rand());
           setback = lerp(LARGE.setback[0], LARGE.setback[1], rand());
@@ -189,7 +205,13 @@ export function placeBuildings({ fronts, ways, dense, ok, large, rand, gapScale 
         // where a house won't fit, a small one close to the street may (no stretch of
         // street left bare for want of room behind it).
         // A large building that won't fit tries smaller, then gives way to a house.
-        const tries: [number, number, number, number][] = isLarge
+        const tries: [number, number, number, number][] = ind
+          ? [
+              [w, d, setback, steep],
+              [Math.max(INDUSTRIAL.minW, w * INDUSTRIAL.narrower), d, setback, steep],
+              [INDUSTRIAL.minW, d * INDUSTRIAL.narrower, setback, steep],
+            ]
+          : isLarge
           ? [
               [w, d, setback, steep],
               [w * LARGE.smaller, d * LARGE.smaller, setback, steep],
@@ -224,23 +246,24 @@ export function placeBuildings({ fronts, ways, dense, ok, large, rand, gapScale 
             // As stored (Float32): tests then agree with what's drawn.
             const q = rect(mx, my, tx, ty, nx, ny, width, off, depth).map(Math.fround);
             let fits = true;
-            for (let c = 0; c < 8 && fits; c += 2) fits = ok(q[c], q[c + 1], st);
+            for (let c = 0; c < 8 && fits; c += 2) fits = ok(q[c], q[c + 1], st, ind);
             // Large ones also on the middles of their sides.
-            for (let c = 0; c < 8 && fits && width > 20; c += 2) fits = ok((q[c] + q[(c + 2) % 8]) / 2, (q[c + 1] + q[(c + 3) % 8]) / 2, st);
-            if (!fits || !ok((q[0] + q[4]) / 2, (q[1] + q[5]) / 2, st)) {
-              note(`${isDense ? 'dense' : width > 20 && dd > 15 ? 'large' : 'loose'}: ground`);
+            for (let c = 0; c < 8 && fits && width > 20; c += 2) fits = ok((q[c] + q[(c + 2) % 8]) / 2, (q[c + 1] + q[(c + 3) % 8]) / 2, st, ind);
+            const kind = ind ? 'industrial' : isDense ? 'dense' : width > 20 && dd > 15 ? 'large' : 'loose';
+            if (!fits || !ok((q[0] + q[4]) / 2, (q[1] + q[5]) / 2, st, ind)) {
+              note(`${kind}: ground`);
               break;
             }
             if (clashesWay(q)) {
-              note(`${isDense ? 'dense' : width > 20 && dd > 15 ? 'large' : 'loose'}: way`);
+              note(`${kind}: way`);
               continue;
             }
             if (clashesBuilding(q)) {
-              note(`${isDense ? 'dense' : width > 20 && dd > 15 ? 'large' : 'loose'}: building`);
+              note(`${kind}: building`);
               continue;
             }
-            note(`${isDense ? 'dense' : width > 20 && dd > 15 ? 'large' : 'loose'}: PLACED`);
-            add(q);
+            note(`${kind}: PLACED`);
+            add(q, ind);
             placed = width;
             break;
           }
@@ -250,7 +273,7 @@ export function placeBuildings({ fronts, ways, dense, ok, large, rand, gapScale 
       }
     }
   }
-  return Float32Array.from(out);
+  return { buildings: Float32Array.from(out), industrial: Uint8Array.from(kinds) };
 }
 
 /** Rectangle `w` along (tx, ty) centred on (mx, my), from `off` to `off + d` along (nx, ny). */
