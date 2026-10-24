@@ -15,7 +15,7 @@ const MIN_PX = [3.2, 2.6, 1.9, 1.0, 0.9];
 const STREET_M = [4.5, 3.5];
 const STREET_PX = [1.6, 1.3];
 /** Few passes: heavy smoothing pulls the legs of a hairpin onto each other. */
-const SMOOTH_PASSES = [2, 1, 1, 1, 1];
+export const SMOOTH_PASSES = [2, 1, 1, 1, 1];
 
 /** Built-up placeholders for farms (hamlets, villages and towns have plans). */
 export function drawSites(ctx: Ctx, sites: Site[], cx: number, cy: number, pxPerM: number): void {
