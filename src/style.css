@@ -32,3 +32,87 @@ body {
 #loading[hidden] {
   display: none;
 }
+#info {
+  position: fixed;
+  top: 16px;
+  right: 16px;
+  width: min(380px, calc(100vw - 32px));
+  box-sizing: border-box;
+  padding: 10px 14px 12px;
+  border-radius: 8px;
+  background: rgba(252, 250, 243, 0.96);
+  color: #4a3d2e;
+  font: 13px/1.4 ui-sans-serif, system-ui, sans-serif;
+  box-shadow: 0 1px 6px rgba(0, 0, 0, 0.2);
+}
+#info[hidden] {
+  display: none;
+}
+#info header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 6px;
+}
+#info dl {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 2px 12px;
+  margin: 0 0 8px;
+}
+#info dt {
+  color: #8a7a64;
+}
+#info dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+#info label {
+  display: block;
+  margin-top: 6px;
+  color: #8a7a64;
+}
+#info .copy {
+  display: flex;
+  gap: 6px;
+  align-items: flex-start;
+}
+#info code {
+  flex: 1;
+  min-width: 0;
+  padding: 3px 6px;
+  border-radius: 4px;
+  background: rgba(107, 90, 68, 0.1);
+  font: 12px/1.35 ui-monospace, monospace;
+  overflow-wrap: anywhere;
+  user-select: all;
+  -webkit-user-select: all;
+}
+#info button {
+  font: inherit;
+  padding: 2px 8px;
+  border: 1px solid rgba(107, 90, 68, 0.35);
+  border-radius: 4px;
+  background: #fff;
+  color: inherit;
+  cursor: pointer;
+}
+#info header button {
+  border: 0;
+  background: none;
+  font-size: 18px;
+  line-height: 1;
+}
+#info .snap {
+  margin-top: 10px;
+}
+#info .note,
+#info .warn {
+  margin: 6px 0 0;
+  font-size: 12px;
+  color: #8a7a64;
+}
+#info .warn {
+  color: #a3311f;
+}

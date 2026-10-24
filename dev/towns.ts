@@ -5,6 +5,7 @@
 // contours, water, roads, streets and built-up frontage. INPUTS=<file> caches the
 // pipeline's output (the plans' inputs), so plans can be tuned without rerunning it. OUT=<prefix> names the
 // files (default towns), one per settlement, plus <prefix>-sheet.svg of all (COLS per row).
+// SNAP=<file> (a snapshot from the app's info panel) plans the settlement nearest its view instead.
 import { ChunkManager } from '../src/chunks/manager';
 import { CoarseField, NODE } from '../src/gen/hydro';
 import { SeedStore, SeedView } from '../src/gen/seeds';
@@ -17,6 +18,7 @@ import { marchingSquares } from '../src/lib/contours';
 import { rng } from '../src/lib/hash';
 import type { TaskRequest, TaskResult } from '../src/worker/protocol';
 import { runTask } from '../src/worker/tasks';
+import { applySnap, snap } from './snap';
 
 declare const process: { argv: string[]; env: Record<string, string | undefined> };
 const FS = 'node:fs';
@@ -46,6 +48,19 @@ function findSites(R: number, n: number): Site[] {
   return set.sitesIn(RANK, r.x0, r.y0, r.x1, r.y1).slice(0, n);
 }
 
+/** The hamlet, village or town nearest the snapshot's view (within 3 km). */
+function snapSite(s: NonNullable<typeof snap>): Site | undefined {
+  const store = new SeedStore(s.seed ?? undefined);
+  store.load(s);
+  const [x, y] = s.at;
+  const D = 3000;
+  const view = new SeedView(store.payloadFor({ x0: x, y0: y, x1: x + 16, y1: y + 16 }, { x0: x - D - NET_REACH, y0: y - D - NET_REACH, x1: x + D + NET_REACH, y1: y + D + NET_REACH }));
+  const t = new Terrain(view);
+  const set = new Settlements(new CoarseField(t, view), t, view);
+  const sites = ([TOWN, VILLAGE, HAMLET] as const).flatMap((rank) => set.sitesIn(rank, x - D, y - D, x + D, y + D));
+  return sites.sort((a, b) => Math.hypot(a.x - x, a.y - y) - Math.hypot(b.x - x, b.y - y))[0];
+}
+
 async function pipeline(site: Site): Promise<PlanInput | undefined> {
   const pool = {
     size: 4,
@@ -66,7 +81,8 @@ async function pipeline(site: Site): Promise<PlanInput | undefined> {
       );
     },
   };
-  const m = new ChunkManager(pool, () => {}, SEED);
+  const m = new ChunkManager(pool, () => {}, snap ? (snap.seed ?? undefined) : SEED);
+  applySnap(m.seeds);
   // The view: the site's extent, less the margin the pipeline adds around it.
   const e = Math.max(64, PLAN_EXTENT[site.rank] - 500);
   const view = { x0: site.x - e, y0: site.y - e, x1: site.x + e, y1: site.y + e };
@@ -146,13 +162,20 @@ if (process.env.INPUTS && existsSync(process.env.INPUTS)) {
     patch: { ...v.patch, zE: Float32Array.from(v.patch.zE), A: Float32Array.from(v.patch.A), lake: Float32Array.from(v.patch.lake, (l) => l ?? NaN) },
   }));
 } else {
-  for (const R of REGIONS) {
-    setRegionOverride(R);
-    for (const site of findSites(R, PER)) {
-      const t0 = performance.now();
-      const input = await pipeline(site);
-      console.log(`R=${R} ${site.id}: ${input ? '' : 'inputs never complete, '}pipeline ${((performance.now() - t0) / 1000).toFixed(1)} s`);
-      if (input) inputs.push(input);
+  const plan = async (label: string, site: Site) => {
+    const t0 = performance.now();
+    const input = await pipeline(site);
+    console.log(`${label} ${site.id}: ${input ? '' : 'inputs never complete, '}pipeline ${((performance.now() - t0) / 1000).toFixed(1)} s`);
+    if (input) inputs.push(input);
+  };
+  if (snap) {
+    const site = snapSite(snap);
+    if (site) await plan(`at ${Math.round(site.x)},${Math.round(site.y)}`, site);
+    else console.log('no hamlet, village or town within 3 km of the snapshot');
+  } else {
+    for (const R of REGIONS) {
+      setRegionOverride(R);
+      for (const site of findSites(R, PER)) await plan(`R=${R}`, site);
     }
   }
   if (process.env.INPUTS) {

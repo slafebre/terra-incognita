@@ -1,14 +1,17 @@
 // Dev tool: builds the pipeline around one place, seeded as the app's ?seed=n, and
-// lists the ways drawn near it.
+// lists the ways drawn near it. With SNAP=<file> (a snapshot from the app's info panel)
+// it replays that land instead; x y default to the snapshot's view.
 //   SEED=7 npx vite-node dev/spot.ts x y [R] [radius]
+//   SNAP=dev/snaps/topo_x_y.json npx vite-node dev/spot.ts [x y] [R] [radius]
 import { ChunkManager } from '../src/chunks/manager';
 import { setRegionOverride } from '../src/gen/terrain';
 import type { SegmentPath } from '../src/gen/roads';
 import type { TaskRequest, TaskResult } from '../src/worker/protocol';
 import { runTask } from '../src/worker/tasks';
+import { applySnap, snap } from './snap';
 
 declare const process: { argv: string[]; env: Record<string, string | undefined> };
-const [X, Y] = [Number(process.argv[2]), Number(process.argv[3])];
+const [X, Y] = process.argv[2] === undefined && snap ? snap.at : [Number(process.argv[2]), Number(process.argv[3])];
 if (process.argv[4] !== undefined) setRegionOverride(Number(process.argv[4]));
 const RAD = Number(process.argv[5] ?? 300);
 const pool = {
@@ -29,7 +32,8 @@ const pool = {
     );
   },
 };
-const m = new ChunkManager(pool, () => {}, Number(process.env.SEED ?? 7) >>> 0);
+const m = new ChunkManager(pool, () => {}, snap ? (snap.seed ?? undefined) : Number(process.env.SEED ?? 7) >>> 0);
+applySnap(m.seeds);
 const view = { x0: X - 700, y0: Y - 700, x1: X + 700, y1: Y + 700 };
 for (let i = 0; i < 40000 && !m.covered(view); i++) {
   m.update(view, view, [X, Y]);

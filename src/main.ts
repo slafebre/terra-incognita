@@ -5,32 +5,61 @@ import { drawGrid } from './view/grid';
 import { Input } from './view/input';
 import { clampZoom, Viewport, zoomBucket, type ViewState } from './view/viewport';
 import { WorkerPool } from './worker/pool';
+import { parseSnapshot, type Snapshot } from './snapshot';
+import { InfoPanel } from './view/info';
 import './style.css';
 
 const canvas = document.getElementById('map') as HTMLCanvasElement;
 const ctx = canvas.getContext('2d', { alpha: false })!;
 const loading = document.getElementById('loading')!;
-const debug = new URLSearchParams(location.search).has('debug');
+const params = new URLSearchParams(location.search);
+const debug = params.has('debug');
+const num = (k: string) => (params.get(k) ? Number(params.get(k)) : undefined);
+
+// Debug: `?snap=/dev/snaps/file.json` replays a snapshot saved from the info panel (key i):
+// its seeds, view, region and world seed. Explicit parameters below still win.
+const snapPath = params.get('snap');
+let snap: Snapshot | undefined;
+if (snapPath) {
+  try {
+    const r = await fetch(snapPath);
+    if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
+    snap = parseSnapshot(await r.json());
+  } catch (e) {
+    loading.textContent = `Couldn’t load snapshot ${snapPath}: ${(e as Error).message}`;
+    throw e;
+  }
+}
 
 const vp = new Viewport();
 // Start somewhere arbitrary: lattice points (like the origin) are where noise is flattest.
 // `?at=x,y` (world metres) and `?z=zoom` are handy for debugging.
-const at = new URLSearchParams(location.search).get('at')?.split(',').map(Number);
+const at = params.get('at')?.split(',').map(Number) ?? snap?.at;
 const actual: ViewState = {
   x: at?.[0] ?? Math.round((Math.random() - 0.5) * 2e6),
   y: at?.[1] ?? Math.round((Math.random() - 0.5) * 2e6),
-  zoom: clampZoom(Number(new URLSearchParams(location.search).get('z') ?? 1) || 1),
+  zoom: clampZoom((num('z') ?? snap?.z ?? 1) || 1),
 };
 const desired: ViewState = { ...actual };
 
 let dirty = true;
 const workers = Math.max(1, Math.min(4, (navigator.hardwareConcurrency || 2) - 1));
 // Debug: `?R=0.1` forces the region (0 lowland … 1 alpine) everywhere.
-const regionOverride = Number(new URLSearchParams(location.search).get('R') ?? NaN);
-const pool = new WorkerPool(workers, () => manager.schedule(), { regionOverride });
+const region = num('R') ?? snap?.R ?? null;
+const pool = new WorkerPool(workers, () => manager.schedule(), { regionOverride: region ?? NaN });
 // Debug: `?seed=n` makes the world reproducible (the same place, the same land).
-const seedParam = new URLSearchParams(location.search).get('seed');
-const manager = new ChunkManager(pool, () => (dirty = true), seedParam === null ? undefined : Number(seedParam) >>> 0);
+const seedParam = num('seed') ?? snap?.seed ?? null;
+const worldSeed = seedParam === null ? null : seedParam >>> 0;
+const manager = new ChunkManager(pool, () => (dirty = true), worldSeed ?? undefined);
+if (snap) manager.seeds.load(snap);
+const info = new InfoPanel({
+  view: actual,
+  seeds: manager.seeds,
+  R: region,
+  seed: worldSeed,
+  snap: snap && snapPath ? { path: snapPath, commit: snap.commit } : undefined,
+});
+if (params.has('info')) info.toggle(true);
 const input = new Input(canvas, vp, actual, desired);
 
 function resize(): void {

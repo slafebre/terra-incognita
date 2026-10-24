@@ -1,4 +1,5 @@
 import { CHUNK } from '../lib/constants';
+import { fromBase64, toBase64 } from '../lib/base64';
 import { freshSeed, hash3 } from '../lib/hash';
 
 /**
@@ -125,6 +126,31 @@ export class SeedStore {
     return { cx0, cy0, cw, ch, chunks, coarse };
   }
 
+  /** Every seed held, for a snapshot: by the invariant above, enough to rebuild all retained land. */
+  dump(): SeedDump {
+    const chunks: number[][] = [];
+    for (const [k, s] of this.chunk) {
+      const [cx, cy] = k.split(',').map(Number);
+      chunks.push([cx, cy, s]);
+    }
+    const coarse: Record<string, number[][]> = {};
+    for (const [k, s] of this.coarse) {
+      const [sPart, rest] = k.split(':');
+      const [ix, iy] = rest.split(',').map(Number);
+      (coarse[sPart] ??= []).push([ix, iy, s]);
+    }
+    return {
+      chunks: encodeGrid(chunks),
+      coarse: Object.fromEntries(Object.entries(coarse).map(([S, e]) => [S, encodeGrid(e)])),
+    };
+  }
+
+  /** Replay a snapshot: its seeds are used instead of fresh (or hashed) ones. */
+  load(d: SeedDump): void {
+    decodeGrid(d.chunks, (cx, cy, s) => this.chunk.set(`${cx},${cy}`, s));
+    for (const [S, g] of Object.entries(d.coarse)) decodeGrid(g, (ix, iy, s) => this.coarse.set(`${S}:${ix},${iy}`, s));
+  }
+
   /** Drop seeds no retained chunk can depend on. `keep` is the retention rectangle. */
   prune(keep: Rect): void {
     const kc = expand(keep, 2 * CHUNK + 64);
@@ -143,6 +169,57 @@ export class SeedStore {
       if (x < keep.x0 - m || x > keep.x1 + m || y < keep.y0 - m || y > keep.y1 + m) this.coarse.delete(k);
     }
   }
+}
+
+/**
+ * Seeds of one lattice, packed: the bounding box of the points held, row-major seeds
+ * and a bit per point saying whether it is held (a seed may be 0), both as base64.
+ */
+export interface SeedGrid {
+  ix0: number;
+  iy0: number;
+  w: number;
+  h: number;
+  seeds: string;
+  mask: string;
+}
+
+/** All seeds of a SeedStore: chunk seeds, and coarse seeds by spacing. */
+export interface SeedDump {
+  chunks: SeedGrid;
+  coarse: Record<string, SeedGrid>;
+}
+
+function encodeGrid(e: number[][]): SeedGrid {
+  let ix0 = Infinity;
+  let iy0 = Infinity;
+  let ix1 = -Infinity;
+  let iy1 = -Infinity;
+  for (const [ix, iy] of e) {
+    ix0 = Math.min(ix0, ix);
+    iy0 = Math.min(iy0, iy);
+    ix1 = Math.max(ix1, ix);
+    iy1 = Math.max(iy1, iy);
+  }
+  if (!e.length) return { ix0: 0, iy0: 0, w: 0, h: 0, seeds: '', mask: '' };
+  const w = ix1 - ix0 + 1;
+  const h = iy1 - iy0 + 1;
+  const seeds = new Uint32Array(w * h);
+  const mask = new Uint8Array((w * h + 7) >> 3);
+  for (const [ix, iy, s] of e) {
+    const i = (iy - iy0) * w + ix - ix0;
+    seeds[i] = s;
+    mask[i >> 3] |= 1 << (i & 7);
+  }
+  return { ix0, iy0, w, h, seeds: toBase64(seeds), mask: toBase64(mask) };
+}
+
+function decodeGrid(g: SeedGrid, put: (ix: number, iy: number, seed: number) => void): void {
+  const n = g.w * g.h;
+  if (!n) return;
+  const seeds = new Uint32Array(fromBase64(g.seeds).buffer, 0, n);
+  const mask = fromBase64(g.mask);
+  for (let i = 0; i < n; i++) if (mask[i >> 3] & (1 << (i & 7))) put(g.ix0 + (i % g.w), g.iy0 + Math.floor(i / g.w), seeds[i]);
 }
 
 /** A lattice whose per-point random value is `seed(ix, iy)`. */
