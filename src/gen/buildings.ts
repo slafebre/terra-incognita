@@ -5,8 +5,9 @@ import { lerp } from '../lib/noise';
  * function of the same inputs, drawn alike by every chunk.
  *
  * Both sides of every built-up front (its streets, and the stretches of road
- * through built-up land) are walked from end to end, and a footprint — a
- * rectangle square to the street — is tried at each step. Two densities:
+ * through built-up land) are walked from end to end, main roads first, and a
+ * footprint — a rectangle square to the street — is tried at each step. Two
+ * densities:
  *  - dense (the old core): terraced rows flush with the street, wall to wall,
  *    now and then a gap for an alley or a yard;
  *  - loose (everywhere else): detached houses set back from the street with
@@ -25,11 +26,11 @@ export interface Way {
 }
 
 export interface BuildingInput {
-  /** Polylines built up on both sides. */
-  fronts: Float32Array[];
+  /** Polylines built up on both sides, in the order they are to be built (`main`: a main road). */
+  fronts: { xy: Float32Array; main: boolean }[];
   ways: Way[];
-  /** Is (x, y) in the dense zone? */
-  dense: (x: number, y: number) => boolean;
+  /** Is (x, y) in the dense zone (on a main road, or a street)? */
+  dense: (x: number, y: number, main: boolean) => boolean;
   /** Can a building corner stand at (x, y)? (Dry, not too steep, inside the plan.) */
   ok: (x: number, y: number) => boolean;
   rand: () => number;
@@ -130,7 +131,7 @@ export function placeBuildings({ fronts, ways, dense, ok, rand, gapScale = 1 }: 
       }
   };
 
-  for (const xy of fronts) {
+  for (const { xy, main } of fronts) {
     const n = xy.length / 2;
     if (n < 2) continue;
     const S = [0];
@@ -147,7 +148,7 @@ export function placeBuildings({ fronts, ways, dense, ok, rand, gapScale = 1 }: 
       let s = rand() * 4;
       while (s < L - 4) {
         const [px, py] = at(s);
-        const isDense = dense(px, py);
+        const isDense = dense(px, py, main);
         let w: number;
         let d: number;
         let setback: number;

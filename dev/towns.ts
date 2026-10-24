@@ -177,12 +177,37 @@ for (const input of inputs) {
   // Bare street: share of the fronts' sides (sampled every 5 m, 12 m off the centre line) with no building within 15 m.
   let bare = 0;
   let sides = 0;
+  // …and along main roads (N, D, C) within 150 m of the centre.
+  let mainBare = 0;
+  let mainSides = 0;
+  let mainLined = 0;
   {
+    const redrawn = new Set(p.replaced);
+    const mains = [...input.roads.filter((r) => !redrawn.has(r.key)), ...p.roads].filter((r) => r.cls <= 2).map((r) => r.xy);
+    const onMain = (x: number, y: number) =>
+      mains.some((m) => {
+        for (let k = 0; k < m.length; k += 2) if (Math.abs(m[k] - x) < 0.5 && Math.abs(m[k + 1] - y) < 0.5) return true;
+        return false;
+      });
     const b = p.buildings;
+    const quads: number[][] = [];
+    for (let i = 0; i < b.length; i += 8) quads.push(Array.from(b.subarray(i, i + 8)));
+    const inside = (q: number[], x: number, y: number) => {
+      let sg = 0;
+      for (let k = 0; k < 4; k++) {
+        const c = (q[(2 * k + 2) % 8] - q[2 * k]) * (y - q[2 * k + 1]) - (q[(2 * k + 3) % 8] - q[2 * k + 1]) * (x - q[2 * k]);
+        if (c !== 0) {
+          if (sg && Math.sign(c) !== sg) return false;
+          sg = Math.sign(c);
+        }
+      }
+      return true;
+    };
     const cs: [number, number][] = [];
     for (let i = 0; i < b.length; i += 8) cs.push([(b[i] + b[i + 4]) / 2, (b[i + 1] + b[i + 5]) / 2]);
     for (const fr of p.frontage) {
       const xy = fr.xy;
+      const main = onMain(xy[0], xy[1]) && onMain(xy[xy.length - 2], xy[xy.length - 1]);
       for (let i = 2; i < xy.length; i += 2) {
         const dx = xy[i] - xy[i - 2];
         const dy = xy[i + 1] - xy[i - 1];
@@ -192,7 +217,16 @@ for (const input of inputs) {
             const x = xy[i - 2] + (dx * t) / l - (dy / l) * 12 * sd;
             const y = xy[i - 1] + (dy * t) / l + (dx / l) * 12 * sd;
             sides++;
-            if (!cs.some(([qx, qy]) => Math.abs(qx - x) < 15 && Math.abs(qy - y) < 15)) bare++;
+            const isBare = !cs.some(([qx, qy]) => Math.abs(qx - x) < 15 && Math.abs(qy - y) < 15);
+            if (isBare) bare++;
+            if (main && Math.hypot(x - p.x, y - p.y) < 150) {
+              mainSides++;
+              if (isBare) mainBare++;
+              // Lined: 7 m off the centre line (inside a terrace on any main road) falls in a footprint.
+              const lx = xy[i - 2] + (dx * t) / l - (dy / l) * 7 * sd;
+              const ly = xy[i - 1] + (dy * t) / l + (dx / l) * 7 * sd;
+              if (quads.some((q) => inside(q, lx, ly))) mainLined++;
+            }
           }
       }
     }
@@ -202,7 +236,7 @@ for (const input of inputs) {
   writeFileSync(f, svgs[svgs.length - 1]);
   console.log(
     `R=${site.R.toFixed(2)} ${site.id} at ${site.x.toFixed(0)},${site.y.toFixed(0)}: ${p.streets.length} streets, ${km.toFixed(2)} km, ` +
-      `${p.buildings.length / 8} buildings, ${((100 * bare) / Math.max(1, sides)).toFixed(0)} % bare, plan ${ms.toFixed(0)} ms → ${f}`,
+      `${p.buildings.length / 8} buildings, ${((100 * bare) / Math.max(1, sides)).toFixed(0)} % bare (main roads near the centre: ${((100 * mainBare) / Math.max(1, mainSides)).toFixed(0)} % bare, ${((100 * mainLined) / Math.max(1, mainSides)).toFixed(0)} % lined), plan ${ms.toFixed(0)} ms → ${f}`,
   );
 }
 // One SVG of them all, nested in a grid (square, so thumbnailers show it whole).

@@ -114,6 +114,8 @@ const OLD_DENSITY = [0.045, 0.035];
 export const ROAD_CLEAR = [6, 5, 4, 2.5, 1.5];
 /** …and from a street's (street, lane). */
 export const STREET_CLEAR = [3.5, 3];
+/** Terraces line the main roads out to this many times the old core's radius. */
+const MAIN_DENSE = 1.25;
 /** Hamlets' houses stand further apart. */
 const HAMLET_GAPS = 1.8;
 /** No building this close to the church at a village's or town's centre (m). */
@@ -1027,15 +1029,31 @@ export function planTown({ site, roads, patch: p }: PlanInput): TownPlan {
   }
 
   const frontage: { depth: number; xy: Float32Array }[] = [];
+  /**
+   * The same, in the order they were built up: the main roads first (their rows came
+   * first, and claim the corners), then the streets off them, generation by
+   * generation, then tracks taken in; each centre outward.
+   */
+  const fronts: { xy: Float32Array; main: boolean; order: number }[] = [];
   // (Own copies: a plan's buffers are transferred from the worker, each once.)
-  kept.forEach(({ li }, i) => frontage.push({ depth: lines[li].style!.depth, xy: out[i].xy.slice() }));
+  kept.forEach(({ li }, i) => {
+    frontage.push({ depth: lines[li].style!.depth, xy: out[i].xy.slice() });
+    fronts.push({ xy: out[i].xy, main: false, order: 1 + lines[li].gen });
+  });
   const roadDepth = rank === HAMLET ? lane.depth : organic.depth;
-  for (const u of upgraded) frontage.push({ depth: roadDepth, xy: u.xy.slice() });
+  for (const u of upgraded) {
+    frontage.push({ depth: roadDepth, xy: u.xy.slice() });
+    fronts.push({ xy: u.xy, main: false, order: 10 });
+  }
   for (const L of lines) {
     if (!L.road || (rank === HAMLET && L.cls > ROAD_C)) continue;
     let run: number[] = [];
     const flush = () => {
-      if (run.length >= 4) frontage.push({ depth: roadDepth, xy: Float32Array.from(run) });
+      if (run.length >= 4) {
+        const xy = Float32Array.from(run);
+        frontage.push({ depth: roadDepth, xy });
+        fronts.push({ xy, main: L.cls <= ROAD_C, order: L.cls <= ROAD_C ? 0 : 10 });
+      }
       run = [];
     };
     for (let i = 0; i < L.xs.length; i++) {
@@ -1056,10 +1074,10 @@ export function planTown({ site, roads, patch: p }: PlanInput): TownPlan {
     return Math.hypot(xy[k] - cx, xy[k + 1] - cy);
   };
   const buildings = placeBuildings({
-    // Nearest the centre first: the dense rows claim their plots before the houses.
-    fronts: frontage.map((f) => f.xy).sort((a, b) => mid(a) - mid(b)),
+    fronts: fronts.sort((a, b) => a.order - b.order || mid(a.xy) - mid(b.xy)),
     ways,
-    dense: (x, y) => rank !== HAMLET && zoneDist(x, y, false) < oldCore,
+    // Main roads keep their terraces a little further out (the faubourgs).
+    dense: (x, y, main) => rank !== HAMLET && zoneDist(x, y, main) < oldCore * (main ? MAIN_DENSE : 1),
     ok: (x, y) => {
       const r = Math.hypot(x - cx, y - cy);
       if (wet(x, y) || areaAt(x, y) > STREAM_A || r > extent - 5 || (rank !== HAMLET && r < CHURCH_CLEAR)) return false;
