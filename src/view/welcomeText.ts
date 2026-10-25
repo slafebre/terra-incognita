@@ -64,9 +64,9 @@ export const WELCOME: Record<Lang, WelcomeText> = {
     subtitle: 'Une carte topographique sans fin',
     scale: `1/10${nbsp}000`,
     paragraphs: [
-      `Bienvenue${nb}! Voici la carte d’un pays qui n’existe pas. Elle se dessine au fil de vos pas, dans le style des cartes IGN au 1/25${nbsp}000 mais au 1/10${nbsp}000${nb}: relief ombré depuis le nord-ouest, courbes de niveau tous les 5 mètres, bois, ruisseaux, villages autour de leur église, routes, chemins et sentiers.`,
-      `Partez dans n’importe quelle direction${nb}: le pays ne s’arrête jamais. Mais il ne vous attend pas non plus. Ce qui sort du champ de plus de 4 km environ est oublié${nb}; si vous revenez, vous trouverez un autre paysage.`,
-      'Là où la carte n’est pas encore levée, elle vous retient un instant, le temps que les géomètres vous rattrapent. Les chiffres bleus dans la marge sont des kilomètres, comme sur une feuille imprimée.',
+      `Bienvenue${nb}! Voici la carte d’un pays qui n’existe pas. Elle se dessine au fil de vos pas${nb}: collines, courbes de niveau, bois, ruisseaux, villages, routes, chemins et sentiers.`,
+      `Partez dans n’importe quelle direction${nb}: le pays ne s’arrête jamais. Mais il ne vous attend pas non plus. Allez trop loin et il est oublié${nb}; si vous revenez, vous trouverez un autre paysage.`,
+      'Là où la carte n’est pas encore dessinée, elle vous retient un instant, le temps que les géomètres vous rattrapent.',
     ],
     controlsTitle: 'Se déplacer',
     controls: [
@@ -84,9 +84,9 @@ export const WELCOME: Record<Lang, WelcomeText> = {
     subtitle: 'Eine endlose topografische Karte',
     scale: '1:10.000',
     paragraphs: [
-      'Willkommen! Dies ist die Karte eines Landes, das es nicht gibt. Sie entsteht, während du dich umsiehst, im Stil der französischen IGN-Karten 1:25.000, aber im Maßstab 1:10.000: Gelände von Nordwesten schattiert, Höhenlinien alle 5 Meter, Wälder, Bäche, Dörfer um ihre Kirche, Straßen, Wirtschaftswege und Fußwege.',
-      'Zieh in jede Richtung los: Das Land hört nie auf. Aber es wartet auch nicht auf dich. Was weiter als etwa 4 km aus dem Blick gerät, wird vergessen; kommst du zurück, findest du etwas Neues.',
-      'Wo die Karte noch nicht gezeichnet ist, hält sie dich kurz auf, bis die Landvermesser nachkommen. Die blauen Zahlen im Rand sind Kilometer, wie auf einem gedruckten Kartenblatt.',
+      'Willkommen! Dies ist die Karte eines Landes, das es nicht gibt. Sie entsteht, während du dich umsiehst: Hügel, Höhenlinien, Wälder, Bäche, Dörfer, Straßen, Wirtschaftswege und Fußwege.',
+      'Zieh in jede Richtung los: Das Land hört nie auf. Aber es wartet auch nicht auf dich. Scrollst du zu weit, wird es vergessen; kommst du zurück, findest du etwas Neues.',
+      'Wo die Karte noch nicht gezeichnet ist, hält sie dich kurz auf, bis die Landvermesser nachkommen.',
     ],
     controlsTitle: 'Bedienung',
     controls: [
