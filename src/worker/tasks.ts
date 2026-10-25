@@ -36,12 +36,13 @@ export function runTask(t: TaskRequest): { result: TaskResult; transfer: Transfe
       const terrain = new Terrain(view);
       const field = new CoarseField(terrain, view);
       const set = new Settlements(field, terrain, view);
-      const motorways = new Motorways(field, terrain, set, view).netCellPieces(t.gx, t.gy);
-      const result = { ...latticeCell(t.gx, t.gy, field, set, terrain), motorways };
+      const mw = new Motorways(field, terrain, set, view);
+      const motorways = mw.netCellPieces(t.gx, t.gy);
+      const result = { ...latticeCell(t.gx, t.gy, field, set, terrain, mw), motorways };
       return { result: { kind: 'net', result, ms: ms() }, transfer: motorways.map((m) => m.xy.buffer) };
     }
     case 'roads': {
-      const result = routeCurves(t.segments, t.patch);
+      const result = routeCurves(t.segments, t.patch, t.motorways);
       return { result: { kind: 'roads', result, ms: ms() }, transfer: result.map((r) => r.xy.buffer) };
     }
     case 'plan': {

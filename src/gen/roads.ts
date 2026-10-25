@@ -22,7 +22,14 @@ export const NET_CELL = 8192;
  */
 const SITE_REACH = 35500;
 const LAKE_TEST_REACH = 30000;
-export const NET_REACH = Math.max(SITE_REACH, LAKE_TEST_REACH + LAKE_TILE + LAKE_REACH) + COARSE_REACH;
+/**
+ * Motorways (motorway.ts) keep the network off them along every corridor (vertices
+ * ~26 km out, the pieces passing near them a few km further), and a piece reads the
+ * line's noise up to MW_DEPEND (40 km) beyond its cell: only noise seeds, as the coarse
+ * terrain it routes on lies within ~55 km.
+ */
+const MOTORWAY_REACH = 76000;
+export const NET_REACH = Math.max(Math.max(SITE_REACH, LAKE_TEST_REACH + LAKE_TILE + LAKE_REACH) + COARSE_REACH, MOTORWAY_REACH);
 if (NET_REACH + 4000 > COARSE_KEEP_EXTRA) throw new Error('coarse seeds are not kept as far as net cells read them');
 
 export const ROAD_N = 0;

@@ -10,7 +10,7 @@ export type TaskRequest =
   | { kind: 'pre'; chunks: [number, number][]; seeds: SeedPayload }
   | { kind: 'hydro'; cx: number; cy: number; win: HydroWindow; seeds: SeedPayload }
   | { kind: 'net'; gx: number; gy: number; seeds: SeedPayload }
-  | { kind: 'roads'; cx: number; cy: number; segments: SegmentTask[]; patch: RoadPatch }
+  | { kind: 'roads'; cx: number; cy: number; segments: SegmentTask[]; patch: RoadPatch; motorways: Float64Array[] }
   | { kind: 'plan'; input: PlanInput }
   | { kind: 'dem'; cx: number; cy: number; patch: DemPatch; sites: Site[]; seeds: SeedPayload }
   | {

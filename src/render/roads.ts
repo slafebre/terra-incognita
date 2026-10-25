@@ -1,6 +1,7 @@
 import { APRON, CELL, CHUNK, DEM_W } from '../lib/constants';
 import { COVER, COVER_SCALE } from '../gen/landcover';
 import { smoothPolyline } from '../lib/polyline';
+import { lineDistance, MW_VERGE, MW_WIDTH } from '../gen/motorway';
 import { ROAD_C, ROAD_D, ROAD_N, ROAD_P, ROAD_T, type SegmentPath } from '../gen/roads';
 import { VILLAGE } from '../gen/settle';
 import { LANE, type Street, type TownPlan } from '../gen/town';
@@ -23,41 +24,42 @@ const CLEAR_EDGE = 6;
 const CLEARED = [COVER.forest, COVER.vineyard, COVER.wetland, COVER.heath];
 
 /**
- * Clears the cover fields (in place) under the built-up strips of the plans, so
- * no trees or vines show through: each field is held below the signed distance
- * to the strip's edge.
+ * Clears the cover fields (in place) under the built-up strips of the plans and under
+ * motorways and their verges, so no trees or vines show through: each field is held
+ * below the signed distance to the strip's edge.
  */
-export function clearUnderBuiltUp(cover: Int8Array, plans: TownPlan[], cx: number, cy: number): void {
+export function clearUnderBuiltUp(cover: Int8Array, plans: TownPlan[], cx: number, cy: number, motorways: Float64Array[] = []): void {
   const N = DEM_W * DEM_W;
   const ox = cx * CHUNK - APRON * CELL;
   const oy = cy * CHUNK - APRON * CELL;
   // Signed distance (m) to the nearest strip's edge, where within reach.
   const dist = new Float32Array(N).fill(Infinity);
-  for (const pl of plans)
-    for (const f of pl.frontage) {
-      const reach = f.depth + CLEAR_EDGE;
-      for (let k = 2; k < f.xy.length; k += 2) {
-        const ax = f.xy[k - 2] - ox;
-        const ay = f.xy[k - 1] - oy;
-        const dx = f.xy[k] - ox - ax;
-        const dy = f.xy[k + 1] - oy - ay;
-        const i0 = Math.max(0, Math.floor((Math.min(ax, ax + dx) - reach) / CELL));
-        const i1 = Math.min(DEM_W - 1, Math.ceil((Math.max(ax, ax + dx) + reach) / CELL));
-        const j0 = Math.max(0, Math.floor((Math.min(ay, ay + dy) - reach) / CELL));
-        const j1 = Math.min(DEM_W - 1, Math.ceil((Math.max(ay, ay + dy) + reach) / CELL));
-        if (i0 > i1 || j0 > j1) continue;
-        const l2 = dx * dx + dy * dy || 1e-9;
-        for (let j = j0; j <= j1; j++)
-          for (let i = i0; i <= i1; i++) {
-            const px = i * CELL - ax;
-            const py = j * CELL - ay;
-            const t = Math.max(0, Math.min(1, (px * dx + py * dy) / l2));
-            const d = Math.hypot(px - t * dx, py - t * dy) - f.depth;
-            const o = j * DEM_W + i;
-            if (d < dist[o]) dist[o] = d;
-          }
-      }
+  // Built-up strips, and motorways with their verges.
+  const strips: { xy: ArrayLike<number>; depth: number }[] = [...plans.flatMap((pl) => pl.frontage), ...motorways.map((xy) => ({ xy, depth: MW_VERGE }))];
+  for (const f of strips) {
+    const reach = f.depth + CLEAR_EDGE;
+    for (let k = 2; k < f.xy.length; k += 2) {
+      const ax = f.xy[k - 2] - ox;
+      const ay = f.xy[k - 1] - oy;
+      const dx = f.xy[k] - ox - ax;
+      const dy = f.xy[k + 1] - oy - ay;
+      const i0 = Math.max(0, Math.floor((Math.min(ax, ax + dx) - reach) / CELL));
+      const i1 = Math.min(DEM_W - 1, Math.ceil((Math.max(ax, ax + dx) + reach) / CELL));
+      const j0 = Math.max(0, Math.floor((Math.min(ay, ay + dy) - reach) / CELL));
+      const j1 = Math.min(DEM_W - 1, Math.ceil((Math.max(ay, ay + dy) + reach) / CELL));
+      if (i0 > i1 || j0 > j1) continue;
+      const l2 = dx * dx + dy * dy || 1e-9;
+      for (let j = j0; j <= j1; j++)
+        for (let i = i0; i <= i1; i++) {
+          const px = i * CELL - ax;
+          const py = j * CELL - ay;
+          const t = Math.max(0, Math.min(1, (px * dx + py * dy) / l2));
+          const d = Math.hypot(px - t * dx, py - t * dy) - f.depth;
+          const o = j * DEM_W + i;
+          if (d < dist[o]) dist[o] = d;
+        }
     }
+  }
   for (let o = 0; o < N; o++) {
     const d = dist[o];
     if (d >= CLEAR_EDGE) continue;
@@ -198,7 +200,12 @@ export function drawRoads(
     ctx.lineWidth = width(cls);
     ctx.stroke(paths[cls]);
   }
-  // Bridges, on top: parapets, the gap between them, then the way itself again.
+  drawBridges(ctx, bridges, pxPerM, dpr);
+}
+
+/** Bridges by class, on top: parapets, the gap between them, then the way itself again. */
+function drawBridges(ctx: Ctx, bridges: Path2D[], pxPerM: number, dpr: number): void {
+  const width = (cls: number) => Math.max(WIDTH_M[cls] * pxPerM, MIN_PX[cls] * dpr);
   const { gap, line } = STYLE.roads.bridge;
   ctx.lineCap = 'butt';
   for (const cls of [ROAD_P, ROAD_T, ROAD_C, ROAD_D, ROAD_N]) {
@@ -228,10 +235,20 @@ export function drawRoads(
 
 /**
  * Motorways (experimental): each centre line cased, filled, and split down the middle
- * by its central reservation; drawn over the other roads (where ways cross it is not
- * decided yet). Over water they are bridges, with parapets as other roads have.
+ * by its central reservation; drawn over the other roads, which cross it on bridges
+ * (drawn again on top where they pass over it). Over water they are bridges too, with
+ * parapets as other roads have.
  */
-export function drawMotorways(ctx: Ctx, lines: Float64Array[], cx: number, cy: number, pxPerM: number, dpr: number, water: Float32Array): void {
+export function drawMotorways(
+  ctx: Ctx,
+  lines: Float64Array[],
+  roads: SegmentPath[],
+  cx: number,
+  cy: number,
+  pxPerM: number,
+  dpr: number,
+  water: Float32Array,
+): void {
   if (!lines.length) return;
   const m = STYLE.roads.motorway;
   const path = new Path2D();
@@ -268,7 +285,7 @@ export function drawMotorways(ctx: Ctx, lines: Float64Array[], cx: number, cy: n
       i = e;
     }
   }
-  const W = Math.max(m.widthM * pxPerM, m.minPx * dpr);
+  const W = Math.max(MW_WIDTH * pxPerM, m.minPx * dpr);
   const casing = 2 * STYLE.roads.casingWidth * dpr;
   const carriageway = () => {
     ctx.strokeStyle = STYLE.roads.casing;
@@ -302,4 +319,42 @@ export function drawMotorways(ctx: Ctx, lines: Float64Array[], cx: number, cy: n
   ctx.strokeStyle = m.median;
   ctx.lineWidth = m.medianWidth * dpr;
   ctx.stroke(bridges);
+  // Ways over it: the runs of each within its half width (and a little), one point past
+  // either side, smoothed as drawRoads draws them.
+  const over = [new Path2D(), new Path2D(), new Path2D(), new Path2D(), new Path2D()];
+  const reach = MW_WIDTH / 2 + OVERPASS_MARGIN;
+  const near = lineDistance(lines, reach + 1);
+  for (const seg of roads) {
+    const n = seg.xy.length / 2;
+    if (n < 2) continue;
+    const hit: boolean[] = [];
+    let any = false;
+    for (let i = 0; i < n; i++) {
+      const h = near(seg.xy[2 * i], seg.xy[2 * i + 1]) < reach;
+      hit.push(h);
+      any ||= h;
+    }
+    if (!any) continue;
+    const xs: number[] = [];
+    const ys: number[] = [];
+    for (let i = 0; i < n; i++) {
+      xs.push((seg.xy[2 * i] - ox) * pxPerM);
+      ys.push((seg.xy[2 * i + 1] - oy) * pxPerM);
+    }
+    for (let pass = 0; pass < SMOOTH_PASSES[seg.cls]; pass++) smoothPolyline(xs, ys);
+    for (let i = 0; i < n; i++) {
+      if (!hit[i]) continue;
+      let e = i;
+      while (e + 1 < n && hit[e + 1]) e++;
+      const s0 = Math.max(0, i - 1);
+      const e0 = Math.min(n - 1, e + 1);
+      over[seg.cls].moveTo(xs[s0], ys[s0]);
+      for (let k = s0 + 1; k <= e0; k++) over[seg.cls].lineTo(xs[k], ys[k]);
+      i = e;
+    }
+  }
+  drawBridges(ctx, over, pxPerM, dpr);
 }
+
+/** Ways cross a motorway on a bridge over this much more than its half width (m). */
+const OVERPASS_MARGIN = 4;

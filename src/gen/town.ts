@@ -2,6 +2,7 @@ import { hash1, hash3, rng } from '../lib/hash';
 import { lerp, smoothstep } from '../lib/noise';
 import { placeBuildings, segPointDist, segQuadDist, type Way } from './buildings';
 import { NODE } from './hydro';
+import { lineDistance, MW_BUILD_CLEAR, MW_PLAN_CLEAR } from './motorway';
 import { RESERVOIR, TOWER, type Poi } from './poi';
 import { nearestVertex, vertexPos } from './lattice';
 import { outsideCircle, ROAD_C, ROAD_P, ROAD_T, ringDisc, ringLine, type RoadPatch, type SegmentPath } from './roads';
@@ -196,6 +197,8 @@ export interface PlanInput {
   site: Site;
   /** Drawn road segments near the site (any order). */
   roads: SegmentPath[];
+  /** Centre lines of the motorways passing through its extent (experimental): kept clear of, as water. */
+  motorways?: Float64Array[];
   /** Fine nodes covering the site's extent plus margin. */
   patch: RoadPatch;
 }
@@ -221,7 +224,7 @@ interface Line {
 /** Debugging: why branches ended or were refused, summed over plans. */
 export const planStats: Record<string, number> = {};
 
-export function planTown({ site, roads, patch: p }: PlanInput): TownPlan {
+export function planTown({ site, roads, patch: p, motorways = [] }: PlanInput): TownPlan {
   const rank = site.rank;
   if (rank !== TOWN && rank !== VILLAGE && rank !== HAMLET) throw new Error('plans are for hamlets, villages and towns');
   const seed = hashString(site.id);
@@ -246,9 +249,12 @@ export function planTown({ site, roads, patch: p }: PlanInput): TownPlan {
     const z = p.zE;
     return (z[k] * (1 - fu) + z[k + 1] * fu) * (1 - fv) + (z[k + w] * (1 - fu) + z[k + w + 1] * fu) * fv;
   };
+  // Motorways count as water: streets stop short of them, nothing is built on them,
+  // no street meets a road where it bridges one.
+  const mwDist = lineDistance(motorways, MW_PLAN_CLEAR);
   const wet = (x: number, y: number) => {
     const k = node(x, y);
-    return k < 0 || !Number.isNaN(p.lake[k]);
+    return k < 0 || !Number.isNaN(p.lake[k]) || mwDist(x, y) < MW_PLAN_CLEAR;
   };
   const areaAt = (x: number, y: number) => {
     const k = node(x, y);
@@ -1533,6 +1539,7 @@ export function planTown({ site, roads, patch: p }: PlanInput): TownPlan {
     ...sorted.filter((q) => !replaced.has(q.key)).map((q) => ({ xy: q.xy, clear: ROAD_CLEAR[q.cls] })),
     ...roadsOut.map((q) => ({ xy: q.xy, clear: ROAD_CLEAR[q.cls] })),
     ...allStreets.map((q) => ({ xy: q.xy, clear: STREET_CLEAR[q.cls] })),
+    ...motorways.map((xy) => ({ xy: Float32Array.from(xy), clear: MW_BUILD_CLEAR })),
   ];
   const mid = (xy: Float32Array) => {
     const k = 2 * Math.floor(xy.length / 4);

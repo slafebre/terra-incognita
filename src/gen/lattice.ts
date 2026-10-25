@@ -4,6 +4,7 @@ import { MinHeap } from '../lib/heap';
 import { lerp, smoothstep } from '../lib/noise';
 import { coarseEpochNow, type CoarseField, NODE } from './hydro';
 import { lakesOf } from './lakes';
+import { lineCrossings, lineDistance, MotorwayLookup, type Motorways } from './motorway';
 import {
   MAX_GRADE,
   MAX_LEN,
@@ -338,6 +339,8 @@ const edgeKey = (u: number, v: number) => (u < v ? `${u}_${v}` : `${v}_${u}`);
 const caches = {
   epoch: -1,
   vertex: new Map<number, { x: number; y: number; z: number; area: number; valley: number; wet: boolean }>(),
+  /** Vertices near a motorway (no junction there). */
+  motorway: new Map<number, boolean>(),
   cost: new Map<number, number>(),
   terrain: new Map<number, { grade: number; local: number; stream: number }>(),
   path: new Map<string, [number, number][] | null>(),
@@ -369,6 +372,7 @@ function netCaches(): typeof caches {
     caches.cost.clear();
     caches.terrain.clear();
     caches.path.clear();
+    caches.motorway.clear();
     caches.epoch = e;
   }
   return caches;
@@ -461,9 +465,35 @@ const BRIDGE_COST = 40;
 const LAKE_W = 12;
 const LAKE_BRIDGE = 150;
 const LAKE_SAMPLES = 5;
+/**
+ * Motorways (experimental, motorway.ts): no vertex within MW_VERTEX (m) of one is used
+ * (no junction on it); an edge may cross one, at no less than MW_ANGLE, paying MW_CROSS
+ * (m, by class: a bridge; local ways gather at a few, main roads cross once rather than
+ * weave across), but not run within MW_EDGE of it.
+ */
+const MW_VERTEX = 50;
+const MW_ANGLE = (35 * Math.PI) / 180;
+const MW_CROSS = [300, 300, 400, 800, 800];
+const MW_EDGE = 30;
+/** Is vertex v within MW_VERTEX of a motorway? */
+function nearMotorway(field: CoarseField, v: number): boolean {
+  if (!motorways) return false;
+  const m = netCaches().motorway;
+  let b = m.get(v);
+  if (b === undefined) {
+    const d = vdata(field, v);
+    m.set(v, (b = motorways.dist(d.x, d.y) < MW_VERTEX));
+  }
+  return b;
+}
+/** Farms and hamlets this near a motorway (m) are left out: it runs through them. */
+const MW_SITE = [0, 0, 200, 120];
+/** The motorways the network keeps to: set by latticeCell for its own edges (the caches are pure functions of the seeds). */
+let motorways: MotorwayLookup | undefined;
 function edgeCostRaw(field: CoarseField, u: number, v: number, cls: RoadClass): number {
   const a = vdata(field, u);
   const b = vdata(field, v);
+  if (nearMotorway(field, u) || nearMotorway(field, v)) return Infinity;
   const len = Math.hypot(b.x - a.x, b.y - a.y);
   const { stream } = edgeTerrain(field, u, v);
   const g = classGrade(field, u, v, cls);
@@ -479,6 +509,12 @@ function edgeCostRaw(field: CoarseField, u: number, v: number, cls: RoadClass): 
     if (lakes.wet(a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t)) wet++;
   }
   if (wet) c += (len * LAKE_W * wet) / LAKE_SAMPLES + (wet < LAKE_SAMPLES ? LAKE_BRIDGE / 2 : 0);
+  if (motorways) {
+    const m = motorways.crossing(a.x, a.y, b.x, b.y);
+    // (A crossing edge passes close by the motorway's segments either side of the crossing.)
+    if (m.n ? m.angle < MW_ANGLE : m.dist < MW_EDGE) return Infinity;
+    c += m.n * MW_CROSS[cls];
+  }
   const lo = Math.min(u, v);
   const hi = Math.max(u, v);
   c *= 1 + 0.01 * (hash3(hash3(0x7e1d9, vi(lo), vj(lo)), vi(hi), vj(hi)) / 4294967296);
@@ -487,8 +523,16 @@ function edgeCostRaw(field: CoarseField, u: number, v: number, cls: RoadClass): 
 /** No edge costs less than this × its length (for A* estimates). */
 const MIN_FACTOR = 1 - VALLEY_BONUS;
 
-export function latticeCell(gx: number, gy: number, field: CoarseField, set: Settlements, terrain?: Terrain): Omit<NetCell, 'motorways'> {
+export function latticeCell(
+  gx: number,
+  gy: number,
+  field: CoarseField,
+  set: Settlements,
+  terrain?: Terrain,
+  mw?: Motorways,
+): Omit<NetCell, 'motorways'> {
   if (DEBUG_PATHS) DEBUG_TERRAIN = terrain;
+  motorways = mw && new MotorwayLookup(mw);
   field.checkSeeds();
   const debugSeen = new Set<string>();
   const x0 = gx * NET_CELL;
@@ -498,7 +542,8 @@ export function latticeCell(gx: number, gy: number, field: CoarseField, set: Set
   pruneNetCaches(x0, y0, x1, y1);
   const inBoxXY = (x: number, y: number, m: number) => x >= x0 - m && x < x1 + m && y >= y0 - m && y < y1 + m;
   const inBox = (s: { x: number; y: number }, m: number) => inBoxXY(s.x, s.y, m);
-  const sitesIn = (rank: 0 | 1 | 2 | 3, m: number) => set.sitesIn(rank, x0 - m, y0 - m, x1 + m, y1 + m);
+  const sitesIn = (rank: 0 | 1 | 2 | 3, m: number) =>
+    set.sitesIn(rank, x0 - m, y0 - m, x1 + m, y1 + m).filter((s) => !MW_SITE[rank] || !motorways || motorways.dist(s.x, s.y) >= MW_SITE[rank]);
   const dist = (a: { x: number; y: number }, b: { x: number; y: number }) => Math.hypot(a.x - b.x, a.y - b.y);
   const pos = (v: number) => vdata(field, v);
 
@@ -988,7 +1033,7 @@ export function latticeCell(gx: number, gy: number, field: CoarseField, set: Set
   const ringChance = (v: number) => {
     const at = roadsAt(v);
     const main = at.filter((c) => c <= ROAD_D).length;
-    if (at.length < 3 || main < 2 || siteVerts.has(v)) return 0;
+    if (at.length < 3 || main < 2 || siteVerts.has(v) || nearMotorway(field, v)) return 0;
     const p = pos(v);
     if (planned.some((s) => dist(s, p) < PLAN_EXTENT[s.rank] + RING_PLAN_GAP)) return 0;
     const dt = townDist(v);
@@ -1041,7 +1086,7 @@ export function latticeCell(gx: number, gy: number, field: CoarseField, set: Set
  * way through), if any. Pairs are matched per vertex from all its edges, so both
  * edges of a pair agree, in every chunk.
  */
-export function latticeSegments(edges: RoadEdge[], cx: number, cy: number): SegmentTask[] {
+export function latticeSegments(edges: RoadEdge[], cx: number, cy: number, motorways: ArrayLike<number>[] = []): SegmentTask[] {
   const at = new Map<string, { x: number; y: number; cls: RoadClass; ox: number; oy: number; key: string }[]>();
   const k2 = (x: number, y: number) => `${x},${y}`;
   for (const e of edges) {
@@ -1199,6 +1244,22 @@ export function latticeSegments(edges: RoadEdge[], cx: number, cy: number): Segm
       }
       if (near) obstacles.push(...r);
     }
+    // Motorways near the run: it keeps clear of them like any other way, except near where
+    // its vertices' line crosses one (the bridge; a fine-routed run might cross back and forth).
+    const crossings = motorways.length ? lineCrossings(pts, motorways) : [];
+    if (motorways.length)
+      for (const xy of motorways)
+        for (let k = 0; k + 3 < xy.length; k += 2) {
+          const sgm = [xy[k], xy[k + 1], xy[k + 2], xy[k + 3]];
+          let atBridge = false;
+          for (let q = 0; q < crossings.length && !atBridge; q += 2) atBridge = pointSegDist(crossings[q], crossings[q + 1], sgm) < MW_BRIDGE_FREE;
+          if (atBridge) continue;
+          for (let i = 1; i < n; i++)
+            if (segDist(sgm, [pts[2 * i - 2], pts[2 * i - 1], pts[2 * i], pts[2 * i + 1]]) < ROOM_REACH) {
+              obstacles.push(...sgm);
+              break;
+            }
+        }
     const wedges: number[] = [];
     for (const [e, i, j] of [[0, 0, 1], [1, n - 1, n - 2]] as const) {
       const vx = pts[2 * i], vy = pts[2 * i + 1];
@@ -1277,6 +1338,10 @@ export function latticeSegments(edges: RoadEdge[], cx: number, cy: number): Segm
   return out;
 }
 
+/** A run crossing a motorway may come near it this close (m) to where its vertices' line crosses. */
+const MW_BRIDGE_FREE = 80;
+const pointSegDist = (x: number, y: number, s: number[]) => segDist(x, y, s, 0);
+
 /** Room around a piece is looked for this far (m): every chunk that sees the piece knows all ways that close. */
 const ROOM_REACH = 300;
 /**
@@ -1326,8 +1391,9 @@ const RING_SAMPLES = 16;
  * edge still in the water after fitting is routed on its own. Where no way round
  * fits, the route crosses at the narrowest place (a bridge or causeway).
  */
-export function routeCurves(tasks: SegmentTask[], p: RoadPatch): SegmentPath[] {
+export function routeCurves(tasks: SegmentTask[], p: RoadPatch, motorways: ArrayLike<number>[] = []): SegmentPath[] {
   const { w, h } = p;
+  const mwDist = lineDistance(motorways, FIT_MOTORWAY);
   const isLake = (k: number) => !Number.isNaN(p.lake[k]);
   /** Dry node beside a lake. */
   const onShore = (i: number, j: number) => {
@@ -1706,13 +1772,14 @@ export function routeCurves(tasks: SegmentTask[], p: RoadPatch): SegmentPath[] {
     return xy;
   }
 
-  /** Fitting penalty at world (x, y): in a lake, beside one, on a stream bed. */
+  /** Fitting penalty at world (x, y): in a lake, beside one, on a stream bed, on a motorway. */
   function wetCost(x: number, y: number): number {
+    const mw = mwDist(x, y) < FIT_MOTORWAY ? FIT_WATER : 0;
     const i = Math.round(x / NODE) - p.gx;
     const j = Math.round(y / NODE) - p.gy;
-    if (i < 0 || j < 0 || i >= w || j >= h) return 0;
+    if (i < 0 || j < 0 || i >= w || j >= h) return mw;
     const k = j * w + i;
-    return isLake(k) ? FIT_WATER : onShore(i, j) ? FIT_SHORE : p.A[k] > 1 ? FIT_STREAM : 0;
+    return mw + (isLake(k) ? FIT_WATER : onShore(i, j) ? FIT_SHORE : p.A[k] > 1 ? FIT_STREAM : 0);
   }
 
   function curveOf(t: SegmentTask, rawA = false, rawB = false): SegmentPath {
@@ -1808,6 +1875,8 @@ const FIT_BAND = 32;
 const FIT_OFFSET = 8;
 /** Per-sample penalties (m-equivalent) for standing in a lake, beside one, or on a stream bed. */
 const FIT_WATER = 400;
+/** Fitted curves keep this far (m) from a motorway's centre line, at the cost of water (where they cross it, alike for every shift). */
+const FIT_MOTORWAY = 28;
 const FIT_SHORE = 60;
 const FIT_STREAM = 6;
 /** Weights: steepness beyond the class limit, sideways change (smoothness), shift itself. */

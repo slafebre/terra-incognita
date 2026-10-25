@@ -1,5 +1,6 @@
 import { gnoise, ND, smoothstep } from '../lib/noise';
-import type { CoarseField } from './hydro';
+import { hash3 } from '../lib/hash';
+import { coarseEpochNow, type CoarseField } from './hydro';
 import { lakesOf } from './lakes';
 import { NET_CELL } from './roads';
 import type { Lattice, SeedView } from './seeds';
@@ -25,12 +26,21 @@ import type { Terrain } from './terrain';
 
 /** Grid on which the line's anchors are found (m). */
 export const MW_CELL = 4096;
+/** Width of the dual carriageway (m), and how far (m) from its centre line other things keep. */
+export const MW_WIDTH = 24;
+/** Streets, built-up land and farmsteads: the band either side counts as water (no street, no building, no junction on a bridge). */
+export const MW_PLAN_CLEAR = MW_WIDTH / 2 + 12;
+/** Building footprints. */
+export const MW_BUILD_CLEAR = MW_WIDTH / 2 + 8;
+/** Woods, vines, marsh and heath are cleared, and field parcels stop, this far out. */
+export const MW_VERGE = MW_WIDTH / 2 + 10;
+
 /**
  * How far a piece may lie outside its own cell (m): its raw line keeps inside, towns
- * bend it by up to PUSH and the routing strays up to K × OFF (with a margin for the
+ * and villages bend it by up to PUSH_CLEAR (both at once, 1.8 km) and the routing strays up to K × OFF (with a margin for the
  * curve through the routed points). A chunk is drawn once the pieces this near are known.
  */
-export const MW_SPILL = 2500;
+export const MW_SPILL = 3500;
 /** Line-field sample spacing (m): world-aligned, so neighbouring cells share their border samples. */
 const SAMPLE = 64;
 const NS = MW_CELL / SAMPLE;
@@ -68,12 +78,14 @@ const GATE_R_PENALTY = 2;
 /** An anchor this near a saddle of the line field (|∇F| per km; typically ~0.025) is too ill-defined to hold the line. */
 const MIN_GRAD = 0.004 / 1000;
 /**
- * Towns bend the line away: within PUSH_R m of a town, its points move across the line,
- * away from the town's side, by up to PUSH m (smoothly, so neighbouring anchors move
- * alike). Villages don't: motorways pass close by them.
+ * Towns and villages bend the line away: one nearer the line than PUSH_CLEAR m (by rank)
+ * moves its points across, away from the settlement's side, by the shortfall, fading
+ * along the line over PUSH_R m (smoothly, so neighbouring anchors move alike). (Pushing
+ * by a fixed amount, a town 1.9 km off pushed the line onto a village on its other side.)
+ * Hamlets don't: motorways pass close by them.
  */
-const PUSH = 1000;
-const PUSH_R = 4500;
+const PUSH_CLEAR = [1200, 600];
+const PUSH_R = [4500, 3500];
 
 /** The raw line may not turn tighter than this (m, over BASE_WINDOW of arc), or the piece is dropped. */
 const BASE_RMIN = 700;
@@ -129,6 +141,16 @@ const BAND = K * OFF;
 /** Passes and strength of the smoothing of the routed points. */
 const SMOOTH_PASSES = 8;
 const SMOOTH = 0.5;
+/**
+ * How far from its cell a cell's pieces read the line and the land (m): a run is walked
+ * ~10 km either way (plus the last piece), each piece on it tested for loops (5 km more)
+ * and its anchors' neighbours (a cell more, and the region's 6 km ring). Only noise this
+ * far: the coarse terrain is read within MW_SPILL. (NET_REACH allows for it.)
+ */
+export const MW_DEPEND = 40000;
+/** Per worker: routed pieces by cell and seeds, shared by every task (most cells hold none). */
+const shared = { epoch: -1, pieces: new Map<string, MotorwayPiece[]>() };
+const SHARED_MAX = 20000;
 /** Output: sampled every OUT_STEP m. */
 const OUT_STEP = 25;
 
@@ -173,8 +195,11 @@ export class Motorways {
   private readonly active = new Map<string, string>();
   private readonly bentAnchors = new Map<string, MotorwayAnchor>();
   private readonly loopy = new Map<string, boolean>();
+  private readonly offs = new Map<string, [number, number]>();
   /** Pieces no route was found for (drawn along their raw line; dev). */
   unrouted = 0;
+
+  private readonly l32k: Lattice;
 
   constructor(
     private readonly field: CoarseField,
@@ -183,6 +208,7 @@ export class Motorways {
     view: SeedView,
   ) {
     this.l64k = view.coarse(65536);
+    this.l32k = view.coarse(32768);
     this.lineLat = LINE_S.map((S, k) => view.shifted(S, LINE_SHIFT[k][0] * S, LINE_SHIFT[k][1] * S, true));
   }
 
@@ -248,6 +274,17 @@ export class Motorways {
     const k = `${ci},${cj}`;
     let hit = this.routed.get(k);
     if (hit) return hit;
+    // Shared by every task on this worker: a pure function of the seeds.
+    if (shared.epoch !== coarseEpochNow() || shared.pieces.size > SHARED_MAX) {
+      shared.pieces.clear();
+      shared.epoch = coarseEpochNow();
+    }
+    const sk = `${k}|${this.signature(ci, cj)}`;
+    hit = shared.pieces.get(sk);
+    if (hit) {
+      this.routed.set(k, hit);
+      return hit;
+    }
     hit = [];
     for (const p of this.rawPieces(ci, cj)) {
       if (!this.keeps(p)) continue;
@@ -262,7 +299,24 @@ export class Motorways {
       });
     }
     this.routed.set(k, hit);
+    shared.pieces.set(sk, hit);
     return hit;
+  }
+
+  /**
+   * Hash of the motorway lattices' seeds (64 and 32 km) a cell's pieces can depend on.
+   * The smaller ones are the terrain's, which the coarse epoch follows.
+   */
+  private signature(ci: number, cj: number): number {
+    let h = 0x2545f491;
+    for (const L of [this.l64k, this.l32k]) {
+      const S = L.S;
+      // (Lattices shifted by up to a spacing read up to two points past a sample.)
+      for (let iy = Math.floor((cj * MW_CELL - MW_DEPEND) / S); iy <= Math.floor(((cj + 1) * MW_CELL + MW_DEPEND) / S) + 2; iy++)
+        for (let ix = Math.floor((ci * MW_CELL - MW_DEPEND) / S); ix <= Math.floor(((ci + 1) * MW_CELL + MW_DEPEND) / S) + 2; ix++)
+          h = hash3(h ^ L.seed(ix, iy), ix, iy);
+    }
+    return h;
   }
 
   private keeps(p: RawPiece): boolean {
@@ -392,19 +446,26 @@ export class Motorways {
     return gnoise(this.l64k, SALT_GATE, an.x, an.y) <= GATE_MIN ? 'gate' : 'alpine';
   }
 
-  /** Towns whose push reaches the rectangle. */
+  /** Towns and villages whose push reaches the rectangle. */
   private pushers(x0: number, y0: number, x1: number, y1: number): Site[] {
-    return this.set.sitesIn(TOWN, x0 - PUSH_R, y0 - PUSH_R, x1 + PUSH_R, y1 + PUSH_R);
+    return [TOWN, VILLAGE].flatMap((r) => {
+      const m = PUSH_R[r] + PUSH_CLEAR[r];
+      return this.set.sitesIn(r as Rank, x0 - m, y0 - m, x1 + m, y1 + m);
+    });
   }
 
-  /** A point of the line, bent away from the towns. */
+  /** A point of the line, bent away from towns and villages. */
   private bend(x: number, y: number, towns: Site[]): [number, number] {
     let dx = 0;
     let dy = 0;
     let g: number[] | undefined;
     for (const t of towns) {
-      const d = Math.hypot(x - t.x, y - t.y);
-      if (d >= PUSH_R) continue;
+      const [off, side] = this.offLine(t);
+      const need = PUSH_CLEAR[t.rank] - off;
+      if (need <= 0) continue;
+      // Along the line from the point nearest the settlement.
+      const along = Math.sqrt(Math.max(0, (x - t.x) ** 2 + (y - t.y) ** 2 - off * off));
+      if (along >= PUSH_R[t.rank]) continue;
       if (!g) {
         g = [0, 0];
         this.line(x, y, g);
@@ -412,16 +473,27 @@ export class Motorways {
         g[0] /= n;
         g[1] /= n;
       }
-      // Across the line (along the field's gradient), away from the town's side.
-      const u = d / PUSH_R;
-      const m = (this.line(t.x, t.y) > 0 ? -PUSH : PUSH) * (1 - u * u) ** 2;
+      // Across the line (along the field's gradient), away from the settlement's side.
+      const u = along / PUSH_R[t.rank];
+      const m = -side * need * (1 - u * u) ** 2;
       dx += m * g[0];
       dy += m * g[1];
     }
     return [x + dx, y + dy];
   }
 
-  /** A raw line bent away from the towns. */
+  /** A settlement's distance from the raw line (to first order: |F| / |∇F|) and its side (±1). */
+  private offLine(t: Site): [number, number] {
+    let hit = this.offs.get(t.id);
+    if (!hit) {
+      const g = [0, 0];
+      const f = this.line(t.x, t.y, g);
+      this.offs.set(t.id, (hit = [Math.abs(f) / (Math.hypot(g[0], g[1]) || 1e-12), f > 0 ? 1 : -1]));
+    }
+    return hit;
+  }
+
+  /** A raw line bent away from towns and villages. */
   private bentLine(xy: number[]): number[] {
     let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
     for (let q = 0; q < xy.length; q += 2) {
@@ -435,7 +507,7 @@ export class Motorways {
     return out;
   }
 
-  /** An anchor bent away from the towns, its heading with it. */
+  /** An anchor bent away from towns and villages, its heading with it. */
   private bent(an: MotorwayAnchor): MotorwayAnchor {
     let hit = this.bentAnchors.get(an.id);
     if (hit) return hit;
@@ -451,7 +523,7 @@ export class Motorways {
   }
 
   /**
-   * The anchor where the motorway crosses its border: bent away from towns. (Where it
+   * The anchor where the motorway crosses its border: bent away from towns and villages. (Where it
    * lies in a lake, the motorway bridges it: anchors slid out of the water made the
    * pieces between them weave.)
    */
@@ -582,7 +654,7 @@ export class Motorways {
     const field = this.field;
     const A = this.placed(p.a);
     const Bn = this.placed(p.b);
-    // The line, bent away from towns, resampled every ~STEP m, with normals (to the left).
+    // The line, bent away from towns and villages, resampled every ~STEP m, with normals (to the left).
     const line = this.bentLine(p.base);
     const B = resample(line, STEP);
     const n = B.length / 2 - 1;
@@ -831,3 +903,159 @@ function hermite(Q: number[], a: MotorwayAnchor, b: MotorwayAnchor, h: number): 
 }
 
 if (NET_CELL % MW_CELL) throw new Error('net cells must hold whole motorway cells');
+
+/** Lookup bins (m), and how far from a bin its segments may lie. */
+const BIN = 512;
+const BIN_REACH = 256;
+
+/**
+ * Where motorways run, for the network (lattice.ts): distances and crossings, from the
+ * pieces of the cells around, gathered per BIN (most are empty).
+ */
+export class MotorwayLookup {
+  private readonly lines: Float64Array[] = [];
+  private readonly lineOf = new Map<string, number>();
+  /** Per bin: references to the segments near it, line index × 65536 + segment. */
+  private readonly bins = new Map<number, number[]>();
+
+  constructor(private readonly mw: Motorways) {}
+
+  private bin(bi: number, bj: number): number[] {
+    const key = (bi + 1048576) * 2097152 + (bj + 1048576);
+    let hit = this.bins.get(key);
+    if (hit) return hit;
+    hit = [];
+    const x0 = bi * BIN - BIN_REACH;
+    const y0 = bj * BIN - BIN_REACH;
+    const x1 = (bi + 1) * BIN + BIN_REACH;
+    const y1 = (bj + 1) * BIN + BIN_REACH;
+    for (let cj = Math.floor((y0 - MW_SPILL) / MW_CELL); cj <= Math.floor((y1 + MW_SPILL) / MW_CELL); cj++)
+      for (let ci = Math.floor((x0 - MW_SPILL) / MW_CELL); ci <= Math.floor((x1 + MW_SPILL) / MW_CELL); ci++)
+        for (const p of this.mw.cellPieces(ci, cj)) {
+          let li = this.lineOf.get(p.key);
+          if (li === undefined) {
+            li = this.lines.length;
+            this.lines.push(p.xy);
+            this.lineOf.set(p.key, li);
+          }
+          const xy = p.xy;
+          for (let k = 0; k + 3 < xy.length; k += 2)
+            if (Math.max(xy[k], xy[k + 2]) >= x0 && Math.min(xy[k], xy[k + 2]) <= x1 && Math.max(xy[k + 1], xy[k + 3]) >= y0 && Math.min(xy[k + 1], xy[k + 3]) <= y1)
+              hit.push(li * 65536 + k / 2);
+        }
+    this.bins.set(key, hit);
+    return hit;
+  }
+
+  /** Distance (m) from (x, y) to the nearest motorway centre line, if within BIN_REACH; else Infinity. */
+  dist(x: number, y: number): number {
+    let d = Infinity;
+    for (const r of this.bin(Math.floor(x / BIN), Math.floor(y / BIN))) {
+      const xy = this.lines[Math.floor(r / 65536)];
+      const k = 2 * (r % 65536);
+      d = Math.min(d, pointSeg(x, y, xy[k], xy[k + 1], xy[k + 2], xy[k + 3]));
+    }
+    return d < BIN_REACH ? d : Infinity;
+  }
+
+  /**
+   * Segment a–b against the motorways (at most 2 × BIN_REACH long): how many
+   * times it crosses one, the smallest angle (rad, 0 to π/2) of those crossings, and
+   * its least distance from a centre line where it doesn't cross.
+   */
+  crossing(ax: number, ay: number, bx: number, by: number): { n: number; angle: number; dist: number } {
+    const refs = new Set<number>();
+    for (const [x, y] of [[ax, ay], [bx, by]]) for (const r of this.bin(Math.floor(x / BIN), Math.floor(y / BIN))) refs.add(r);
+    let n = 0;
+    let angle = Math.PI / 2;
+    let dist = Infinity;
+    const dx = bx - ax;
+    const dy = by - ay;
+    for (const r of refs) {
+      const xy = this.lines[Math.floor(r / 65536)];
+      const k = 2 * (r % 65536);
+      const [cx, cy, ex, ey] = [xy[k], xy[k + 1], xy[k + 2], xy[k + 3]];
+      const fx = ex - cx;
+      const fy = ey - cy;
+      const den = dx * fy - dy * fx;
+      if (den !== 0) {
+        const t = ((cx - ax) * fy - (cy - ay) * fx) / den;
+        const u = ((cx - ax) * dy - (cy - ay) * dx) / den;
+        // Half-open along the motorway, so a crossing at a shared point counts once.
+        if (t >= 0 && t <= 1 && u >= 0 && u < 1) {
+          n++;
+          angle = Math.min(angle, Math.asin(Math.min(1, Math.abs(den) / (Math.hypot(dx, dy) * Math.hypot(fx, fy)))));
+          continue;
+        }
+      }
+      dist = Math.min(dist, pointSeg(ax, ay, cx, cy, ex, ey), pointSeg(bx, by, cx, cy, ex, ey), pointSeg(cx, cy, ax, ay, bx, by), pointSeg(ex, ey, ax, ay, bx, by));
+    }
+    return { n, angle, dist };
+  }
+}
+
+function pointSeg(x: number, y: number, ax: number, ay: number, bx: number, by: number): number {
+  const dx = bx - ax;
+  const dy = by - ay;
+  const l2 = dx * dx + dy * dy;
+  const t = l2 > 0 ? Math.max(0, Math.min(1, ((x - ax) * dx + (y - ay) * dy) / l2)) : 0;
+  return Math.hypot(x - ax - t * dx, y - ay - t * dy);
+}
+
+/**
+ * Distance (m) to the nearest of some centre lines, when within `reach`; else Infinity.
+ * Segments are binned (`bin` m) once, for many queries.
+ */
+export function lineDistance(lines: ArrayLike<number>[], reach: number, bin = 64): (x: number, y: number) => number {
+  const bins = new Map<number, number[]>();
+  const key = (bi: number, bj: number) => (bi + 1048576) * 2097152 + (bj + 1048576);
+  lines.forEach((xy, li) => {
+    for (let k = 0; k + 3 < xy.length; k += 2) {
+      const bi0 = Math.floor((Math.min(xy[k], xy[k + 2]) - reach) / bin);
+      const bi1 = Math.floor((Math.max(xy[k], xy[k + 2]) + reach) / bin);
+      const bj0 = Math.floor((Math.min(xy[k + 1], xy[k + 3]) - reach) / bin);
+      const bj1 = Math.floor((Math.max(xy[k + 1], xy[k + 3]) + reach) / bin);
+      for (let bj = bj0; bj <= bj1; bj++)
+        for (let bi = bi0; bi <= bi1; bi++) {
+          const kk = key(bi, bj);
+          let b = bins.get(kk);
+          if (!b) bins.set(kk, (b = []));
+          b.push(li, k);
+        }
+    }
+  });
+  return (x, y) => {
+    const b = bins.get(key(Math.floor(x / bin), Math.floor(y / bin)));
+    if (!b) return Infinity;
+    let d = Infinity;
+    for (let q = 0; q < b.length; q += 2) {
+      const xy = lines[b[q]];
+      const k = b[q + 1];
+      d = Math.min(d, pointSeg(x, y, xy[k], xy[k + 1], xy[k + 2], xy[k + 3]));
+    }
+    return d < reach ? d : Infinity;
+  };
+}
+
+/** Where polyline `pts` crosses any of the centre lines: the points [x, y, …]. */
+export function lineCrossings(pts: ArrayLike<number>, lines: ArrayLike<number>[]): number[] {
+  const out: number[] = [];
+  for (let i = 0; i + 3 < pts.length; i += 2) {
+    const [ax, ay, bx, by] = [pts[i], pts[i + 1], pts[i + 2], pts[i + 3]];
+    for (const xy of lines)
+      for (let k = 0; k + 3 < xy.length; k += 2) {
+        const [cx, cy, ex, ey] = [xy[k], xy[k + 1], xy[k + 2], xy[k + 3]];
+        if (Math.max(cx, ex) < Math.min(ax, bx) || Math.min(cx, ex) > Math.max(ax, bx)) continue;
+        if (Math.max(cy, ey) < Math.min(ay, by) || Math.min(cy, ey) > Math.max(ay, by)) continue;
+        const d1 = (bx - ax) * (cy - ay) - (by - ay) * (cx - ax);
+        const d2 = (bx - ax) * (ey - ay) - (by - ay) * (ex - ax);
+        const d3 = (ex - cx) * (ay - cy) - (ey - cy) * (ax - cx);
+        const d4 = (ex - cx) * (by - cy) - (ey - cy) * (bx - cx);
+        if (d1 * d2 <= 0 && d3 * d4 <= 0 && d1 !== d2) {
+          const t = d1 / (d1 - d2);
+          out.push(cx + (ex - cx) * t, cy + (ey - cy) * t);
+        }
+      }
+  }
+  return out;
+}

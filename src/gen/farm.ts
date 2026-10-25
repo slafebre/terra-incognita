@@ -5,6 +5,7 @@ import { NODE } from './hydro';
 import { nearestVertex, vertexPos, VSNAP } from './lattice';
 import { MAX_GRADE, ROAD_T, ringDisc, type SegmentPath } from './roads';
 import { FARM } from './settle';
+import { lineDistance, MW_PLAN_CLEAR } from './motorway';
 import { BUILD_STEEP, hashString, PLAN_EXTENT, ROAD_CLEAR, STREAM_A, type PlanInput, type TownPlan } from './town';
 
 /**
@@ -86,7 +87,7 @@ interface Frame {
   off: number;
 }
 
-export function planFarm({ site, roads, patch: p }: PlanInput): TownPlan {
+export function planFarm({ site, roads, patch: p, motorways = [] }: PlanInput): TownPlan {
   if (site.rank !== FARM) throw new Error('farm plans are for farms');
   const rand = rng(hashString(site.id));
   const R = site.R;
@@ -111,9 +112,11 @@ export function planFarm({ site, roads, patch: p }: PlanInput): TownPlan {
     const z = p.zE;
     return (z[k] * (1 - fu) + z[k + 1] * fu) * (1 - fv) + (z[k + w] * (1 - fu) + z[k + w + 1] * fu) * fv;
   };
+  // Motorways count as water: no building or field track on them.
+  const mwDist = lineDistance(motorways, MW_PLAN_CLEAR);
   const wet = (x: number, y: number) => {
     const k = node(x, y);
-    return k < 0 || !Number.isNaN(p.lake[k]);
+    return k < 0 || !Number.isNaN(p.lake[k]) || mwDist(x, y) < MW_PLAN_CLEAR;
   };
   /** Dry, off stream channels, and not right on a shore. */
   const dry = (x: number, y: number) => {

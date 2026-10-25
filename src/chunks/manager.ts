@@ -112,6 +112,11 @@ function pieceBox(p: MotorwayPiece): Rect {
 }
 /** Motorways passing this near a chunk (m) are drawn by it (they are wide). */
 const MOTORWAY_DRAW = 64;
+/**
+ * …and this near, its roads keep clear of them: every run a chunk's edges belong to
+ * (up to three edges out) and the room around it.
+ */
+const MOTORWAY_ROADS = 2000;
 /** Where a settlement's street plan may draw. */
 const planDrawRect = (s: Site) => expand(point(s), PLAN_EXTENT[s.rank] + PLAN_DRAW_PAD);
 /** Chunks whose roads a plan reads: its extent and margin, plus one lattice edge (edges are owned by their midpoint's chunk). */
@@ -203,8 +208,9 @@ export class ChunkManager {
     this.roadsRect = expand(this.genRect, CHUNK);
     this.hydroRect = expand(this.roadsRect, CHUNK);
     this.preRect = expand(this.hydroRect, WIN_CHUNKS * CHUNK);
-    // (Motorway pieces stray further from the net cell carrying them than lattice edges.)
-    this.netRect = expand(this.roadsRect, Math.max(EDGE_REACH, MW_SPILL));
+    // (Motorway pieces stray further from the net cell carrying them than lattice edges,
+    // and roads keep clear of those within MOTORWAY_ROADS.)
+    this.netRect = expand(this.roadsRect, MW_SPILL + MOTORWAY_ROADS);
     this.keepBitmapRect = expand(union, 2 * CHUNK);
     this.forgetRect = expand(actual, FORGET);
     this.focus = focus;
@@ -439,7 +445,7 @@ export class ChunkManager {
   }
 
   private roadsReady(c: Chunk): boolean {
-    return this.ring(c, (n) => !!n?.hydro && !!n.pre) && this.netsReady(expand(chunkRect(c.cx, c.cy), EDGE_REACH));
+    return this.ring(c, (n) => !!n?.hydro && !!n.pre) && this.netsReady(expand(chunkRect(c.cx, c.cy), MW_SPILL + MOTORWAY_ROADS));
   }
 
   private demReady(c: Chunk): boolean {
@@ -547,12 +553,14 @@ export class ChunkManager {
       case 'plan':
         throw new Error('plans are scheduled by schedulePlan');
       case 'roads':
+        const motorways = this.motorwaysNear(chunkRect(c.cx, c.cy), MOTORWAY_ROADS);
         task = {
           kind,
           cx: c.cx,
           cy: c.cy,
-          segments: latticeSegments(this.edgesNear(chunkRect(c.cx, c.cy)), c.cx, c.cy),
+          segments: latticeSegments(this.edgesNear(chunkRect(c.cx, c.cy)), c.cx, c.cy, motorways),
           patch: this.roadPatch(c),
+          motorways,
         };
         break;
       case 'dem':
@@ -766,7 +774,7 @@ export class ChunkManager {
     const gx0 = Math.floor(r.x0 / NODE);
     const gy0 = Math.floor(r.y0 / NODE);
     const patch = this.nodePatch(gx0, gy0, Math.ceil(r.x1 / NODE) - gx0 + 1, Math.ceil(r.y1 / NODE) - gy0 + 1);
-    return patch && { site, roads, patch };
+    return patch && { site, roads, patch, motorways: this.motorwaysNear(r, 0) };
   }
 
   /**
