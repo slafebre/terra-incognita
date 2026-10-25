@@ -19,9 +19,11 @@ import { freshSeed, hash3 } from '../lib/hash';
  * Lattice spacings (m) that store their own per-point seeds, kept far beyond the
  * view. 512 (= CHUNK) is here too: the terrain octave of that spacing must be known
  * wherever coarse terrain is (the coarse field resolves it). `lattice(512)` remains the
- * per-chunk lattice; the coarse one is `coarse(512)`.
+ * per-chunk lattice; the coarse one is `coarse(512)`. The terrain uses spacings up to
+ * TERRAIN_COARSE_MAX; the larger ones carry the motorways' line (motorway.ts).
  */
-export const COARSE_SPACINGS = [16384, 8192, 4096, 2048, 1024, 512] as const;
+export const COARSE_SPACINGS = [65536, 32768, 16384, 8192, 4096, 2048, 1024, 512] as const;
+export const TERRAIN_COARSE_MAX = 16384;
 /** Upper bound on domain-warp displacement applied to coarse lookups (m). */
 export const MAX_WARP = 600;
 /**
@@ -113,11 +115,13 @@ export class SeedStore {
       x1: Math.max(r.x1, coarseRect.x1),
       y1: Math.max(r.y1, coarseRect.y1),
     };
+    // Up to two points past the far edge: a lattice shifted by up to a spacing
+    // (SeedView.shifted) reads one point further than an aligned one.
     const coarse: CoarseBlock[] = COARSE_SPACINGS.map((S) => {
       const ix0 = Math.floor((cr.x0 - MAX_WARP) / S);
       const iy0 = Math.floor((cr.y0 - MAX_WARP) / S);
-      const w = Math.floor((cr.x1 + MAX_WARP) / S) + 2 - ix0;
-      const h = Math.floor((cr.y1 + MAX_WARP) / S) + 2 - iy0;
+      const w = Math.floor((cr.x1 + MAX_WARP) / S) + 3 - ix0;
+      const h = Math.floor((cr.y1 + MAX_WARP) / S) + 3 - iy0;
       const seeds = new Uint32Array(w * h);
       for (let j = 0; j < h; j++)
         for (let i = 0; i < w; i++) seeds[j * w + i] = this.coarseSeed(S, ix0 + i, iy0 + j);
@@ -163,7 +167,8 @@ export class SeedStore {
       const [sPart, rest] = k.split(':');
       const S = Number(sPart);
       const [ix, iy] = rest.split(',').map(Number);
-      const m = S + MAX_WARP + CHUNK * 1.5 + COARSE_KEEP_EXTRA;
+      // Two spacings: a shifted lattice reads one point further (see payloadFor).
+      const m = 2 * S + MAX_WARP + CHUNK * 1.5 + COARSE_KEEP_EXTRA;
       const x = ix * S;
       const y = iy * S;
       if (x < keep.x0 - m || x > keep.x1 + m || y < keep.y0 - m || y > keep.y1 + m) this.coarse.delete(k);

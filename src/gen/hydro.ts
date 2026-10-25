@@ -2,7 +2,7 @@ import { CHUNK } from '../lib/constants';
 import { hash3, rng } from '../lib/hash';
 import { MinHeap } from '../lib/heap';
 import { gnoise } from '../lib/noise';
-import { COARSE_SPACINGS, MAX_WARP, type SeedView } from './seeds';
+import { COARSE_SPACINGS, MAX_WARP, type SeedView, TERRAIN_COARSE_MAX } from './seeds';
 import { baseField, erodeK, erodeSmax, maxIncisionOf, regionOverrideKey, Terrain, upliftOf } from './terrain';
 
 /**
@@ -412,6 +412,7 @@ function tileSignature(view: SeedView, tx: number, ty: number): number {
   const y1 = (ty + 2) * s + MAX_WARP;
   let h = 0x811c9dc5;
   for (const S of COARSE_SPACINGS) {
+    if (S > TERRAIN_COARSE_MAX) continue;
     const L = view.coarse(S);
     for (let iy = Math.floor(y0 / S); iy <= Math.floor(y1 / S) + 1; iy++)
       for (let ix = Math.floor(x0 / S); ix <= Math.floor(x1 / S) + 1; ix++) h = hash3(h ^ L.seed(ix, iy), ix, iy);
