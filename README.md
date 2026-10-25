@@ -1,35 +1,60 @@
-# Topo
+# Terra Incognita
 
-An infinite, emergent topographic map at 1:10,000 in the style of IGN Top25. Land that scrolls more than about 4 km out of view is forgotten and regenerates differently when you come back. See [SPEC.md](SPEC.md).
+**An endless topographic map that makes itself up as you go.**
+
+Drag the map in any direction and new country appears: hills and valleys, rivers and lakes, woods, fields and hedges, villages with every house drawn, and the roads, tracks and footpaths between them. It's drawn at 1:10,000 in the style of the French IGN Top25 hiking maps.
+
+There is no world behind it. Land that scrolls more than about 4 km out of view is forgotten, and if you go back, something different grows in its place.
+
+![Hilly country with woods, lakes, winding roads and small villages](docs/screenshots/hills.jpg)
+
+## What you'll find
+
+| | |
+|---|---|
+| ![Lowland farmland with scattered villages and a road network](docs/screenshots/lowland.jpg) | ![Close-up of a village with streets, buildings, a main road and streams](docs/screenshots/village.jpg) |
+| **Lowland:** open farmland, scattered villages and farmsteads, and roads that join them up. | **A village up close (2× zoom):** streets, individual buildings, a main road, streams and marshes. |
+
+![Alpine terrain with rock and scree, dense contours and switchback roads](docs/screenshots/alpine.jpg)
+
+**Alpine:** steep slopes drawn with rock and scree, 10 m contours, and roads that switchback up the valley sides.
+
+The landscape changes character every 8–20 km, from lowland through hills and low mountains to alpine country. Rivers drain downhill into lakes, roads climb at gradients a car could manage, and settlements sit where people would put them. Everything you see was eroded, planned and drawn in your browser seconds before it scrolled into view.
+
+## Try it
+
+You'll need [Node.js](https://nodejs.org/).
 
 ```
 npm install
-npm run dev        # http://localhost:5173
+npm run dev
 ```
 
-URL parameters (debugging): `?debug` shows chunk stages and timings, `?at=x,y` sets the start position (world metres), `?z=0.5` sets the start zoom, `?R=0.9` forces the region everywhere (0 = lowland … 1 = alpine), `?seed=7` makes the world reproducible (seeds hashed from position instead of fresh), for comparing changes on the same land, and `?workers=n` sets the worker pool size.
+Then open http://localhost:5173.
 
-Press `i` (or add `?info`) for the reproduction panel: everything needed to rebuild the land on screen in the browser and in the dev tools. With `?seed=n` that is a link and a `SEED=n` command line. Emergent land needs its seeds: **Download snapshot** saves every seed held (about 0.6 MB) with the view, the forced region and the commit. Put the file in `dev/snaps/`, then `?snap=/dev/snaps/<file>` replays it in the browser (other parameters still win) and `SNAP=dev/snaps/<file>` replays it in `dev/spot.ts` (position defaults to the snapshot's) and `dev/towns.ts` (plans the settlement nearest the view). The same seeds only give the same land on the same code, so a snapshot made at another commit warns.
+- **Pan:** drag, or use the arrow keys or WASD.
+- **Zoom (0.5×–2×):** pinch, ctrl/⌘ + scroll wheel, trackpad pinch, or `+` and `-`.
+- **Legend:** press `l`, or click the Legend tab in the right margin. It follows your browser's language (English, Dutch, French or German).
 
-```
-npm test
-```
+### URL parameters
 
-Dev tools:
-- `/dev/overview.html?size=24000` renders a 24 km overview of the un-eroded terrain, tinted by region type.
-- `npx vite-node dev/probe.ts` drives the whole pipeline in-process (no workers) and prints per-task timings.
-- `npx vite-node dev/coverstats.ts [areas] [R,R,…]` reports land cover percentages per region type (for calibration).
-- `npx vite-node dev/netstats.ts [cells] [R,R,…]` reports way density per class (N, D, C, track, footpath) and site density from net cells alone (fast, no fine terrain). `SEED=n` picks the cells and seeds the world reproducibly, to compare changes.
-- `SEED=n npx vite-node dev/spot.ts x y [R or -] [radius]` builds the pipeline around one place, seeded as the app's `?seed=n`, and lists the ways drawn near it. `SNAP=<file>` replays a snapshot instead (x y optional). `SVG=<file>` draws the land within the radius (5 m contours, streams, lakes, every way; routed tracks and footpaths in red); `GRADES=1` reports each class's mean grade and share over its limit, measured on the DEM.
-- `OUT=<file> npx vite-node dev/golden.ts` runs the pipeline in-process around five seeded places (the region field, and lowland to alpine forced) and saves every task's output; `GOLD=<file> npx vite-node dev/golden.ts` compares with such a file, field by field (identical, or how many elements differ and by how much), and with its per-stage timings. For changes that should leave the land as it is (optimisations); `PLACES=n` uses the first n places, `SEED=n` another world seed.
-- `npx vite-node dev/netbench.ts [block] [R]` times a block of neighbouring net cells built in turn, as a worker does (the first cold, then warm).
-- `npx vite-node dev/seams.ts [firstSeed] [runs] [R]` runs the pipeline test's seam check with seeded `Math.random` (optionally with the region forced to R), so a bad run can be reproduced; prints the worst chunk border lines of runs above 1.3×.
-- `npx vite-node dev/roadstats.ts [areas] [R,R,…]` runs the whole pipeline on seeded, reproducible areas (`SEED=n`) and reports per region type: small closed loops, crossings away from junctions, length running alongside another road, dead ends, unreached settlements, and the share of each class steeper than its limit on the fine terrain. Options: `SHEET=<prefix>` (SVG contact sheet of the loops), `DUMP=<prefix>` (SVG of each area), `DEAD=<prefix>` (sheet of dead ends), `DETOURS=1` (main-road detours with coarse vs fine gradient), `GRADECMP=1` (coarse vs fine heights and gradients), `HAIRPINS=<prefix>` (sheet of hairpins over 5 m contours; their apex radius, leg spacing and length are always reported), `PINLOG=1` (hairpin positions), `LOOPZOOM=<prefix>` (close-ups of small loops with every vertex), `LOOPLOG=1` (each small loop's position and the ways around it), `LOOP_HA` (loop size threshold, ha). It also reports road in lakes per class (crossings vs shore clips), way vertices under water, ways ending in or within 24 m of a lake, and lattice edges no chunk draws (paths are sampled every 8 m); `WET=<prefix>` (sheet of the crossings, lakes shaded), `WETLOG=1` (their positions as `?at=`), `LAKECMP=1` (lakes roads see vs lakes drawn), `HASHSEED=n` (seeds hashed from position, as the app's `?seed=n`, to look at a place in the browser), `COARSELOG=1` (positions of coarse-basin lakes); the `COARSE LAKES` line says how much of the lake area, wet road and wet vertices lie in the lakes of closed coarse basins.
-- `npx vite-node dev/detours.ts [R] [cells]` finds main-road detours in net cells alone and compares the direct lattice edge's cost with the detour's.
-- `npx vite-node dev/terraincmp.ts [areas] [R,R,…]` runs the pipeline on seeded areas and compares the coarse surface (what roads and settlements plan on) with the map's: heights and slopes over 256/512 m (with the best a 256 m sampling could do), height differences by drainage area, and the share of filled flats.
-- `npx vite-node dev/towns.ts [per region] [R,R,…]` runs the pipeline around villages (`TOWNS=1`: towns, `HAMLETS=1`: hamlets, `FARMS=1`: farmsteads, framed 260 m round each, with counts of the forms chosen and why buildings were refused) found with a world seed (`SEED=n`, same as `?seed=n`) and writes each one's street plan as SVG over the fine terrain, plus a sheet of all (`OUT=<prefix>`). `INPUTS=<file>` caches the plans' inputs, so the plans can be tuned without rerunning the pipeline.
-- `npx vite-node dev/fields.ts [km] [R,R,…]` runs the pipeline over a km × km area per region (`SEED=n`), lays out each chunk's field parcels as its render would and writes `<OUT>-R<r>.svg` (`OUT=fields`): woods, water, ways, buildings, field edges and hedges (`LATTICE=1` adds the lattice edges carrying ways, as the blocks see them). It reports field-edge and hedge length per km², blocks cut, blocks too large and furlong pieces, and the layout time per chunk.
-- `npx vite-node dev/pois.ts [km] [R,R,…]` runs the pipeline over a km × km area per region (`SEED=n`) and counts the points of interest each chunk draws (hilltop chapels and crosses, triangulation points, wayside crosses, springs, water towers, reservoirs) per km²; `LOG=1` lists them as `?at=` positions.
-- `npx vite-node dev/tilespread.ts [R,R,…]` measures how much overlapping coarse tiles disagree, by drainage area.
+Add these to the address to choose what you see:
 
-Controls: drag or arrow keys/WASD to pan, pinch, ctrl/⌘+wheel, trackpad pinch or +/- to zoom (0.5×–2×). Press `l` (or the Legend tab in the right margin, or add `?legend`) to slide the legend out of the margin. It is in English, Dutch, French or German, following the browser's languages; `?lang=nl` (or `en`, `fr`, `de`) overrides that.
+| Parameter | What it does |
+|---|---|
+| `?seed=7` | Makes the land reproducible. Together with `?at`, the same address always shows the same place, which is handy for sharing one. |
+| `?R=0.9` | Forces one kind of landscape everywhere: `0` is lowland, `1` is alpine. |
+| `?at=x,y` | Starts at a position, in world metres. |
+| `?z=2` | Starts at a zoom level between `0.5` and `2`. |
+| `?legend` | Opens with the legend out. |
+| `?lang=fr` | Sets the legend language (`en`, `nl`, `fr` or `de`). |
+
+Without `?at` you start somewhere random. The village above is `?seed=7&R=0.1&at=735390,766960&z=2`, and the alpine valley is `?seed=7&R=0.95&at=979600,-223880`.
+
+## How it works
+
+The map is generated in 512 m chunks by a pool of Web Workers and drawn with Canvas2D, in TypeScript with no runtime dependencies. Each chunk goes through a series of stages: terrain, erosion and drainage, the road network, village street plans, a 4 m elevation model with land cover, and finally the rendered image.
+
+There is no global seed. Terrain is gradient noise whose random values are created the first time some land needs them, and forgotten once no remaining land depends on them. Neighbouring chunks always agree exactly along their shared edges, but nothing is remembered once you leave.
+
+The full design is in [SPEC.md](SPEC.md). Debugging parameters, the reproduction panel and the command-line dev tools are covered in [dev/README.md](dev/README.md).
