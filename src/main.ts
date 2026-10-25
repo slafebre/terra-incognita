@@ -10,6 +10,8 @@ import { InfoPanel } from './view/info';
 import { Legend } from './view/legend';
 import { pickLang } from './view/lang';
 import { Welcome } from './view/welcome';
+import { chunkPreview, FADE_MS, PREVIEW_PAD } from './view/preview';
+import { ScaleBar } from './view/scalebar';
 import './style.css';
 
 const canvas = document.getElementById('map') as HTMLCanvasElement;
@@ -142,7 +144,14 @@ function leash(): void {
 
 // --- Drawing ---
 
+/** When each chunk was first shown drawn (ms), for its fade-in over the sketch (once: redraws don't fade). */
+const drawnShown = new WeakMap<object, number>();
+/** Something on screen is still fading in: keep drawing. */
+let fading = false;
+
 function draw(): void {
+  const now = performance.now();
+  fading = false;
   const [pr, pg, pb] = STYLE.paper;
   ctx.setTransform(1, 0, 0, 1, 0, 0);
   ctx.fillStyle = `rgb(${pr},${pg},${pb})`;
@@ -152,14 +161,36 @@ function draw(): void {
   const k = vp.dpr / vp.mPerPx(actual.zoom); // device px per metre
   ctx.imageSmoothingEnabled = true;
   ctx.imageSmoothingQuality = 'high';
+  const alpha = (since: number) => {
+    const a = (now - since) / FADE_MS;
+    if (a < 1) fading = true;
+    return Math.min(1, Math.max(0, a));
+  };
   forChunksIn(r, (cx, cy) => {
     const c = manager.get(cx, cy);
-    if (!c?.bitmap) return;
+    if (!c) return;
     const x0 = Math.round((cx * CHUNK - r.x0) * k);
     const y0 = Math.round((cy * CHUNK - r.y0) * k);
     const x1 = Math.round(((cx + 1) * CHUNK - r.x0) * k);
     const y1 = Math.round(((cy + 1) * CHUNK - r.y0) * k);
-    ctx.drawImage(c.bitmap, x0, y0, x1 - x0, y1 - y0);
+    let shown = 0; // how far the drawn chunk has faded in
+    if (c.bitmap) {
+      if (!drawnShown.has(c)) drawnShown.set(c, now);
+      shown = alpha(drawnShown.get(c)!);
+    }
+    // Not drawn yet (or still fading in): its sketch, while it loads.
+    if (shown < 1) {
+      const p = chunkPreview(c, (i, j) => manager.get(i, j), now);
+      if (p) {
+        ctx.globalAlpha = alpha(p.shown);
+        ctx.drawImage(p.img, PREVIEW_PAD, PREVIEW_PAD, p.img.width - 2 * PREVIEW_PAD, p.img.height - 2 * PREVIEW_PAD, x0, y0, x1 - x0, y1 - y0);
+      }
+    }
+    if (c.bitmap) {
+      ctx.globalAlpha = shown;
+      ctx.drawImage(c.bitmap, x0, y0, x1 - x0, y1 - y0);
+    }
+    ctx.globalAlpha = 1;
   });
 
   ctx.setTransform(vp.dpr, 0, 0, vp.dpr, 0, 0);
@@ -211,6 +242,36 @@ function drawDebug(r: { x0: number; y0: number }, k: number): void {
 
 // --- Frame loop ---
 
+// Loading progress: a scale bar filling in (view/scalebar.ts), shown from when the view
+// needs land until it is all drawn, then faded out.
+const scaleBar = new ScaleBar(loading, lang);
+let wasLoading = false;
+let progressShown = 0;
+let doneAt = 0;
+const SCALE_BAR_MAX = 440;
+const SCALE_BAR_FADE_MS = 450;
+function showProgress(isLoading: boolean, now: number, dt: number): void {
+  if (isLoading && !wasLoading) {
+    progressShown = 0;
+    doneAt = 0;
+    loading.hidden = false;
+    loading.classList.remove('done');
+  }
+  wasLoading = isLoading;
+  if (loading.hidden) return;
+  // Towards the estimate (all of it once the view is drawn), never back.
+  const target = isLoading ? manager.progress() : 1;
+  if (target > progressShown) progressShown += (target - progressShown) * Math.min(1, dt * 6);
+  if (!isLoading && progressShown > 0.99) progressShown = 1;
+  const face = vp.w - MARGIN - legend.right(vp.w);
+  scaleBar.draw(1 / vp.mPerPx(actual.zoom), actual.zoom, Math.min(SCALE_BAR_MAX, face * 0.6), progressShown);
+  if (progressShown === 1 && !doneAt) {
+    doneAt = now;
+    loading.classList.add('done');
+  }
+  if (doneAt && now - doneAt > SCALE_BAR_FADE_MS) loading.hidden = true;
+}
+
 let last = performance.now();
 function frame(now: number): void {
   const dt = Math.min(0.1, (now - last) / 1000);
@@ -224,7 +285,10 @@ function frame(now: number): void {
   if (b !== manager.renderBucket && now - input.lastZoomAt > 250 && !input.dragging) manager.renderBucket = b;
 
   manager.update(vp.rect(actual), vp.rect(desired), [desired.x, desired.y]);
-  loading.hidden = ok(actual);
+  const isLoading = !ok(actual);
+  showProgress(isLoading, now, dt);
+  // While the view is still loading, sketches come and sharpen without telling us.
+  if (isLoading || fading) dirty = true;
   if (dirty || debug) {
     draw();
     dirty = false;

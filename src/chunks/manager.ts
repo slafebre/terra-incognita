@@ -29,6 +29,8 @@ export interface Chunk {
   readonly cy: number;
   readonly key: string;
   busy: boolean;
+  /** When its running task was sent (ms), for the progress estimate. */
+  since?: number;
   /** Set after a task throws, so a broken chunk isn't retried forever. */
   failed?: boolean;
   /** Uplift surface and region at node resolution. */
@@ -66,6 +68,9 @@ const chunkRect = (cx: number, cy: number): Rect => ({
 
 export const chunkKey = (cx: number, cy: number) => `${cx},${cy}`;
 
+/** The stage a chunk's next task makes. */
+const firstMissing = (c: Chunk) => (!c.pre ? 'pre' : !c.hydro ? 'hydro' : !c.roads ? 'roads' : !c.dem ? 'dem' : 'render');
+
 /** Calls `f` for every chunk coordinate overlapping `r`. */
 export function forChunksIn(r: Rect, f: (cx: number, cy: number) => void): void {
   const cx0 = Math.floor(r.x0 / CHUNK);
@@ -88,6 +93,8 @@ const SITE_REACH = 1600;
 /** A net cell's lattice (and sites), or the motorway pieces of its motorway cells. */
 interface CellState<T> {
   busy: boolean;
+  /** When its task was sent (ms), for the progress estimate. */
+  since?: number;
   failed?: boolean;
   data?: T;
 }
@@ -220,6 +227,53 @@ export class ChunkManager {
   }
 
   /** True if every chunk overlapping `r` can be drawn. */
+  /**
+   * How far the land the view needs is made (0..1): the tasks its rectangles call for,
+   * each weighted by its kind's mean time so far (or a typical one), finished ones in
+   * full and running ones by the time they have taken (at most 90 %), so the estimate
+   * moves on through a long net cell too. Street plans are left out (they are quick).
+   */
+  progress(): number {
+    const now = performance.now();
+    const mean = (k: TaskKind, typical: number) => (this.stats[k].n >= 2 ? this.stats[k].ms / this.stats[k].n : typical);
+    const w = {
+      pre: mean('pre', 15) / PRE_BATCH,
+      hydro: mean('hydro', 70),
+      roads: mean('roads', 3),
+      dem: mean('dem', 40),
+      render: mean('render', 25),
+      net: mean('net', 5000),
+      mw: mean('mw', 20),
+    };
+    let done = 0;
+    let total = 0;
+    const running = (since: number | undefined, weight: number) => (since === undefined ? 0 : Math.min(0.9 * weight, now - since));
+    const stage = (r: Rect, has: (c: Chunk) => boolean, weight: number, kind: 'pre' | 'hydro' | 'roads' | 'dem' | 'render') =>
+      forChunksIn(r, (cx, cy) => {
+        const c = this.get(cx, cy);
+        total += weight;
+        if (c && has(c)) done += weight;
+        // A busy chunk is working on its first missing stage.
+        else if (c?.busy && firstMissing(c) === kind) done += running(c.since, weight);
+      });
+    stage(this.preRect, (c) => !!c.pre, w.pre, 'pre');
+    stage(this.hydroRect, (c) => !!c.hydro, w.hydro, 'hydro');
+    stage(this.roadsRect, (c) => !!c.roads, w.roads, 'roads');
+    stage(this.genRect, (c) => !!c.dem, w.dem, 'dem');
+    stage(this.genRect, (c) => !!c.bitmap, w.render, 'render');
+    const cells = (rect: Rect, map: Map<string, CellState<unknown>>, weight: number) => {
+      for (const [gx, gy] of this.netCells(rect)) {
+        const n = map.get(`${gx},${gy}`);
+        total += weight;
+        if (n?.data) done += weight;
+        else if (n?.busy) done += running(n.since, weight);
+      }
+    };
+    cells(this.netRect, this.nets, w.net);
+    cells(this.mwRect, this.mws, w.mw);
+    return total > 0 ? done / total : 1;
+  }
+
   covered(r: Rect): boolean {
     const e = 0.01;
     const inner = { x0: r.x0 + e, y0: r.y0 + e, x1: r.x1 - e, y1: r.y1 - e };
@@ -325,6 +379,7 @@ export class ChunkManager {
     this.netRect = bounds([...roads.map((r) => expand(r, EDGE_REACH)), expand(drawn, Math.max(SITE_REACH, PLAN_REACH))]);
     this.mwRect = bounds([...roads.map((r) => expand(r, MW_SPILL + MOTORWAY_ROADS)), expand(drawn, MW_SPILL + MW_END_REACH)]);
     while (this.pool.idle > 0) {
+      if (this.schedulePreFirst()) continue;
       if (this.scheduleCell('mw', this.mws, this.mwRect)) continue;
       if (this.scheduleCell('net', this.nets, this.netRect)) continue;
       if (this.schedulePlan()) continue;
@@ -351,6 +406,25 @@ export class ChunkManager {
     return this.netCells(r).every(([gx, gy]) => this.mws.get(`${gx},${gy}`)?.data);
   }
 
+  /**
+   * Pre data for the chunks to draw comes first, nearest first: it is cheap (~13 ms a
+   * batch), and the loading sketches (view/preview.ts) are made from it. Net cells would
+   * otherwise take every worker for the first seconds with nothing to show.
+   */
+  private schedulePreFirst(): boolean {
+    const [fx, fy] = this.focus;
+    const cands: Candidate[] = [];
+    forChunksIn(this.genRect, (cx, cy) => {
+      const c = this.ensure(cx, cy);
+      if (c.pre || c.busy || c.failed) return;
+      cands.push({ chunk: c, kind: 'pre', priority: Math.hypot((cx + 0.5) * CHUNK - fx, (cy + 0.5) * CHUNK - fy) });
+    });
+    if (!cands.length) return false;
+    cands.sort((a, b) => a.priority - b.priority);
+    this.dispatch(cands.slice(0, PRE_BATCH));
+    return true;
+  }
+
   /** Dispatches the nearest missing cell of a kind in `rect`, if any. */
   private scheduleCell<T>(kind: 'net' | 'mw', cells: Map<string, CellState<T>>, rect: Rect): boolean {
     const [fx, fy] = this.focus;
@@ -368,7 +442,7 @@ export class ChunkManager {
     if (!best) return false;
     const [gx, gy] = best;
     const key = `${gx},${gy}`;
-    const state: CellState<T> = { busy: true };
+    const state: CellState<T> = { busy: true, since: performance.now() };
     cells.set(key, state);
     const cx = (gx + 0.5) * NET_CELL;
     const cy = (gy + 0.5) * NET_CELL;
@@ -586,7 +660,11 @@ export class ChunkManager {
 
   private dispatch(cands: Candidate[]): void {
     const kind = cands[0].kind;
-    for (const c of cands) c.chunk.busy = true;
+    const now = performance.now();
+    for (const c of cands) {
+      c.chunk.busy = true;
+      c.chunk.since = now;
+    }
     const c = cands[0].chunk;
     let task: TaskRequest;
     let transfer: Transferable[] = [];
