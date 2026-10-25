@@ -8,13 +8,13 @@ const SEEN_KEY = 'topo.welcomed';
  * Welcome sheet: what the map is and how to get around, laid out like a map's
  * margin notes (paper, neatline, the margin's blue for the scale). Shown on the
  * first visit (or with `?welcome`); key `?` or the `?` in the bottom-left corner
- * of the margin brings it back.
+ * of the margin brings it back. On a touch screen (`touch`) the controls are told as gestures and taps, without keys.
  */
 export class Welcome {
   private readonly el = document.createElement('dialog');
   private readonly corner = document.createElement('button');
 
-  constructor(lang: Lang) {
+  constructor(lang: Lang, touch: boolean) {
     const t = WELCOME[lang];
     const { el, corner } = this;
     el.id = 'welcome';
@@ -31,7 +31,7 @@ export class Welcome {
         </header>
         ${t.paragraphs.map((p) => `<p>${esc(p)}</p>`).join('')}
         <h3>${esc(t.controlsTitle)}</h3>
-        <dl>${t.controls.map(([k, v]) => `<dt>${esc(k)}</dt><dd>${keys(v)}</dd>`).join('')}</dl>
+        <dl>${t.controls.map(([k, v, tap]) => `<dt>${esc(k)}</dt><dd>${touch ? esc(tap) : keys(v)}</dd>`).join('')}</dl>
         <footer><button data-act="close" autofocus>${esc(t.start)}</button></footer>
       </div>`;
     // A click on the dialog itself (not the sheet in it) is on the backdrop.

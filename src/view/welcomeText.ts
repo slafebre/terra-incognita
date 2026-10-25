@@ -1,13 +1,16 @@
 import type { Lang } from './lang';
 
-/** The welcome sheet's words. In `controls`, keys are written in [brackets] (shown as keycaps). */
+/**
+ * The welcome sheet's words. Each control is [what, with keys and mouse, on a touch screen];
+ * keys are written in [brackets] (shown as keycaps).
+ */
 export interface WelcomeText {
   title: string;
   subtitle: string;
   scale: string;
   paragraphs: string[];
   controlsTitle: string;
-  controls: [string, string][];
+  controls: [string, string, string][];
   start: string;
   close: string;
   /** The corner button that brings the sheet back. */
@@ -30,10 +33,10 @@ export const WELCOME: Record<Lang, WelcomeText> = {
     ],
     controlsTitle: 'Getting around',
     controls: [
-      ['Move', 'drag, or [←] [↑] [→] [↓] or [W] [A] [S] [D]'],
-      ['Zoom', 'pinch, [Ctrl]/[⌘] + scroll, or [+] and [−]'],
-      ['Legend', '[L], or the tab in the right margin'],
-      ['This sheet', '[?], or the ? in the bottom-left corner'],
+      ['Move', 'drag, or [←] [↑] [→] [↓] or [W] [A] [S] [D]', 'drag with one finger'],
+      ['Zoom', 'pinch, [Ctrl]/[⌘] + scroll, or [+] and [−]', 'pinch with two fingers'],
+      ['Legend', '[L], or the tab in the right margin', 'tap the tab in the right margin'],
+      ['This sheet', '[?], or the ? in the bottom-left corner', 'tap the ? in the bottom-left corner'],
     ],
     start: 'Start exploring',
     close: 'Close',
@@ -50,10 +53,10 @@ export const WELCOME: Record<Lang, WelcomeText> = {
     ],
     controlsTitle: 'Rondkijken',
     controls: [
-      ['Bewegen', 'slepen, of [←] [↑] [→] [↓] of [W] [A] [S] [D]'],
-      ['Zoomen', 'knijpen, [Ctrl]/[⌘] + scrollen, of [+] en [−]'],
-      ['Legenda', '[L], of het tabje in de rechterrand'],
-      ['Dit blad', '[?], of het ? in de hoek linksonder'],
+      ['Bewegen', 'slepen, of [←] [↑] [→] [↓] of [W] [A] [S] [D]', 'slepen met één vinger'],
+      ['Zoomen', 'knijpen, [Ctrl]/[⌘] + scrollen, of [+] en [−]', 'knijpen met twee vingers'],
+      ['Legenda', '[L], of het tabje in de rechterrand', 'tik op het tabje in de rechterrand'],
+      ['Dit blad', '[?], of het ? in de hoek linksonder', 'tik op het ? in de hoek linksonder'],
     ],
     start: 'Op verkenning',
     close: 'Sluiten',
@@ -70,10 +73,10 @@ export const WELCOME: Record<Lang, WelcomeText> = {
     ],
     controlsTitle: 'Se déplacer',
     controls: [
-      ['Déplacer', 'glisser, ou [←] [↑] [→] [↓]'],
-      ['Zoomer', 'pincer, [Ctrl]/[⌘] + molette, ou [+] et [−]'],
-      ['Légende', '[L], ou l’onglet dans la marge de droite'],
-      ['Cette feuille', '[?], ou le ? dans le coin en bas à gauche'],
+      ['Déplacer', 'glisser, ou [←] [↑] [→] [↓]', 'glisser avec un doigt'],
+      ['Zoomer', 'pincer, [Ctrl]/[⌘] + molette, ou [+] et [−]', 'pincer avec deux doigts'],
+      ['Légende', '[L], ou l’onglet dans la marge de droite', 'touchez l’onglet dans la marge de droite'],
+      ['Cette feuille', '[?], ou le ? dans le coin en bas à gauche', 'touchez le ? dans le coin en bas à gauche'],
     ],
     start: 'Explorer',
     close: 'Fermer',
@@ -90,10 +93,10 @@ export const WELCOME: Record<Lang, WelcomeText> = {
     ],
     controlsTitle: 'Bedienung',
     controls: [
-      ['Bewegen', 'ziehen, oder [←] [↑] [→] [↓] oder [W] [A] [S] [D]'],
-      ['Zoomen', 'mit zwei Fingern, [Strg]/[⌘] + Mausrad, oder [+] und [−]'],
-      ['Legende', '[L], oder der Reiter im rechten Rand'],
-      ['Dieses Blatt', '[?], oder das ? in der Ecke unten links'],
+      ['Bewegen', 'ziehen, oder [←] [↑] [→] [↓] oder [W] [A] [S] [D]', 'mit einem Finger ziehen'],
+      ['Zoomen', 'mit zwei Fingern, [Strg]/[⌘] + Mausrad, oder [+] und [−]', 'mit zwei Fingern auf- und zuziehen'],
+      ['Legende', '[L], oder der Reiter im rechten Rand', 'tippe auf den Reiter im rechten Rand'],
+      ['Dieses Blatt', '[?], oder das ? in der Ecke unten links', 'tippe auf das ? in der Ecke unten links'],
     ],
     start: 'Los geht’s',
     close: 'Schließen',

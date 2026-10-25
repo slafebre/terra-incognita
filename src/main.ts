@@ -69,9 +69,11 @@ const info = new InfoPanel({
 if (params.has('info')) info.toggle(true);
 // `?lang=nl` (en, nl, fr, de) overrides the browser's language for the legend and welcome sheet.
 const lang = pickLang(params.get('lang'), navigator.languages ?? [navigator.language]);
-const legend = new Legend(lang);
+// No keyboard or mouse to speak of (a phone or tablet): the sheets leave out the keys.
+const touch = matchMedia('(hover: none) and (pointer: coarse)').matches;
+const legend = new Legend(lang, touch);
 if (params.has('legend')) legend.toggle(true);
-const welcome = new Welcome(lang);
+const welcome = new Welcome(lang, touch);
 if (params.has('welcome') || Welcome.firstVisit()) welcome.show();
 const input = new Input(canvas, vp, actual, desired);
 

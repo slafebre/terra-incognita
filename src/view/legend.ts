@@ -27,7 +27,8 @@ const PX_PER_M = 1 / M_PER_CSS_PX;
 /**
  * Legend (key `l`, `?legend`, or the tab in the right margin): it slides out as a
  * widening of the paper margin on the right, with a swatch for each thing the map
- * draws, drawn with the map's own styles. Written in `lang` (English, Dutch, French or German).
+ * draws, drawn with the map's own styles. Written in `lang` (English, Dutch, French or German);
+ * on a touch screen (`touch`) the note leaves out the key.
  */
 export class Legend {
   open = false;
@@ -37,7 +38,7 @@ export class Legend {
   private readonly tab = document.createElement('button');
   private readonly still = matchMedia('(prefers-reduced-motion: reduce)');
 
-  constructor(lang: Lang) {
+  constructor(lang: Lang, touch: boolean) {
     const { el, tab } = this;
     const t = TEXT[lang];
     el.id = 'legend';
@@ -68,7 +69,7 @@ export class Legend {
     }
     const note = document.createElement('p');
     note.className = 'note';
-    note.textContent = t.note;
+    note.textContent = touch ? t.note : `${t.note} ${t.noteKeys}`;
     el.append(note);
     el.addEventListener('click', (e) => {
       if ((e.target as HTMLElement).closest('[data-act="close"]')) this.toggle(false);

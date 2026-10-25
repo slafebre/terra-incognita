@@ -3,7 +3,8 @@ import type { Lang } from './lang';
 const en = {
   title: 'Legend',
   close: 'Close legend',
-  note: '1:10,000 at zoom 1. Press L to show or hide.',
+  note: '1:10,000 at zoom 1.',
+  noteKeys: 'Press L to show or hide.',
 
   roads: 'Roads and paths',
   motorway: 'Motorway',
@@ -64,7 +65,8 @@ export const TEXT: Record<Lang, Record<TextKey, string>> = {
   nl: {
     title: 'Legenda',
     close: 'Legenda sluiten',
-    note: '1:10.000 bij zoom 1. Druk op L om te tonen of te verbergen.',
+    note: '1:10.000 bij zoom 1.',
+    noteKeys: 'Druk op L om te tonen of te verbergen.',
 
     roads: 'Wegen en paden',
     motorway: 'Autosnelweg',
@@ -119,7 +121,8 @@ export const TEXT: Record<Lang, Record<TextKey, string>> = {
   fr: {
     title: 'Légende',
     close: 'Fermer la légende',
-    note: '1/10 000 au zoom 1. Touche L pour afficher ou masquer.',
+    note: '1/10 000 au zoom 1.',
+    noteKeys: 'Touche L pour afficher ou masquer.',
 
     roads: 'Routes et chemins',
     motorway: 'Autoroute',
@@ -174,7 +177,8 @@ export const TEXT: Record<Lang, Record<TextKey, string>> = {
   de: {
     title: 'Legende',
     close: 'Legende schließen',
-    note: '1:10.000 bei Zoom 1. Taste L blendet sie ein und aus.',
+    note: '1:10.000 bei Zoom 1.',
+    noteKeys: 'Taste L blendet sie ein und aus.',
 
     roads: 'Straßen und Wege',
     motorway: 'Autobahn',

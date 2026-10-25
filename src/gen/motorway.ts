@@ -42,7 +42,7 @@ export const MW_VERGE = MW_WIDTH / 2 + 10;
  * and villages bend it by up to PUSH_CLEAR (both at once, 1.8 km) and the routing strays up to K × OFF (with a margin for the
  * curve through the routed points). A chunk is drawn once the pieces this near are known.
  */
-export const MW_SPILL = 4000;
+export const MW_SPILL = 4500;
 /** Line-field sample spacing (m): world-aligned, so neighbouring cells share their border samples. */
 const SAMPLE = 64;
 const NS = MW_CELL / SAMPLE;
@@ -96,11 +96,11 @@ const PUSH_R = [4500, 3500];
  * follow valleys however freely they curved between. All bends together at most BEND_MAX.
  */
 const VALLEY_STEP = 250;
-const VALLEY_REACH = 1500;
+const VALLEY_REACH = 2000;
 const VALLEY_ALONG = 1000;
-const VALLEY_T = 40;
-const VALLEY_SIGMA = 1200;
-const BEND_MAX = 2000;
+const VALLEY_T = 25;
+const VALLEY_SIGMA = 2000;
+const BEND_MAX = 2500;
 
 /** The raw line may not turn tighter than this (m, over BASE_WINDOW of arc), or the piece is dropped. */
 const BASE_RMIN = 700;
@@ -131,16 +131,16 @@ const FOLD = 0.6;
  * (RMIN_AIM, judged from three points 400 m apart): the curve through its points bends
  * a little tighter than they do.
  */
-export const MW_RMIN = 700;
+export const MW_RMIN = 600;
 const RMIN_AIM = 1.3 * MW_RMIN;
 const TURN_W = 800;
 const TIGHT = 1e5;
 /** Easy grade, the slope penalty's weight and cap (× length). */
 export const MW_GRADE = 0.04;
-const GRADE_W = 3;
+const GRADE_W = 5;
 const GRADE_CAP = 30;
 /** Cost per metre of crossing a hillside: weight × (slope / SIDE_SLOPE)². */
-const SIDE_W = 1.5;
+const SIDE_W = 2.5;
 const SIDE_SLOPE = 0.15;
 /** Per point in a coarse lake (effectively forbidden). */
 const LAKE_COST = 20000;
