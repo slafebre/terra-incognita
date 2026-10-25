@@ -110,8 +110,12 @@ function pieceBox(p: MotorwayPiece): Rect {
   }
   return b;
 }
-/** Motorways passing this near a chunk (m) are drawn by it (they are wide). */
-const MOTORWAY_DRAW = 64;
+/**
+ * Motorways passing this near a chunk (m) are given to it: it draws those within 64 m
+ * (they are wide), and the road's height round its points is the ground averaged along
+ * the motorway over ±500 m (render/motorway.ts), so it needs them that far beyond.
+ */
+const MOTORWAY_DRAW = 700;
 /**
  * …and this near, its roads keep clear of them: every run a chunk's edges belong to
  * (up to three edges out) and the room around it.
@@ -357,15 +361,15 @@ export class ChunkManager {
    * piece where the motorway ends run on to its terminus (motorwayEnd) among `roads`
    * (the chunk's and its neighbours', which hold every terminus near enough to matter).
    */
-  private motorwaysToDraw(c: Chunk, roads: SegmentPath[]): { xy: Float64Array; z: Float32Array }[] {
+  private motorwaysToDraw(c: Chunk, roads: SegmentPath[]): Float64Array[] {
     const r = chunkRect(c.cx, c.cy);
     const q = expand(r, MOTORWAY_DRAW);
-    const out: { xy: Float64Array; z: Float32Array }[] = [];
+    const out: Float64Array[] = [];
     const lanes: SegmentPath[] = [];
     for (const [gx, gy] of this.netCells(expand(r, MW_SPILL + MW_END_REACH)))
       for (const p of this.nets.get(`${gx},${gy}`)?.data?.motorways ?? []) {
         if (!p.endA && !p.endB) {
-          if (intersects(pieceBox(p), q)) out.push({ xy: p.xy, z: p.z });
+          if (intersects(pieceBox(p), q)) out.push(p.xy);
           continue;
         }
         const end = motorwayEnd(p, roads);
@@ -373,7 +377,7 @@ export class ChunkManager {
           for (let k = 0; k < xy.length; k += 2) if (xy[k] >= q.x0 && xy[k] <= q.x1 && xy[k + 1] >= q.y0 && xy[k + 1] <= q.y1) return true;
           return false;
         };
-        if (near(end.xy)) out.push({ xy: end.xy, z: end.z });
+        if (near(end.xy)) out.push(end.xy);
         // Its lanes into the roundabout: drawn as ramps, with the roads.
         end.lanes.forEach((xy, i) => near(xy) && lanes.push({ key: `mwlane:${p.key}:${i}`, cls: ROAD_C, xy: Float32Array.from(xy), ramp: true }));
       }
@@ -621,8 +625,7 @@ export class ChunkManager {
           cover,
           streams,
           roads,
-          motorways: motorways.map((m) => m.xy),
-          motorwayZ: motorways.map((m) => m.z),
+          motorways,
           plans: this.plansFor(c)!,
           poi,
           edges: this.fieldEdges(c),

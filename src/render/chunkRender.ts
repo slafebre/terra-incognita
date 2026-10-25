@@ -30,8 +30,6 @@ export interface RenderInput {
   roads: SegmentPath[];
   /** Centre lines of the motorways passing near the chunk (world metres). */
   motorways: Float64Array[];
-  /** Their profiles: the road's height at each point (m). */
-  motorwayZ: Float32Array[];
   /** Plans of settlements (street plans, farmsteads) that may draw into this chunk. */
   plans: TownPlan[];
   /** Fine nodes round the chunk, for its points of interest and field parcels. */
@@ -86,11 +84,11 @@ export function farmlandTests(cx: number, cy: number, cover: Int8Array, water: F
 /** River width in metres for drainage area A (km²). */
 export const riverWidth = (A: number) => 1.1 * Math.pow(A, 0.55);
 
-export function renderChunk({ cx, cy, dem, cover, water, streams, roads, motorways: lines, motorwayZ, plans, poi, edges, pxSize, dpr }: RenderInput): OffscreenCanvas {
+export function renderChunk({ cx, cy, dem, cover, water, streams, roads, motorways: lines, plans, poi, edges, pxSize, dpr }: RenderInput): OffscreenCanvas {
   // Motorways against the ground (viaducts, tunnels, earthworks); where they run level
   // they clear the woods and fields beside them (under a viaduct and over a tunnel the
   // land runs on).
-  const mws = classifyMotorways(lines, motorwayZ, poi);
+  const mws = classifyMotorways(lines, poi);
   const motorways = mws.flatMap((m) => runsOf(m, (c) => c === MW_LEVEL));
   const canvas = new OffscreenCanvas(pxSize, pxSize);
   const ctx = canvas.getContext('2d')!;

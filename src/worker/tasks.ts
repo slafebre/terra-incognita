@@ -39,7 +39,7 @@ export function runTask(t: TaskRequest): { result: TaskResult; transfer: Transfe
       const mw = new Motorways(field, terrain, set, view);
       const motorways = mw.netCellPieces(t.gx, t.gy);
       const result = { ...latticeCell(t.gx, t.gy, field, set, terrain, mw), motorways };
-      return { result: { kind: 'net', result, ms: ms() }, transfer: motorways.flatMap((m) => [m.xy.buffer, m.z.buffer]) };
+      return { result: { kind: 'net', result, ms: ms() }, transfer: motorways.map((m) => m.xy.buffer) };
     }
     case 'roads': {
       const result = routeCurves(t.segments, t.patch, t.motorways);

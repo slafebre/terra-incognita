@@ -63,8 +63,6 @@ describe('motorways', () => {
       const hp = Math.atan2(p.xy[n - 1] - p.xy[n - 3], p.xy[n - 2] - p.xy[n - 4]);
       const hq = Math.atan2(q.xy[3] - q.xy[1], q.xy[2] - q.xy[0]);
       expect(Math.abs(Math.atan2(Math.sin(hp - hq), Math.cos(hp - hq)))).toBeLessThan(0.05);
-      // …and at the same height (the profile is pinned at the anchors).
-      expect(Math.abs(p.z[p.z.length - 1] - q.z[0])).toBeLessThan(1e-3);
     }
     expect(joins).toBeGreaterThan(3);
   });
@@ -87,23 +85,32 @@ describe('motorways', () => {
   });
 
   it('classes the drawing by the ground: viaducts, tunnels, the surface between', () => {
-    // A straight line at height 100 over ground falling to 50 (a valley) and rising to 150 (a hill).
-    const n = 40;
+    // A straight line over level ground (100 m) crossing a narrow valley (70 m) and a narrow
+    // hill (140 m), in two pieces meeting end to start: the road keeps near the average.
+    const n = 60;
     const xy = new Float64Array(2 * n);
-    for (let i = 0; i < n; i++) xy[2 * i] = 16 * 10 + i * 25;
-    const patch = { gx: 0, gy: -4, w: 80, h: 9, zE: new Float32Array(80 * 9), A: new Float32Array(80 * 9), lake: new Float32Array(80 * 9).fill(NaN) };
+    for (let i = 0; i < n; i++) xy[2 * i] = 160 + i * 25;
+    const w = 110;
+    const patch = { gx: 0, gy: -4, w, h: 9, zE: new Float32Array(w * 9), A: new Float32Array(w * 9), lake: new Float32Array(w * 9).fill(NaN) };
     for (let j = 0; j < 9; j++)
-      for (let i = 0; i < 80; i++) {
+      for (let i = 0; i < w; i++) {
         const x = i * 16;
-        patch.zE[j * 80 + i] = x < 400 ? 50 : x < 600 ? 100 : x < 900 ? 150 : 100;
+        patch.zE[j * w + i] = x > 560 && x < 700 ? 70 : x > 1000 && x < 1140 ? 140 : 100;
       }
-    const [m] = classifyMotorways([xy], [new Float32Array(n).fill(100)], patch);
-    const at = (x: number) => m.cls[Math.round((x - 160) / 25)];
-    expect(at(260)).toBe(MW_VIADUCT);
-    expect(at(500)).toBe(MW_LEVEL);
-    expect(at(760)).toBe(MW_TUNNEL);
-    expect(at(1080)).toBe(MW_LEVEL);
-    expect(surfaceLines([m]).length).toBe(2);
+    const a = xy.slice(0, 2 * 31);
+    const b = xy.slice(2 * 30);
+    const ms = classifyMotorways([b, a], patch);
+    const cls = (x: number) => {
+      const i = Math.round((x - 160) / 25);
+      return i <= 30 ? ms[1].cls[i] : ms[0].cls[i - 30];
+    };
+    expect(cls(635)).toBe(MW_VIADUCT);
+    expect(cls(360)).toBe(MW_LEVEL);
+    expect(cls(1060)).toBe(MW_TUNNEL);
+    expect(cls(1500)).toBe(MW_LEVEL);
+    // The joint (shared by both pieces) is classed alike in each.
+    expect(ms[1].cls[30]).toBe(ms[0].cls[0]);
+    expect(surfaceLines(ms).length).toBeGreaterThan(1);
   });
 
   it('keeps to wide curves', () => {

@@ -26,6 +26,8 @@ export interface MotorwayDraw {
 const VIADUCT_H = 10;
 const TUNNEL_H = 25;
 export const EARTH_H = 2.5;
+/** The road's height: the ground averaged over this many points (25 m apart) either side. */
+const PROFILE_HALF = 20;
 /** Depths are a median over this many points either side (the fine nodes are 16 m apart, points 25 m). */
 const MEDIAN = 2;
 /** Viaducts and tunnels shorter than this many points are left as earthworks. */
@@ -34,9 +36,14 @@ const MIN_RUN = 3;
 /**
  * Classes the points of each motorway by the ground under them: the fine nodes round the
  * chunk (each from its own chunk's solve, so every chunk reads them alike; reaching far
- * beyond it), or none (all on the surface) where they are missing.
+ * beyond it), or none (all on the surface) where they are missing. The road's height is
+ * that ground averaged along it over ±PROFILE_HALF points, the pieces joined end to end
+ * (a chunk is given those within ~700 m, so the average round its own points is whole):
+ * so only valleys deep and narrow against it are bridged, hills cut or tunnelled. (A
+ * profile from the coarse surface, which lies some 15 m off the map's ground in places,
+ * bridged long stretches of flat land.)
  */
-export function classifyMotorways(lines: Float64Array[], zs: Float32Array[], p?: RoadPatch): MotorwayDraw[] {
+export function classifyMotorways(lines: Float64Array[], p?: RoadPatch): MotorwayDraw[] {
   const ground = (x: number, y: number) => {
     if (!p) return NaN;
     const u = x / NODE - p.gx;
@@ -50,10 +57,47 @@ export function classifyMotorways(lines: Float64Array[], zs: Float32Array[], p?:
     const z = p.zE;
     return (z[k] * (1 - fu) + z[k + 1] * fu) * (1 - fv) + (z[k + p.w] * (1 - fu) + z[k + p.w + 1] * fu) * fv;
   };
-  return lines.map((xy, li) => {
-    const n = xy.length / 2;
-    const raw = new Float32Array(n);
-    for (let i = 0; i < n; i++) raw[i] = ground(xy[2 * i], xy[2 * i + 1]) - zs[li][i];
+  // Chains of pieces meeting end to start (their joint shared), each in order.
+  const key = (xy: Float64Array, k: number) => `${xy[k]},${xy[k + 1]}`;
+  const byStart = new Map<string, number>();
+  lines.forEach((xy, li) => byStart.set(key(xy, 0), li));
+  const hasPrev = new Set<number>();
+  lines.forEach((xy) => {
+    const next = byStart.get(key(xy, xy.length - 2));
+    if (next !== undefined) hasPrev.add(next);
+  });
+  const out: MotorwayDraw[] = lines.map((xy) => ({ xy, cls: new Uint8Array(xy.length / 2), d: new Float32Array(xy.length / 2).fill(NaN) }));
+  const seen = new Set<number>();
+  const chain = (first: number) => {
+    const members: number[] = [];
+    for (let li: number | undefined = first; li !== undefined && !seen.has(li); li = byStart.get(key(lines[li], lines[li].length - 2))) {
+      seen.add(li);
+      members.push(li);
+    }
+    // Its points in order (the joints once), and where each line's points lie in it.
+    const pts: number[] = [];
+    const at: number[] = [];
+    for (const li of members) {
+      const xy = lines[li];
+      const skip = pts.length ? 1 : 0;
+      at.push(pts.length / 2 - skip);
+      for (let k = 2 * skip; k < xy.length; k++) pts.push(xy[k]);
+    }
+    const n = pts.length / 2;
+    const g = new Float64Array(n);
+    for (let i = 0; i < n; i++) g[i] = ground(pts[2 * i], pts[2 * i + 1]);
+    const raw = new Float64Array(n).fill(NaN);
+    for (let i = 0; i < n; i++) {
+      if (Number.isNaN(g[i])) continue;
+      let s = 0;
+      let c = 0;
+      for (let j = Math.max(0, i - PROFILE_HALF); j <= Math.min(n - 1, i + PROFILE_HALF); j++)
+        if (!Number.isNaN(g[j])) {
+          s += g[j];
+          c++;
+        }
+      if (c > PROFILE_HALF) raw[i] = g[i] - s / c;
+    }
     const d = new Float32Array(n);
     for (let i = 0; i < n; i++) {
       const w: number[] = [];
@@ -70,8 +114,15 @@ export function classifyMotorways(lines: Float64Array[], zs: Float32Array[], p?:
       if (e - i + 1 < MIN_RUN) cls.fill(MW_LEVEL, i, e + 1);
       i = e;
     }
-    return { xy, cls, d };
-  });
+    members.forEach((li, m) => {
+      const k = lines[li].length / 2;
+      out[li].cls.set(cls.subarray(at[m], at[m] + k));
+      out[li].d.set(d.subarray(at[m], at[m] + k));
+    });
+  };
+  lines.forEach((_, li) => !hasPrev.has(li) && chain(li));
+  lines.forEach((_, li) => !seen.has(li) && chain(li)); // closed loops, if any
+  return out;
 }
 
 /**
