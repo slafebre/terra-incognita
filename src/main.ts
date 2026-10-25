@@ -1,12 +1,14 @@
 import { CHUNK, DPR_MAX } from './lib/constants';
 import { ChunkManager, forChunksIn } from './chunks/manager';
 import { STYLE } from './render/style';
-import { drawGrid } from './view/grid';
+import { drawFrame, MARGIN } from './view/frame';
 import { Input } from './view/input';
 import { clampZoom, Viewport, zoomBucket, type ViewState } from './view/viewport';
 import { WorkerPool } from './worker/pool';
 import { parseSnapshot, type Snapshot } from './snapshot';
 import { InfoPanel } from './view/info';
+import { Legend } from './view/legend';
+import { pickLang } from './view/legendText';
 import './style.css';
 
 const canvas = document.getElementById('map') as HTMLCanvasElement;
@@ -61,6 +63,9 @@ const info = new InfoPanel({
   snap: snap && snapPath ? { path: snapPath, commit: snap.commit } : undefined,
 });
 if (params.has('info')) info.toggle(true);
+// `?lang=nl` (en, nl, fr, de) overrides the browser's language for the legend.
+const legend = new Legend(pickLang(params.get('lang'), navigator.languages ?? [navigator.language]));
+if (params.has('legend')) legend.toggle(true);
 const input = new Input(canvas, vp, actual, desired);
 
 function resize(): void {
@@ -149,7 +154,8 @@ function draw(): void {
   });
 
   ctx.setTransform(vp.dpr, 0, 0, vp.dpr, 0, 0);
-  drawGrid(ctx, vp, actual);
+  drawFrame(ctx, vp, actual, { l: MARGIN, t: MARGIN, r: legend.right(vp.w), b: MARGIN }, legend.gap(vp.h));
+  legend.layout(vp.w);
   if (debug) drawDebug(r, k);
 }
 
@@ -189,9 +195,9 @@ function drawDebug(r: { x0: number; y0: number }, k: number): void {
   ctx.setTransform(vp.dpr, 0, 0, vp.dpr, 0, 0);
   ctx.font = '12px ui-monospace, monospace';
   ctx.fillStyle = 'rgba(255,255,255,0.85)';
-  ctx.fillRect(8, 24, 380, lines.length * 16 + 8);
+  ctx.fillRect(MARGIN + 8, MARGIN + 8, 380, lines.length * 16 + 8);
   ctx.fillStyle = '#000';
-  lines.forEach((l, i) => ctx.fillText(l, 14, 40 + i * 16));
+  lines.forEach((l, i) => ctx.fillText(l, MARGIN + 14, MARGIN + 24 + i * 16));
 }
 
 // --- Frame loop ---
@@ -203,6 +209,7 @@ function frame(now: number): void {
   input.tick(dt);
   leash();
   if (approach()) dirty = true;
+  if (legend.tick(dt)) dirty = true;
 
   const b = zoomBucket(actual.zoom);
   if (b !== manager.renderBucket && now - input.lastZoomAt > 250 && !input.dragging) manager.renderBucket = b;

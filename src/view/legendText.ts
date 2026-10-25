@@ -1,0 +1,224 @@
+/** Languages the legend is written in. */
+export const LANGS = ['en', 'nl', 'fr', 'de'] as const;
+export type Lang = (typeof LANGS)[number];
+
+const en = {
+  title: 'Legend',
+  close: 'Close legend',
+  note: '1:10,000 at zoom 1. Press L to show or hide.',
+
+  roads: 'Roads and paths',
+  main: 'Main road',
+  secondary: 'Secondary road',
+  minor: 'Minor road',
+  street: 'Street',
+  track: 'Track',
+  footpath: 'Footpath',
+  bridge: 'Bridge',
+
+  buildings: 'Buildings',
+  building: 'Buildings',
+  large: 'Hall, shed, store',
+  church: 'Church',
+
+  water: 'Water',
+  lake: 'Lake',
+  stream: 'Stream',
+  river: 'River',
+  spring: 'Spring',
+  reservoir: 'Reservoir',
+
+  land: 'Land',
+  broadleaf: 'Broadleaf wood',
+  conifer: 'Conifer wood',
+  vineyard: 'Vineyard',
+  heath: 'Heath, dwarf pine',
+  marsh: 'Marsh',
+  rock: 'Rock',
+  scree: 'Scree',
+  glacier: 'Glacier',
+  field: 'Field boundary',
+  hedge: 'Hedge',
+
+  relief: 'Relief',
+  contour: 'Contour, every 5 m',
+  index: 'Index contour, 25 m',
+
+  landmarks: 'Landmarks',
+  chapel: 'Chapel',
+  cross: 'Cross',
+  trig: 'Triangulation point',
+  tower: 'Water tower',
+
+  gridTitle: 'Grid',
+  grid: 'Kilometre grid',
+};
+
+export type TextKey = keyof typeof en;
+
+/** The legend's words in each language (every key, so a missing one fails to compile). */
+export const TEXT: Record<Lang, Record<TextKey, string>> = {
+  en,
+  nl: {
+    title: 'Legenda',
+    close: 'Legenda sluiten',
+    note: '1:10.000 bij zoom 1. Druk op L om te tonen of te verbergen.',
+
+    roads: 'Wegen en paden',
+    main: 'Hoofdweg',
+    secondary: 'Secundaire weg',
+    minor: 'Lokale weg',
+    street: 'Straat',
+    track: 'Onverharde weg',
+    footpath: 'Voetpad',
+    bridge: 'Brug',
+
+    buildings: 'Bebouwing',
+    building: 'Gebouwen',
+    large: 'Hal, loods, winkel',
+    church: 'Kerk',
+
+    water: 'Water',
+    lake: 'Meer',
+    stream: 'Beek',
+    river: 'Rivier',
+    spring: 'Bron',
+    reservoir: 'Waterreservoir',
+
+    land: 'Terrein',
+    broadleaf: 'Loofbos',
+    conifer: 'Naaldbos',
+    vineyard: 'Wijngaard',
+    heath: 'Heide, dwergden',
+    marsh: 'Moeras',
+    rock: 'Rots',
+    scree: 'Puinhelling',
+    glacier: 'Gletsjer',
+    field: 'Perceelgrens',
+    hedge: 'Heg',
+
+    relief: 'Reliëf',
+    contour: 'Hoogtelijn, om de 5 m',
+    index: 'Hoofdhoogtelijn, 25 m',
+
+    landmarks: 'Herkenningspunten',
+    chapel: 'Kapel',
+    cross: 'Kruis',
+    trig: 'Driehoeksmeetpunt',
+    tower: 'Watertoren',
+
+    gridTitle: 'Raster',
+    grid: 'Kilometerraster',
+  },
+  fr: {
+    title: 'Légende',
+    close: 'Fermer la légende',
+    note: '1/10 000 au zoom 1. Touche L pour afficher ou masquer.',
+
+    roads: 'Routes et chemins',
+    main: 'Route principale',
+    secondary: 'Route secondaire',
+    minor: 'Petite route',
+    street: 'Rue',
+    track: 'Chemin',
+    footpath: 'Sentier',
+    bridge: 'Pont',
+
+    buildings: 'Bâti',
+    building: 'Bâtiments',
+    large: 'Hangar, entrepôt, magasin',
+    church: 'Église',
+
+    water: 'Hydrographie',
+    lake: 'Lac',
+    stream: 'Ruisseau',
+    river: 'Rivière',
+    spring: 'Source',
+    reservoir: 'Réservoir',
+
+    land: 'Occupation du sol',
+    broadleaf: 'Bois de feuillus',
+    conifer: 'Bois de conifères',
+    vineyard: 'Vigne',
+    heath: 'Lande, pin nain',
+    marsh: 'Marais',
+    rock: 'Rochers',
+    scree: 'Éboulis',
+    glacier: 'Glacier',
+    field: 'Limite de parcelle',
+    hedge: 'Haie',
+
+    relief: 'Relief',
+    contour: 'Courbe de niveau, 5 m',
+    index: 'Courbe maîtresse, 25 m',
+
+    landmarks: 'Points remarquables',
+    chapel: 'Chapelle',
+    cross: 'Croix, calvaire',
+    trig: 'Point géodésique',
+    tower: 'Château d’eau',
+
+    gridTitle: 'Quadrillage',
+    grid: 'Quadrillage kilométrique',
+  },
+  de: {
+    title: 'Legende',
+    close: 'Legende schließen',
+    note: '1:10.000 bei Zoom 1. Taste L blendet sie ein und aus.',
+
+    roads: 'Straßen und Wege',
+    main: 'Hauptstraße',
+    secondary: 'Landstraße',
+    minor: 'Nebenstraße',
+    street: 'Ortsstraße',
+    track: 'Wirtschaftsweg',
+    footpath: 'Fußweg',
+    bridge: 'Brücke',
+
+    buildings: 'Bebauung',
+    building: 'Gebäude',
+    large: 'Halle, Lager, Markt',
+    church: 'Kirche',
+
+    water: 'Gewässer',
+    lake: 'See',
+    stream: 'Bach',
+    river: 'Fluss',
+    spring: 'Quelle',
+    reservoir: 'Wasserbehälter',
+
+    land: 'Bodenbedeckung',
+    broadleaf: 'Laubwald',
+    conifer: 'Nadelwald',
+    vineyard: 'Weinberg',
+    heath: 'Heide, Latschen',
+    marsh: 'Sumpf',
+    rock: 'Fels',
+    scree: 'Geröll',
+    glacier: 'Gletscher',
+    field: 'Feldgrenze',
+    hedge: 'Hecke',
+
+    relief: 'Relief',
+    contour: 'Höhenlinie, 5 m',
+    index: 'Zählkurve, 25 m',
+
+    landmarks: 'Einzelzeichen',
+    chapel: 'Kapelle',
+    cross: 'Kreuz',
+    trig: 'Trigonometrischer Punkt',
+    tower: 'Wasserturm',
+
+    gridTitle: 'Gitter',
+    grid: 'Kilometergitter',
+  },
+};
+
+/** `?lang=xx` if it's one of ours, else the first of the browser's languages that is, else English. */
+export function pickLang(param: string | null, prefs: readonly string[]): Lang {
+  for (const tag of [param ?? '', ...prefs]) {
+    const l = tag.toLowerCase().split(/[-_]/)[0];
+    if ((LANGS as readonly string[]).includes(l)) return l as Lang;
+  }
+  return 'en';
+}

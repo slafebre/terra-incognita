@@ -14,7 +14,7 @@ Status: milestones 1–3 implemented; milestone 4 (settlements & roads) in progr
 | Content | Elevation, rivers, streams, lakes, land use, roads (all classes), towns, every building, **railways**, **field parcels & hedges**, **point symbols** (churches, chapels, crosses, mills, spot heights, summits, power lines). No text labels. |
 | Style | French IGN Top25, adapted to 1:10k. |
 | Contours | Adaptive: 5 m (index 25 m) in normal terrain, 10 m (index 50 m) where steep. Rock hatching and scree where too steep for contours. |
-| Overlays | Kilometre grid only. |
+| Overlays | Kilometre grid; a paper margin round the map face carrying the kilometre numbers (those on the sides turned a quarter); a legend that slides out of the right margin (key `l`). |
 | Devices | Desktop and mobile equally (touch-first, tight budgets). |
 | Stack | TypeScript + Vite, Canvas2D, Web Workers. |
 
@@ -340,7 +340,7 @@ An edge used by several ways takes the highest class.
 
 ```
 src/
-  main.ts            viewport, input, pan clamp, compositor, km grid
+  main.ts            viewport, input, pan clamp, compositor, km grid and margin
   chunks/            ChunkManager, scheduler, retention, stage graph
   worker/            worker entry, message protocol
   gen/region.ts      gen/terrain.ts  gen/hydro.ts  gen/landuse.ts

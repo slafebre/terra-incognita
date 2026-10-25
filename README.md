@@ -32,4 +32,4 @@ Dev tools:
 - `npx vite-node dev/pois.ts [km] [R,R,…]` runs the pipeline over a km × km area per region (`SEED=n`) and counts the points of interest each chunk draws (hilltop chapels and crosses, triangulation points, wayside crosses, springs, water towers, reservoirs) per km²; `LOG=1` lists them as `?at=` positions.
 - `npx vite-node dev/tilespread.ts [R,R,…]` measures how much overlapping coarse tiles disagree, by drainage area.
 
-Controls: drag or arrow keys/WASD to pan, pinch, ctrl/⌘+wheel, trackpad pinch or +/- to zoom (0.5×–2×).
+Controls: drag or arrow keys/WASD to pan, pinch, ctrl/⌘+wheel, trackpad pinch or +/- to zoom (0.5×–2×). Press `l` (or the Legend tab in the right margin, or add `?legend`) to slide the legend out of the margin. It is in English, Dutch, French or German, following the browser's languages; `?lang=nl` (or `en`, `fr`, `de`) overrides that.

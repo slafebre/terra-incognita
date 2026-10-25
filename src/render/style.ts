@@ -66,6 +66,13 @@ export const STYLE = {
   grid: 'rgba(30, 110, 210, 0.55)',
   gridLabel: 'rgb(30, 100, 200)',
   gridWidth: 0.8,
+  /** Paper margin round the map face (CSS px): neatline, grid ticks and kilometre numbers. */
+  frame: {
+    neatline: 'rgb(40, 34, 30)',
+    neatlineWidth: 1,
+    tick: 4,
+    font: '600 10.5px ui-sans-serif, system-ui, sans-serif',
+  },
 };
 
 /** Adaptive contour rules. */
