@@ -1102,7 +1102,7 @@ export function diamondRamps(road: ArrayLike<number>, lines: ArrayLike<number>[]
   if (!hit) return [];
   const { i, li, k, x: X, y: Y } = hit;
   const near = lineDistance(lines, 2 * IC_JOIN);
-  /** The point `dist` m along the motorway from the crossing (dir ±1), and the heading there; across joined pieces. */
+  /** The point `dist` m along the motorway from the crossing (dir ±1), and the heading there, onward; across joined pieces. */
   const along = (dir: number, dist: number): [number, number, number, number] => {
     let xy = lines[li];
     let q = dir > 0 ? k + 2 : k; // the next point
@@ -1121,7 +1121,8 @@ export function diamondRamps(road: ArrayLike<number>, lines: ArrayLike<number>[]
       const sx = xy[q] - px;
       const sy = xy[q + 1] - py;
       const L = Math.hypot(sx, sy);
-      if (L >= left && L > 0) return [px + (sx * left) / L, py + (sy * left) / L, (dir * sx) / L, (dir * sy) / L];
+      // (sx, sy) points the way we go: onward is the heading, whichever way that is.
+      if (L >= left && L > 0) return [px + (sx * left) / L, py + (sy * left) / L, sx / L, sy / L];
       left -= L;
       px = xy[q];
       py = xy[q + 1];
@@ -1130,7 +1131,7 @@ export function diamondRamps(road: ArrayLike<number>, lines: ArrayLike<number>[]
     // Ran out of motorway (it ends): as far as it goes.
     const b = dir > 0 ? xy.length - 4 : 0;
     const L = Math.hypot(xy[b + 2] - xy[b], xy[b + 3] - xy[b + 1]) || 1;
-    return [px, py, (xy[b + 2] - xy[b]) / L, (xy[b + 3] - xy[b + 1]) / L];
+    return [px, py, (dir * (xy[b + 2] - xy[b])) / L, (dir * (xy[b + 3] - xy[b + 1])) / L];
   };
   const out: number[][] = [];
   for (const side of [-1, 1]) {
