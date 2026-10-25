@@ -37,7 +37,7 @@ export class InfoPanel {
       <dl>
         <dt>Position</dt><dd data-f="pos"></dd>
         <dt>Land</dt><dd>${esc(land)}</dd>
-        <dt>Region</dt><dd>${cfg.R === null ? 'natural' : `forced, R=${cfg.R}`}</dd>
+        <dt>Region</dt><dd>${cfg.R === null ? 'natural' : `forced, R=${esc(String(cfg.R))}`}</dd>
         <dt>Code</dt><dd>${esc(BUILD_COMMIT)}</dd>
       </dl>
       ${warn}

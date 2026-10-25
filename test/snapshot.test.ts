@@ -16,6 +16,19 @@ describe('snapshots', () => {
     expect(new Map([...b.coarse].sort())).toEqual(new Map([...a.coarse].sort()));
   });
 
+  it('refuse fields of the wrong type', () => {
+    const good = JSON.parse(JSON.stringify(takeSnapshot(new SeedStore(), { x: 0, y: 0, zoom: 1 }, 0.5, 7, 'abc')));
+    expect(() => parseSnapshot(good)).not.toThrow();
+    const bad = (patch: object) => () => parseSnapshot({ ...good, ...patch });
+    expect(bad({ R: '<img src=x onerror=alert(1)>' })).toThrow();
+    expect(bad({ seed: '7' })).toThrow();
+    expect(bad({ commit: 1 })).toThrow();
+    expect(bad({ at: [0, '<b>'] })).toThrow();
+    expect(bad({ z: null })).toThrow();
+    expect(bad({ chunks: { ...good.chunks, w: '1' } })).toThrow();
+    expect(bad({ coarse: { 512: null } })).toThrow();
+  });
+
   it('loaded seeds win over hashed ones', () => {
     const a = new SeedStore();
     const s = a.chunkSeed(5, -7);

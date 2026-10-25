@@ -20,11 +20,14 @@ const num = (k: string) => (params.get(k) ? Number(params.get(k)) : undefined);
 
 // Debug: `?snap=/dev/snaps/file.json` replays a snapshot saved from the info panel (key i):
 // its seeds, view, region and world seed. Explicit parameters below still win.
+// Only from this site: a link must not be able to feed the page someone else's file.
 const snapPath = params.get('snap');
 let snap: Snapshot | undefined;
 if (snapPath) {
   try {
-    const r = await fetch(snapPath);
+    const url = new URL(snapPath, location.href);
+    if (url.origin !== location.origin) throw new Error('snapshots load from this site only');
+    const r = await fetch(url);
     if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
     snap = parseSnapshot(await r.json());
   } catch (e) {
