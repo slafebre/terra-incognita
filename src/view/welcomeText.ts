@@ -24,9 +24,9 @@ export const WELCOME: Record<Lang, WelcomeText> = {
     subtitle: 'An endless topographic map',
     scale: '1:10,000',
     paragraphs: [
-      'Welcome! This is the map of a country that doesn’t exist. It is drawn as you go, in the style of the French IGN 1:25,000 sheets but at 1:10,000: hills shaded from the north-west, contours every 5 metres, woods, streams, villages round their churches, roads, tracks and footpaths.',
-      'Set off in any direction: the land never ends. But it doesn’t wait for you either. Whatever falls more than about 4 km out of sight is forgotten, and if you come back you’ll find somewhere new.',
-      'Where the map isn’t drawn yet, it holds you back for a moment while the surveyors catch up. The blue numbers in the margin are kilometres, as on a printed sheet.',
+      'Welcome! This is the map of a country that doesn’t exist. It’s drawn as you go: hills, contours, woods, streams, villages, roads, tracks and footpaths.',
+      'Set off in any direction: the land never ends. But it doesn’t wait for you either. Scroll too far and it’s forgotten, and if you come back you’ll find somewhere new.',
+      'Where the map isn’t drawn yet, it holds you back for a moment while the surveyors catch up.',
     ],
     controlsTitle: 'Getting around',
     controls: [
@@ -44,9 +44,9 @@ export const WELCOME: Record<Lang, WelcomeText> = {
     subtitle: 'Een eindeloze topografische kaart',
     scale: '1:10.000',
     paragraphs: [
-      'Welkom! Dit is de kaart van een land dat niet bestaat. Ze wordt getekend terwijl je rondkijkt, in de stijl van de Franse IGN-kaarten op 1:25.000, maar op 1:10.000: heuvels belicht vanuit het noordwesten, hoogtelijnen om de 5 meter, bossen, beken, dorpen rond hun kerk, wegen, onverharde wegen en voetpaden.',
-      'Trek in elke richting: het land houdt nooit op. Maar het wacht ook niet op je. Wat meer dan zo’n 4 km uit beeld raakt, wordt vergeten; kom je terug, dan ligt er iets nieuws.',
-      'Waar de kaart nog niet getekend is, houdt ze je even tegen tot de landmeters bij zijn. De blauwe getallen in de rand zijn kilometers, zoals op een gedrukt kaartblad.',
+      'Welkom! Dit is de kaart van een land dat niet bestaat. Hij wordt getekend terwijl je rondkijkt: heuvels, hoogtelijnen, bossen, beken, dorpen, wegen, en paden.',
+      'Kijk rond in elke richting: het land houdt nooit op. Maar als je verder scrolt wordt het ook weer vergeten; kom je terug, dan ligt er weer iets nieuws.',
+      'Scrol niet te snel: even wachten tot de landmeters bij kunnen werken.',
     ],
     controlsTitle: 'Rondkijken',
     controls: [
