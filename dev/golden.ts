@@ -40,7 +40,10 @@ const keyOf = (t: TaskRequest, p: number): string[] => {
     case 'pre':
       return t.chunks.map(([cx, cy]) => `${p}:pre:${cx},${cy}`);
     case 'net':
-      return [`${p}:net:${t.gx},${t.gy}`];
+      // (Net cells carried their motorway pieces before the motorway stage: kept apart, to compare.)
+      return [`${p}:net:${t.gx},${t.gy}`, `${p}:mw:${t.gx},${t.gy}`];
+    case 'mw':
+      return [`${p}:mw:${t.gx},${t.gy}`];
     case 'plan':
       return [`${p}:plan:${t.input.site.id}`];
     case 'render':
@@ -58,8 +61,12 @@ const payload = (r: TaskResult): Out[] => {
       return [{ ...r.result.core, stats: r.result.stats }];
     case 'dem':
       return [{ ...r.result }];
-    case 'net':
-      return [{ sites: r.result.sites, edges: r.result.edges }];
+    case 'net': {
+      const old = (r.result as { motorways?: unknown }).motorways;
+      return [{ sites: r.result.sites, edges: r.result.edges }, ...(old ? [{ pieces: old }] : [])];
+    }
+    case 'mw':
+      return [{ pieces: r.result }];
     case 'roads':
       return [{ roads: r.result }];
     case 'plan':
@@ -205,7 +212,13 @@ function compare(gold: Record<string, Buffer>): void {
   }
   if (missing.length || extra.length) {
     all = false;
-    console.log(`  missing ${missing.length} (${missing.slice(0, 5).join(' ')}), extra ${extra.length} (${extra.slice(0, 5).join(' ')})`);
+    const byKind = (ks: string[]) => {
+      const n: Record<string, number> = {};
+      for (const k of ks) n[k.split(':')[1]] = (n[k.split(':')[1]] ?? 0) + 1;
+      return Object.entries(n).map(([k, v]) => `${k} ${v}`).join(', ');
+    };
+    console.log(`  missing ${missing.length} (${byKind(missing)}), extra ${extra.length} (${byKind(extra)})`);
+    if (process.env.LIST) console.log(`  missing: ${missing.join(' ')}\n  extra: ${extra.join(' ')}`);
   }
   console.log(all ? 'IDENTICAL' : 'DIFFERENT');
   if (!all) process.exitCode = 1;

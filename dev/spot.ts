@@ -96,10 +96,9 @@ if (process.env.SVG) {
   }
   // Motorways (experimental): their true width, the central reservation as a thin line.
   // (Run on into their roundabouts where they end, with the lanes there, as the chunks draw them.)
-  const nets = (m as unknown as { nets: Map<string, { data?: { motorways?: MotorwayPiece[] } }> }).nets;
   const lanes: string[] = [];
-  for (const n of nets.values())
-    for (const p of n.data?.motorways ?? []) {
+  for (const n of m.mws.values())
+    for (const p of (n.data ?? []) as MotorwayPiece[]) {
       const end = p.endA || p.endB ? motorwayEnd(p, [...byKey.values()]) : { xy: p.xy, lanes: [] as number[][] };
       let d = '';
       for (let i = 0; i < end.xy.length; i += 2) d += `${i ? 'L' : 'M'}${f(end.xy[i])} ${f(end.xy[i + 1])}`;

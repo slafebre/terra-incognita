@@ -571,7 +571,7 @@ export function latticeCell(
   set: Settlements,
   terrain?: Terrain,
   mw?: Motorways,
-): Omit<NetCell, 'motorways'> {
+): NetCell {
   if (DEBUG_PATHS) DEBUG_TERRAIN = terrain;
   motorways = mw && new MotorwayLookup(mw, (x, y, tx, ty) => vertexPos(motorwayTerminus(x, y, tx, ty)));
   field.checkSeeds();

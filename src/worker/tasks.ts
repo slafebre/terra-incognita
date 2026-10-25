@@ -35,11 +35,18 @@ export function runTask(t: TaskRequest): { result: TaskResult; transfer: Transfe
       const view = new SeedView(t.seeds);
       const terrain = new Terrain(view);
       const field = new CoarseField(terrain, view);
+      field.checkSeeds(); // before the shared caches are read
       const set = new Settlements(field, terrain, view);
-      const mw = new Motorways(field, terrain, set, view);
-      const motorways = mw.netCellPieces(t.gx, t.gy);
-      const result = { ...latticeCell(t.gx, t.gy, field, set, terrain, mw), motorways };
-      return { result: { kind: 'net', result, ms: ms() }, transfer: motorways.map((m) => m.xy.buffer) };
+      const result = latticeCell(t.gx, t.gy, field, set, terrain, new Motorways(field, terrain, set, view));
+      return { result: { kind: 'net', result, ms: ms() }, transfer: [] };
+    }
+    case 'mw': {
+      const view = new SeedView(t.seeds);
+      const terrain = new Terrain(view);
+      const field = new CoarseField(terrain, view);
+      field.checkSeeds(); // before the shared caches are read
+      const result = new Motorways(field, terrain, new Settlements(field, terrain, view), view).netCellPieces(t.gx, t.gy);
+      return { result: { kind: 'mw', result, ms: ms() }, transfer: result.map((p) => p.xy.buffer) };
     }
     case 'roads': {
       const result = routeCurves(t.segments, t.patch, t.motorways);

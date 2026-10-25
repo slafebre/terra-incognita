@@ -79,11 +79,26 @@ const EDGE_REACH = 1000;
 /** Sites within this distance matter to a chunk's land cover and placeholders (m). */
 const SITE_REACH = 1600;
 
-interface NetState {
+/** A net cell's lattice (and sites), or the motorway pieces of its motorway cells. */
+interface CellState<T> {
   busy: boolean;
   failed?: boolean;
-  data?: NetCell;
+  data?: T;
 }
+type NetState = CellState<NetCell>;
+type MwState = CellState<MotorwayPiece[]>;
+
+/** The chunks overlapping `r`, as one rectangle: what they need reaches from their edges, not from `r`'s. */
+const wholeChunks = (r: Rect): Rect => ({
+  x0: Math.floor(r.x0 / CHUNK) * CHUNK,
+  y0: Math.floor(r.y0 / CHUNK) * CHUNK,
+  x1: Math.ceil(r.x1 / CHUNK) * CHUNK,
+  y1: Math.ceil(r.y1 / CHUNK) * CHUNK,
+});
+
+/** Smallest rectangle holding every one of `rs`. */
+const bounds = (rs: Rect[]): Rect =>
+  rs.reduce((a, r) => ({ x0: Math.min(a.x0, r.x0), y0: Math.min(a.y0, r.y0), x1: Math.max(a.x1, r.x1), y1: Math.max(a.y1, r.y1) }));
 
 interface PlanState {
   site: Site;
@@ -149,6 +164,7 @@ export class ChunkManager {
     pre: { ms: 0, n: 0 },
     hydro: { ms: 0, n: 0 },
     net: { ms: 0, n: 0 },
+    mw: { ms: 0, n: 0 },
     roads: { ms: 0, n: 0 },
     plan: { ms: 0, n: 0 },
     dem: { ms: 0, n: 0 },
@@ -160,7 +176,12 @@ export class ChunkManager {
   private roadsRect: Rect = this.genRect;
   private hydroRect: Rect = this.genRect;
   private netRect: Rect = this.genRect;
+  private mwRect: Rect = this.genRect;
+  /** Chunks whose roads the needed plans read (beyond the roads rectangle too), as of the last schedule. */
+  private planRoads: Rect[] = [];
   readonly nets = new Map<string, NetState>();
+  /** Motorway pieces by net cell: cheap, but needed much further out than the lattice. */
+  readonly mws = new Map<string, MwState>();
   /** Plans of settlements (street plans, farmsteads), by site id. */
   readonly plans = new Map<string, PlanState>();
   private lastPrune: Rect | undefined;
@@ -212,9 +233,6 @@ export class ChunkManager {
     this.roadsRect = expand(this.genRect, CHUNK);
     this.hydroRect = expand(this.roadsRect, CHUNK);
     this.preRect = expand(this.hydroRect, WIN_CHUNKS * CHUNK);
-    // (Motorway pieces stray further from the net cell carrying them than lattice edges,
-    // and roads keep clear of those within MOTORWAY_ROADS.)
-    this.netRect = expand(this.roadsRect, MW_SPILL + MOTORWAY_ROADS);
     this.keepBitmapRect = expand(union, 2 * CHUNK);
     this.forgetRect = expand(actual, FORGET);
     this.focus = focus;
@@ -251,11 +269,12 @@ export class ChunkManager {
     }
     for (const [k, pl] of this.plans) if (!pl.busy && !intersects(planDrawRect(pl.site), this.forgetRect)) this.plans.delete(k);
     const netKeep = expand(this.forgetRect, 20000);
-    for (const [k, n] of this.nets) {
-      const [gx, gy] = k.split(',').map(Number);
-      const r = { x0: gx * NET_CELL, y0: gy * NET_CELL, x1: (gx + 1) * NET_CELL, y1: (gy + 1) * NET_CELL };
-      if (!n.busy && !intersects(r, netKeep)) this.nets.delete(k);
-    }
+    for (const cells of [this.nets, this.mws] as Map<string, CellState<unknown>>[])
+      for (const [k, n] of cells) {
+        const [gx, gy] = k.split(',').map(Number);
+        const r = { x0: gx * NET_CELL, y0: gy * NET_CELL, x1: (gx + 1) * NET_CELL, y1: (gy + 1) * NET_CELL };
+        if (!n.busy && !intersects(r, netKeep)) cells.delete(k);
+      }
     // Pruning walks every seed; only bother once the view has moved a bit.
     const lp = this.lastPrune;
     if (!lp || Math.abs(lp.x0 - this.forgetRect.x0) + Math.abs(lp.y0 - this.forgetRect.y0) > 256 || Math.abs(lp.x1 - lp.x0 - (this.forgetRect.x1 - this.forgetRect.x0)) > 256) {
@@ -288,8 +307,18 @@ export class ChunkManager {
   // --- Scheduling ------------------------------------------------------------
 
   schedule(): void {
+    this.planRoads = this.neededPlans().map(planRoadsRect);
+    // Every net cell and motorway cell something waits on (otherwise it waits forever):
+    // lattice edges within EDGE_REACH of every chunk getting roads (plans pull some beyond
+    // the roads rectangle) and the sites a drawn chunk's surface and plans read; motorway
+    // pieces round every chunk getting roads, and those a drawn chunk draws.
+    const roads = [this.roadsRect, ...this.planRoads].map(wholeChunks);
+    const drawn = wholeChunks(this.genRect);
+    this.netRect = bounds([...roads.map((r) => expand(r, EDGE_REACH)), expand(drawn, Math.max(SITE_REACH, PLAN_REACH))]);
+    this.mwRect = bounds([...roads.map((r) => expand(r, MW_SPILL + MOTORWAY_ROADS)), expand(drawn, MW_SPILL + MW_END_REACH)]);
     while (this.pool.idle > 0) {
-      if (this.scheduleNet()) continue;
+      if (this.scheduleCell('mw', this.mws, this.mwRect)) continue;
+      if (this.scheduleCell('net', this.nets, this.netRect)) continue;
       if (this.schedulePlan()) continue;
       const next = this.pick();
       if (!next.length) return;
@@ -310,13 +339,17 @@ export class ChunkManager {
     return this.netCells(r).every(([gx, gy]) => this.nets.get(`${gx},${gy}`)?.data);
   }
 
-  /** Dispatches the nearest missing net cell, if any. */
-  private scheduleNet(): boolean {
+  private mwsReady(r: Rect): boolean {
+    return this.netCells(r).every(([gx, gy]) => this.mws.get(`${gx},${gy}`)?.data);
+  }
+
+  /** Dispatches the nearest missing cell of a kind in `rect`, if any. */
+  private scheduleCell<T>(kind: 'net' | 'mw', cells: Map<string, CellState<T>>, rect: Rect): boolean {
     const [fx, fy] = this.focus;
     let best: [number, number] | undefined;
     let bestD = Infinity;
-    for (const [gx, gy] of this.netCells(this.netRect)) {
-      const n = this.nets.get(`${gx},${gy}`);
+    for (const [gx, gy] of this.netCells(rect)) {
+      const n = cells.get(`${gx},${gy}`);
       if (n && (n.busy || n.data || n.failed)) continue;
       const d = Math.hypot((gx + 0.5) * NET_CELL - fx, (gy + 0.5) * NET_CELL - fy);
       if (d < bestD) {
@@ -327,13 +360,13 @@ export class ChunkManager {
     if (!best) return false;
     const [gx, gy] = best;
     const key = `${gx},${gy}`;
-    const state: NetState = { busy: true };
-    this.nets.set(key, state);
+    const state: CellState<T> = { busy: true };
+    cells.set(key, state);
     const cx = (gx + 0.5) * NET_CELL;
     const cy = (gy + 0.5) * NET_CELL;
     this.pool
       .run({
-        kind: 'net',
+        kind,
         gx,
         gy,
         seeds: this.seeds.payloadFor(
@@ -343,15 +376,15 @@ export class ChunkManager {
       })
       .then((res) => {
         state.busy = false;
-        this.stats.net.ms += res.ms;
-        this.stats.net.n++;
-        if (res.kind === 'net' && this.nets.get(key) === state) state.data = res.result;
+        this.stats[kind].ms += res.ms;
+        this.stats[kind].n++;
+        if ((res.kind === 'net' || res.kind === 'mw') && cells.get(key) === state) state.data = res.result as T;
       })
       .catch((err) => {
         state.busy = false;
         state.failed = true;
         this.stats.errors++;
-        console.error(`net cell ${key} failed`, err);
+        console.error(`${kind === 'net' ? 'net' : 'motorway'} cell ${key} failed`, err);
       });
     return true;
   }
@@ -367,7 +400,7 @@ export class ChunkManager {
     const out: Float64Array[] = [];
     const lanes: SegmentPath[] = [];
     for (const [gx, gy] of this.netCells(expand(r, MW_SPILL + MW_END_REACH)))
-      for (const p of this.nets.get(`${gx},${gy}`)?.data?.motorways ?? []) {
+      for (const p of this.mws.get(`${gx},${gy}`)?.data ?? []) {
         if (!p.endA && !p.endB) {
           if (intersects(pieceBox(p), q)) out.push(p.xy);
           continue;
@@ -390,7 +423,7 @@ export class ChunkManager {
     const out: Float64Array[] = [];
     const q = expand(r, m);
     for (const [gx, gy] of this.netCells(expand(r, MW_SPILL)))
-      for (const p of this.nets.get(`${gx},${gy}`)?.data?.motorways ?? []) if (intersects(pieceBox(p), q)) out.push(p.xy);
+      for (const p of this.mws.get(`${gx},${gy}`)?.data ?? []) if (intersects(pieceBox(p), q)) out.push(p.xy);
     return out;
   }
 
@@ -478,7 +511,8 @@ export class ChunkManager {
   }
 
   private roadsReady(c: Chunk): boolean {
-    return this.ring(c, (n) => !!n?.hydro && !!n.pre) && this.netsReady(expand(chunkRect(c.cx, c.cy), MW_SPILL + MOTORWAY_ROADS));
+    const r = chunkRect(c.cx, c.cy);
+    return this.ring(c, (n) => !!n?.hydro && !!n.pre) && this.netsReady(expand(r, EDGE_REACH)) && this.mwsReady(expand(r, MW_SPILL + MOTORWAY_ROADS));
   }
 
   private demReady(c: Chunk): boolean {
@@ -486,7 +520,8 @@ export class ChunkManager {
   }
 
   private renderReady(c: Chunk): boolean {
-    return this.ring(c, (n) => !!n?.roads) && !!this.plansFor(c) && this.netsReady(expand(chunkRect(c.cx, c.cy), MW_SPILL));
+    // (Motorway pieces as far as motorwaysToDraw reads them.)
+    return this.ring(c, (n) => !!n?.roads) && !!this.plansFor(c) && this.mwsReady(expand(chunkRect(c.cx, c.cy), MW_SPILL + MW_END_REACH));
   }
 
   /** Best next task (a pre task may batch several chunks). */
@@ -500,7 +535,7 @@ export class ChunkManager {
     };
     // Plans read roads around their settlements, a little beyond the roads rectangle:
     // those roads, the solves under them and the pre data those need are made too.
-    const planRoads = this.neededPlans().map(planRoadsRect);
+    const planRoads = this.planRoads;
     const planHydro = planRoads.map((r) => expand(r, CHUNK));
     let preBox = this.preRect;
     for (const r of planHydro) {
@@ -582,7 +617,8 @@ export class ChunkManager {
         break;
       }
       case 'net':
-        throw new Error('net cells are scheduled by scheduleNet');
+      case 'mw':
+        throw new Error('net and motorway cells are scheduled by scheduleCell');
       case 'plan':
         throw new Error('plans are scheduled by schedulePlan');
       case 'roads':

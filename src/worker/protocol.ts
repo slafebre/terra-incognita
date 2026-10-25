@@ -1,5 +1,6 @@
 import type { DemPatch, DemResult } from '../gen/dem';
 import type { HydroResult, HydroWindow, PreResult } from '../gen/hydro';
+import type { MotorwayPiece } from '../gen/motorway';
 import type { PoiPatch } from '../gen/poi';
 import type { NetCell, RoadPatch, SegmentPath, SegmentTask } from '../gen/roads';
 import type { SeedPayload } from '../gen/seeds';
@@ -10,6 +11,7 @@ export type TaskRequest =
   | { kind: 'pre'; chunks: [number, number][]; seeds: SeedPayload }
   | { kind: 'hydro'; cx: number; cy: number; win: HydroWindow; seeds: SeedPayload }
   | { kind: 'net'; gx: number; gy: number; seeds: SeedPayload }
+  | { kind: 'mw'; gx: number; gy: number; seeds: SeedPayload }
   | { kind: 'roads'; cx: number; cy: number; segments: SegmentTask[]; patch: RoadPatch; motorways: Float64Array[] }
   | { kind: 'plan'; input: PlanInput }
   | { kind: 'dem'; cx: number; cy: number; patch: DemPatch; sites: Site[]; seeds: SeedPayload }
@@ -37,6 +39,7 @@ export type TaskResult =
   | { kind: 'pre'; results: PreResult[]; ms: number }
   | { kind: 'hydro'; result: HydroResult; ms: number }
   | { kind: 'net'; result: NetCell; ms: number }
+  | { kind: 'mw'; result: MotorwayPiece[]; ms: number }
   | { kind: 'roads'; result: SegmentPath[]; ms: number }
   | { kind: 'plan'; result: TownPlan; ms: number }
   | { kind: 'dem'; result: DemResult; ms: number }
