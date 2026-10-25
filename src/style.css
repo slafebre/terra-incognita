@@ -307,10 +307,29 @@ body {
   color: #fcfaf3;
   outline: none;
 }
-@media (max-width: 480px) {
+/* Small screens: the sheet fills the screen, its neatline round the edge like the map's. */
+@media (max-width: 480px), (max-height: 480px) {
+  #welcome {
+    width: 100vw;
+    height: 100dvh;
+    max-width: none;
+    max-height: none;
+    margin: 0;
+    box-shadow: none;
+  }
   #welcome .sheet {
+    box-sizing: border-box;
+    display: flex;
+    flex-direction: column;
+    min-height: 100%;
     padding: 14px 16px;
   }
+  #welcome footer {
+    margin-top: auto;
+    padding-top: 18px;
+  }
+}
+@media (max-width: 480px) {
   #welcome dl {
     grid-template-columns: 1fr;
     gap: 0;
