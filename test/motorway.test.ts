@@ -5,6 +5,7 @@ import { NET_REACH } from '../src/gen/roads';
 import { expand, SeedStore, SeedView } from '../src/gen/seeds';
 import { Settlements } from '../src/gen/settle';
 import { setRegionOverride, Terrain } from '../src/gen/terrain';
+import { classifyMotorways, MW_LEVEL, MW_TUNNEL, MW_VIADUCT, surfaceLines } from '../src/render/motorway';
 
 /** Motorways over a rectangle, from seeds paid out for that rectangle only (as a worker would). */
 function motorways(store: SeedStore, r: { x0: number; y0: number; x1: number; y1: number }): Motorways {
@@ -62,6 +63,8 @@ describe('motorways', () => {
       const hp = Math.atan2(p.xy[n - 1] - p.xy[n - 3], p.xy[n - 2] - p.xy[n - 4]);
       const hq = Math.atan2(q.xy[3] - q.xy[1], q.xy[2] - q.xy[0]);
       expect(Math.abs(Math.atan2(Math.sin(hp - hq), Math.cos(hp - hq)))).toBeLessThan(0.05);
+      // …and at the same height (the profile is pinned at the anchors).
+      expect(Math.abs(p.z[p.z.length - 1] - q.z[0])).toBeLessThan(1e-3);
     }
     expect(joins).toBeGreaterThan(3);
   });
@@ -81,6 +84,26 @@ describe('motorways', () => {
     }
     console.log(`furthest outside its cell: ${worst.toFixed(0)} m`);
     expect(worst).toBeLessThan(MW_SPILL);
+  });
+
+  it('classes the drawing by the ground: viaducts, tunnels, the surface between', () => {
+    // A straight line at height 100 over ground falling to 50 (a valley) and rising to 150 (a hill).
+    const n = 40;
+    const xy = new Float64Array(2 * n);
+    for (let i = 0; i < n; i++) xy[2 * i] = 16 * 10 + i * 25;
+    const patch = { gx: 0, gy: -4, w: 80, h: 9, zE: new Float32Array(80 * 9), A: new Float32Array(80 * 9), lake: new Float32Array(80 * 9).fill(NaN) };
+    for (let j = 0; j < 9; j++)
+      for (let i = 0; i < 80; i++) {
+        const x = i * 16;
+        patch.zE[j * 80 + i] = x < 400 ? 50 : x < 600 ? 100 : x < 900 ? 150 : 100;
+      }
+    const [m] = classifyMotorways([xy], [new Float32Array(n).fill(100)], patch);
+    const at = (x: number) => m.cls[Math.round((x - 160) / 25)];
+    expect(at(260)).toBe(MW_VIADUCT);
+    expect(at(500)).toBe(MW_LEVEL);
+    expect(at(760)).toBe(MW_TUNNEL);
+    expect(at(1080)).toBe(MW_LEVEL);
+    expect(surfaceLines([m]).length).toBe(2);
   });
 
   it('keeps to wide curves', () => {

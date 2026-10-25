@@ -1,6 +1,7 @@
 import { DPR_MAX, M_PER_CSS_PX } from '../lib/constants';
 import { CHAPEL, CROSS, RESERVOIR, SPRING, TOWER, TRIG, type PoiKind } from '../gen/poi';
 import { ROAD_C, ROAD_D, ROAD_N, ROAD_P, ROAD_T } from '../gen/roads';
+import { MW_WIDTH } from '../gen/motorway';
 import { MIN_PX, STREET_M, STREET_PX, WIDTH_M } from '../render/roads';
 import { drawPois } from '../render/symbols';
 import { STYLE } from '../render/style';
@@ -159,6 +160,64 @@ const street: Draw = (c) => {
   const w = Math.max(STREET_M[0] * PX_PER_M, STREET_PX[0]);
   across(c, STYLE.roads.casing, w + 2 * casing);
   across(c, STYLE.roads.fill[ROAD_C], w);
+};
+
+/** Motorways: the dual carriageway at its width on the map, its central reservation. */
+const mwW = Math.max(MW_WIDTH * PX_PER_M, STYLE.roads.motorway.minPx);
+const motorway: Draw = (c) => {
+  const m = STYLE.roads.motorway;
+  across(c, STYLE.roads.casing, mwW + 2 * casing);
+  across(c, m.fill, mwW);
+  across(c, m.median, m.medianWidth);
+};
+
+/** A motorway into a tunnel: square at the portal, then its edges dashed. */
+const tunnel: Draw = (c) => {
+  const m = STYLE.roads.motorway;
+  const x = SW / 2;
+  c.save();
+  c.beginPath();
+  c.rect(0, 0, x, SH);
+  c.clip();
+  motorway(c);
+  c.restore();
+  const h = mwW / 2 + casing;
+  c.strokeStyle = STYLE.roads.casing;
+  c.lineWidth = m.tunnelWidth;
+  c.setLineDash([4, 3]);
+  c.beginPath();
+  for (const y of [SH / 2 - h, SH / 2 + h]) {
+    c.moveTo(x, y);
+    c.lineTo(SW - 3, y);
+  }
+  c.stroke();
+  c.setLineDash([]);
+  c.lineWidth = m.portalWidth;
+  c.beginPath();
+  c.moveTo(x, SH / 2 - h - 1.5);
+  c.lineTo(x, SH / 2 + h + 1.5);
+  c.stroke();
+};
+
+/** Earthworks beside a road: an embankment's ticks broad at the road, a cutting's at the top of the slope. */
+const earthworks = (cut: boolean): Draw => (c) => {
+  const m = STYLE.roads.motorway;
+  const w = roadW(ROAD_C);
+  const h = w / 2 + casing;
+  const len = 3.2;
+  c.fillStyle = m.bank;
+  c.beginPath();
+  for (let x = 5; x < SW - 3; x += m.tickM * PX_PER_M * 2) {
+    for (const side of [-1, 1]) {
+      const [near, far] = cut ? [h + len, h] : [h, h + len];
+      c.moveTo(x - m.tickWidth, SH / 2 + side * near);
+      c.lineTo(x + m.tickWidth, SH / 2 + side * near);
+      c.lineTo(x, SH / 2 + side * far);
+      c.closePath();
+    }
+  }
+  c.fill();
+  road(ROAD_C)(c);
 };
 
 const bridge: Draw = (c) => {
@@ -392,6 +451,7 @@ const SECTIONS: [TextKey, [TextKey, Draw][]][] = [
   [
     'roads',
     [
+      ['motorway', motorway],
       ['main', road(ROAD_N)],
       ['secondary', road(ROAD_D)],
       ['minor', road(ROAD_C)],
@@ -399,6 +459,9 @@ const SECTIONS: [TextKey, [TextKey, Draw][]][] = [
       ['track', (c) => across(c, STYLE.roads.track, roadW(ROAD_T))],
       ['footpath', (c) => across(c, STYLE.roads.path, roadW(ROAD_P), [4, 3])],
       ['bridge', bridge],
+      ['tunnel', tunnel],
+      ['embankment', earthworks(false)],
+      ['cutting', earthworks(true)],
     ],
   ],
   [

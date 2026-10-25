@@ -49,8 +49,26 @@ export const STYLE = {
      * Motorways (experimental): a dual carriageway, cased, its central reservation a dark
      * line down the middle; at its true width (MW_WIDTH), at least minPx on screen (CSS px).
      * Interchange ramps: single, cased, in the same colour (MW_RAMP_WIDTH, at least rampMinPx).
+     * Earthworks: ticks every tickM m, tickBaseM + tickPerM × the bank's height long (at
+     * most tickMaxM), tickWidth px either side at their base. Tunnels: dashed edges
+     * (tunnelWidth px), a bar across each portal (portalWidth px, portalM m past the edges).
      */
-    motorway: { fill: 'rgb(214, 44, 84)', median: 'rgb(70, 58, 52)', medianWidth: 0.7, minPx: 5, rampMinPx: 2.2 },
+    motorway: {
+      fill: 'rgb(214, 44, 84)',
+      median: 'rgb(70, 58, 52)',
+      medianWidth: 0.7,
+      minPx: 5,
+      rampMinPx: 2.2,
+      bank: 'rgba(112, 92, 72, 0.7)',
+      tickM: 5,
+      tickBaseM: 4,
+      tickPerM: 0.5,
+      tickMaxM: 12,
+      tickWidth: 0.6,
+      tunnelWidth: 0.8,
+      portalWidth: 1.4,
+      portalM: 4,
+    },
     /** Bridges: parapet lines (CSS px) a gap away from the way's edge. */
     bridge: { color: 'rgb(40, 34, 30)', deck: 'rgb(255, 255, 255)', gap: 0.8, line: 0.7 },
   },

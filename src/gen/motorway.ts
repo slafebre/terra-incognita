@@ -153,8 +153,11 @@ export const MW_DEPEND = 40000;
 /** Per worker: routed pieces by cell and seeds, shared by every task (most cells hold none). */
 const shared = { epoch: -1, pieces: new Map<string, MotorwayPiece[]>() };
 const SHARED_MAX = 20000;
+/** The profile averages the ground over PROFILE_SPAN m (PROFILE_HALF samples either side). */
+const PROFILE_SPAN = 1000;
 /** Output: sampled every OUT_STEP m. */
 const OUT_STEP = 25;
+const PROFILE_HALF = Math.round(PROFILE_SPAN / 2 / OUT_STEP);
 
 export interface MotorwayAnchor {
   /** Id of the sample edge it lies on (shared by both cells). */
@@ -174,6 +177,12 @@ export interface MotorwayPiece {
   b: MotorwayAnchor;
   /** Routed centre line, world metres [x0, y0, …], every OUT_STEP m or so, anchor to anchor. */
   xy: Float64Array;
+  /**
+   * The road's height at each point (m): its profile, the coarse ground averaged over
+   * PROFILE_SPAN along it, pinned at the anchors (anchorHeight) so pieces meet level.
+   * Where the ground lies far below it: a viaduct, far above: a tunnel (the drawing decides).
+   */
+  z: Float32Array;
   /** The raw line it was routed along (dev; not carried by net cells). */
   base?: number[];
   /** The motorway ends at a (or b): no piece continues it there. */
@@ -274,7 +283,8 @@ export class Motorways {
     const n = NET_CELL / MW_CELL;
     const out: MotorwayPiece[] = [];
     for (let cj = gy * n; cj < (gy + 1) * n; cj++)
-      for (let ci = gx * n; ci < (gx + 1) * n; ci++) for (const p of this.cellPieces(ci, cj)) out.push({ ...p, base: undefined });
+      for (let ci = gx * n; ci < (gx + 1) * n; ci++)
+        for (const p of this.cellPieces(ci, cj)) out.push({ ...p, xy: p.xy.slice(), z: p.z.slice(), base: undefined });
     return out;
   }
 
@@ -310,11 +320,13 @@ export class Motorways {
     hit = [];
     for (const p of this.rawPieces(ci, cj)) {
       if (!this.keeps(p)) continue;
+      const xy = this.route(p);
       hit.push({
         key: `${p.a.id}|${p.b.id}`,
         a: this.placed(p.a),
         b: this.placed(p.b),
-        xy: this.route(p),
+        xy,
+        z: this.profile(xy, this.anchorHeight(p.a), this.anchorHeight(p.b)),
         base: p.base,
         endA: !this.continues(p.a, ci, cj),
         endB: !this.continues(p.b, ci, cj),
@@ -323,6 +335,40 @@ export class Motorways {
     this.routed.set(k, hit);
     shared.pieces.set(sk, hit);
     return hit;
+  }
+
+  /** The road's height at an anchor: the coarse ground along its heading, averaged over PROFILE_SPAN. */
+  private anchorHeight(raw: MotorwayAnchor): number {
+    const an = this.placed(raw);
+    let z = 0;
+    for (let k = -PROFILE_HALF; k <= PROFILE_HALF; k++) z += this.field.z(an.x + an.tx * k * OUT_STEP, an.y + an.ty * k * OUT_STEP);
+    return z / (2 * PROFILE_HALF + 1);
+  }
+
+  /**
+   * A piece's profile: the coarse ground averaged over PROFILE_SPAN along it (as far as
+   * the piece goes), shifted linearly along it to meet its anchors' heights.
+   */
+  private profile(xy: Float64Array, za: number, zb: number): Float32Array {
+    const n = xy.length / 2;
+    const g = new Float64Array(n);
+    for (let i = 0; i < n; i++) g[i] = this.field.z(xy[2 * i], xy[2 * i + 1]);
+    const m = new Float64Array(n);
+    for (let i = 0; i < n; i++) {
+      let s = 0;
+      let c = 0;
+      for (let j = Math.max(0, i - PROFILE_HALF); j <= Math.min(n - 1, i + PROFILE_HALF); j++) {
+        s += g[j];
+        c++;
+      }
+      m[i] = s / c;
+    }
+    const z = new Float32Array(n);
+    for (let i = 0; i < n; i++) {
+      const t = n > 1 ? i / (n - 1) : 0;
+      z[i] = m[i] + (1 - t) * (za - m[0]) + t * (zb - m[n - 1]);
+    }
+    return z;
   }
 
   /**
@@ -1217,7 +1263,7 @@ const MW_END_FLARE = (60 * Math.PI) / 180;
 export function motorwayEnd(
   p: MotorwayPiece,
   roads: { xy: ArrayLike<number>; ring?: boolean; ramp?: boolean; cls: number }[],
-): { xy: Float64Array; lanes: number[][] } {
+): { xy: Float64Array; z: Float32Array; lanes: number[][] } {
   const xy = p.xy;
   const n = xy.length;
   const lanes: number[][] = [];
@@ -1304,18 +1350,24 @@ export function motorwayEnd(
     }
     return line;
   };
+  // The run-on keeps the height of the end it leaves.
   let line = Array.from(xy);
+  let zs = Array.from(p.z);
   if (p.endA) {
     const r = runOn(xy[0], xy[1], xy[0] - xy[2], xy[1] - xy[3]);
     if (r) {
       const rev: number[] = [];
       for (let q = r.length - 2; q >= 0; q -= 2) rev.push(r[q], r[q + 1]);
       line = [...rev, ...line];
+      zs = [...new Array<number>(r.length / 2).fill(p.z[0]), ...zs];
     }
   }
   if (p.endB) {
     const r = runOn(xy[n - 2], xy[n - 1], xy[n - 2] - xy[n - 4], xy[n - 1] - xy[n - 3]);
-    if (r) line = [...line, ...r];
+    if (r) {
+      line = [...line, ...r];
+      zs = [...zs, ...new Array<number>(r.length / 2).fill(p.z[p.z.length - 1])];
+    }
   }
-  return { xy: Float64Array.from(line), lanes };
+  return { xy: Float64Array.from(line), z: Float32Array.from(zs), lanes };
 }

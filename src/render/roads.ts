@@ -2,6 +2,7 @@ import { APRON, CELL, CHUNK, DEM_W } from '../lib/constants';
 import { COVER, COVER_SCALE } from '../gen/landcover';
 import { smoothPolyline } from '../lib/polyline';
 import { lineDistance, MW_RAMP_WIDTH, MW_VERGE, MW_WIDTH } from '../gen/motorway';
+import { drawEarthworks, type MotorwayDraw, surfaceLines, viaductLines } from './motorway';
 import { ringDisc, ROAD_C, ROAD_D, ROAD_N, ROAD_P, ROAD_T, type SegmentPath } from '../gen/roads';
 import { VILLAGE } from '../gen/settle';
 import { LANE, type Street, type TownPlan } from '../gen/town';
@@ -120,7 +121,7 @@ export function drawRoads(
   ctx: Ctx,
   roads: SegmentPath[],
   streets: Street[],
-  motorways: Float64Array[],
+  mws: MotorwayDraw[],
   cx: number,
   cy: number,
   pxPerM: number,
@@ -193,7 +194,16 @@ export function drawRoads(
   const rampW = Math.max(MW_RAMP_WIDTH * pxPerM, mw.rampMinPx * dpr);
   const mwW = Math.max(MW_WIDTH * pxPerM, mw.minPx * dpr);
   const casing = 2 * STYLE.roads.casingWidth * dpr;
+  // Motorways above ground (not in tunnels), with their viaducts as bridges.
+  const motorways = surfaceLines(mws);
   const motorway = motorwayPaths(motorways, cx, cy, pxPerM, water);
+  for (const v of viaductLines(mws)) {
+    motorway.bridges.moveTo((v[0] - ox) * pxPerM, (v[1] - oy) * pxPerM);
+    for (let k = 2; k < v.length; k += 2) motorway.bridges.lineTo((v[k] - ox) * pxPerM, (v[k + 1] - oy) * pxPerM);
+  }
+  drawEarthworks(ctx, mws, mwW, cx, cy, pxPerM, dpr);
+  ctx.lineCap = 'round';
+  ctx.lineJoin = 'round';
   // Casings.
   ctx.strokeStyle = STYLE.roads.casing;
   for (const cls of [LANE, 0]) {
@@ -208,8 +218,11 @@ export function drawRoads(
     ctx.lineWidth = width(cls) + casing;
     ctx.stroke(paths[cls]);
   }
+  // (Flat ends: pieces meet with the same heading, and a tunnel's portal shows square.)
+  ctx.lineCap = 'butt';
   ctx.lineWidth = mwW + casing;
   ctx.stroke(motorway.path);
+  ctx.lineCap = 'round';
   // Fills.
   ctx.strokeStyle = STYLE.roads.fill[ROAD_C];
   for (const cls of [LANE, 0]) {
@@ -228,12 +241,14 @@ export function drawRoads(
     ctx.lineWidth = width(cls);
     ctx.stroke(paths[cls]);
   }
+  ctx.lineCap = 'butt';
   ctx.strokeStyle = mw.fill;
   ctx.lineWidth = mwW;
   ctx.stroke(motorway.path);
   ctx.strokeStyle = mw.median;
   ctx.lineWidth = mw.medianWidth * dpr;
   ctx.stroke(motorway.path);
+  ctx.lineCap = 'round';
   // Bridges, on top: ways over water, motorways over water, then ways over motorways.
   drawBridges(ctx, bridges, pxPerM, dpr);
   if (!motorways.length) return;

@@ -23,6 +23,8 @@ export type TaskRequest =
       roads: SegmentPath[];
       /** Centre lines of the motorways passing near the chunk (world metres). */
       motorways: Float64Array[];
+      /** Their profiles: the road's height at each point (m). */
+      motorwayZ: Float32Array[];
       plans: TownPlan[];
       /** Fine nodes round the chunk for its points of interest (none if a solve was missing). */
       poi?: PoiPatch;

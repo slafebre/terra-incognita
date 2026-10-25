@@ -6,6 +6,7 @@ const en = {
   note: '1:10,000 at zoom 1. Press L to show or hide.',
 
   roads: 'Roads and paths',
+  motorway: 'Motorway',
   main: 'Main road',
   secondary: 'Secondary road',
   minor: 'Minor road',
@@ -13,6 +14,9 @@ const en = {
   track: 'Track',
   footpath: 'Footpath',
   bridge: 'Bridge',
+  tunnel: 'Tunnel',
+  embankment: 'Embankment',
+  cutting: 'Cutting',
 
   buildings: 'Buildings',
   building: 'Buildings',
@@ -63,6 +67,7 @@ export const TEXT: Record<Lang, Record<TextKey, string>> = {
     note: '1:10.000 bij zoom 1. Druk op L om te tonen of te verbergen.',
 
     roads: 'Wegen en paden',
+    motorway: 'Autosnelweg',
     main: 'Hoofdweg',
     secondary: 'Secundaire weg',
     minor: 'Lokale weg',
@@ -70,6 +75,9 @@ export const TEXT: Record<Lang, Record<TextKey, string>> = {
     track: 'Onverharde weg',
     footpath: 'Voetpad',
     bridge: 'Brug',
+    tunnel: 'Tunnel',
+    embankment: 'Ophoging',
+    cutting: 'Ingraving',
 
     buildings: 'Bebouwing',
     building: 'Gebouwen',
@@ -114,6 +122,7 @@ export const TEXT: Record<Lang, Record<TextKey, string>> = {
     note: '1/10 000 au zoom 1. Touche L pour afficher ou masquer.',
 
     roads: 'Routes et chemins',
+    motorway: 'Autoroute',
     main: 'Route principale',
     secondary: 'Route secondaire',
     minor: 'Petite route',
@@ -121,6 +130,9 @@ export const TEXT: Record<Lang, Record<TextKey, string>> = {
     track: 'Chemin',
     footpath: 'Sentier',
     bridge: 'Pont',
+    tunnel: 'Tunnel',
+    embankment: 'Remblai',
+    cutting: 'Déblai',
 
     buildings: 'Bâti',
     building: 'Bâtiments',
@@ -165,6 +177,7 @@ export const TEXT: Record<Lang, Record<TextKey, string>> = {
     note: '1:10.000 bei Zoom 1. Taste L blendet sie ein und aus.',
 
     roads: 'Straßen und Wege',
+    motorway: 'Autobahn',
     main: 'Hauptstraße',
     secondary: 'Landstraße',
     minor: 'Nebenstraße',
@@ -172,6 +185,9 @@ export const TEXT: Record<Lang, Record<TextKey, string>> = {
     track: 'Wirtschaftsweg',
     footpath: 'Fußweg',
     bridge: 'Brücke',
+    tunnel: 'Tunnel',
+    embankment: 'Damm',
+    cutting: 'Einschnitt',
 
     buildings: 'Bebauung',
     building: 'Gebäude',

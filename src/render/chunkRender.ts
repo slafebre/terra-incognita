@@ -10,6 +10,7 @@ import { cellCoverage, drawCoverSymbols, FILLS } from './landcover';
 import { drawBuildings } from './buildings';
 import { clearUnderBuiltUp, drawChurches, drawRoads } from './roads';
 import { lineDistance, MW_VERGE } from '../gen/motorway';
+import { classifyMotorways, surfaceLines } from './motorway';
 import { drawPois } from './symbols';
 import { drawFields } from './fields';
 import { coverAt } from './landcover';
@@ -29,6 +30,8 @@ export interface RenderInput {
   roads: SegmentPath[];
   /** Centre lines of the motorways passing near the chunk (world metres). */
   motorways: Float64Array[];
+  /** Their profiles: the road's height at each point (m). */
+  motorwayZ: Float32Array[];
   /** Plans of settlements (street plans, farmsteads) that may draw into this chunk. */
   plans: TownPlan[];
   /** Fine nodes round the chunk, for its points of interest and field parcels. */
@@ -83,7 +86,11 @@ export function farmlandTests(cx: number, cy: number, cover: Int8Array, water: F
 /** River width in metres for drainage area A (km²). */
 export const riverWidth = (A: number) => 1.1 * Math.pow(A, 0.55);
 
-export function renderChunk({ cx, cy, dem, cover, water, streams, roads, motorways, plans, poi, edges, pxSize, dpr }: RenderInput): OffscreenCanvas {
+export function renderChunk({ cx, cy, dem, cover, water, streams, roads, motorways: lines, motorwayZ, plans, poi, edges, pxSize, dpr }: RenderInput): OffscreenCanvas {
+  // Motorways against the ground (viaducts, tunnels, earthworks); what lies above it
+  // clears the land under it and takes ways over it.
+  const mws = classifyMotorways(lines, motorwayZ, poi);
+  const motorways = surfaceLines(mws);
   const canvas = new OffscreenCanvas(pxSize, pxSize);
   const ctx = canvas.getContext('2d')!;
   const pxPerM = pxSize / CHUNK;
@@ -250,7 +257,7 @@ export function renderChunk({ cx, cy, dem, cover, water, streams, roads, motorwa
 
   drawStreams(ctx, streams, pxPerM, dpr);
   drawBuildings(ctx, plans, cx, cy, pxPerM, dpr);
-  drawRoads(ctx, drawn, plans.flatMap((p) => p.streets), motorways, cx, cy, pxPerM, dpr, water);
+  drawRoads(ctx, drawn, plans.flatMap((p) => p.streets), mws, cx, cy, pxPerM, dpr, water);
   drawChurches(ctx, plans, cx, cy, pxPerM, dpr);
   // Points of interest: the chunk's own (hilltops, wayside crosses, springs) and the plans' (water towers).
   const pois = [...(poi ? placePois({ cx, cy, patch: poi, roads: drawn, plans }) : []), ...plans.flatMap((p) => p.pois)];

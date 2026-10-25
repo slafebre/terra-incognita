@@ -357,15 +357,15 @@ export class ChunkManager {
    * piece where the motorway ends run on to its terminus (motorwayEnd) among `roads`
    * (the chunk's and its neighbours', which hold every terminus near enough to matter).
    */
-  private motorwaysToDraw(c: Chunk, roads: SegmentPath[]): Float64Array[] {
+  private motorwaysToDraw(c: Chunk, roads: SegmentPath[]): { xy: Float64Array; z: Float32Array }[] {
     const r = chunkRect(c.cx, c.cy);
     const q = expand(r, MOTORWAY_DRAW);
-    const out: Float64Array[] = [];
+    const out: { xy: Float64Array; z: Float32Array }[] = [];
     const lanes: SegmentPath[] = [];
     for (const [gx, gy] of this.netCells(expand(r, MW_SPILL + MW_END_REACH)))
       for (const p of this.nets.get(`${gx},${gy}`)?.data?.motorways ?? []) {
         if (!p.endA && !p.endB) {
-          if (intersects(pieceBox(p), q)) out.push(p.xy);
+          if (intersects(pieceBox(p), q)) out.push({ xy: p.xy, z: p.z });
           continue;
         }
         const end = motorwayEnd(p, roads);
@@ -373,7 +373,7 @@ export class ChunkManager {
           for (let k = 0; k < xy.length; k += 2) if (xy[k] >= q.x0 && xy[k] <= q.x1 && xy[k + 1] >= q.y0 && xy[k + 1] <= q.y1) return true;
           return false;
         };
-        if (near(end.xy)) out.push(end.xy);
+        if (near(end.xy)) out.push({ xy: end.xy, z: end.z });
         // Its lanes into the roundabout: drawn as ramps, with the roads.
         end.lanes.forEach((xy, i) => near(xy) && lanes.push({ key: `mwlane:${p.key}:${i}`, cls: ROAD_C, xy: Float32Array.from(xy), ramp: true }));
       }
@@ -621,7 +621,8 @@ export class ChunkManager {
           cover,
           streams,
           roads,
-          motorways,
+          motorways: motorways.map((m) => m.xy),
+          motorwayZ: motorways.map((m) => m.z),
           plans: this.plansFor(c)!,
           poi,
           edges: this.fieldEdges(c),
