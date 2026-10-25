@@ -500,6 +500,8 @@ const MW_END_RUN = 150;
 const MW_END_RING = 24.5;
 const MW_END_RING_LEVEL = 0.15;
 const MW_END_RING_STREAM = 20;
+/** No way leaves a terminus within this angle (rad) of the way the motorway comes in: its lanes take that side of the ring. */
+const MW_END_SECTOR = (60 * Math.PI) / 180;
 const MW_END_TOWN = 12000;
 const MW_END_VILLAGE = 8000;
 /** The terminus of a motorway ending at (x, y), heading (tx, ty) out of it. */
@@ -541,6 +543,14 @@ function edgeCostRaw(field: CoarseField, u: number, v: number, cls: RoadClass): 
   }
   if (wet) c += (len * LAKE_W * wet) / LAKE_SAMPLES + (wet < LAKE_SAMPLES ? LAKE_BRIDGE / 2 : 0);
   if (motorways) {
+    // Not off a motorway's terminus roundabout the way the motorway comes in.
+    for (const [p, q] of [
+      [a, b],
+      [b, a],
+    ]) {
+      const back = motorways.terminusAt(p.x, p.y);
+      if (back && ((q.x - p.x) * back[0] + (q.y - p.y) * back[1]) / len > Math.cos(MW_END_SECTOR)) return Infinity;
+    }
     const m = motorways.crossing(a.x, a.y, b.x, b.y);
     // (A crossing edge passes close by the motorway's segments either side of the crossing.)
     if (m.n ? m.angle < MW_ANGLE : m.dist < MW_EDGE) return Infinity;
@@ -563,7 +573,7 @@ export function latticeCell(
   mw?: Motorways,
 ): Omit<NetCell, 'motorways'> {
   if (DEBUG_PATHS) DEBUG_TERRAIN = terrain;
-  motorways = mw && new MotorwayLookup(mw);
+  motorways = mw && new MotorwayLookup(mw, (x, y, tx, ty) => vertexPos(motorwayTerminus(x, y, tx, ty)));
   field.checkSeeds();
   const debugSeen = new Set<string>();
   const x0 = gx * NET_CELL;

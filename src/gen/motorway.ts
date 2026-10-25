@@ -986,7 +986,48 @@ export class MotorwayLookup {
   /** Per bin: references to the segments near it, line index × 65536 + segment. */
   private readonly bins = new Map<number, number[]>();
 
-  constructor(private readonly mw: Motorways) {}
+  /**
+   * `terminus`: where a motorway ending at (x, y), heading (tx, ty) out of it, runs on
+   * to (its roundabout's vertex, lattice.ts): the run-on counts as motorway too, as far as
+   * MW_END_CLEAR short of it, so no way runs beside it or crosses it unbridged while the
+   * roundabout's roads may meet there.
+   */
+  constructor(
+    private readonly mw: Motorways,
+    private readonly terminus?: (x: number, y: number, tx: number, ty: number) => [number, number],
+  ) {}
+
+  /** Termini by position (`x,y`), and the way the motorway comes in from there (unit, towards its end). */
+  private readonly termini = new Map<string, [number, number]>();
+
+  /**
+   * If (x, y) is a terminus, the way back to its motorway (unit): no way leaves the
+   * roundabout that way, where the motorway's lanes come in. (Its bin is gathered first,
+   * which finds every terminus there.)
+   */
+  terminusAt(x: number, y: number): [number, number] | undefined {
+    this.bin(Math.floor(x / BIN), Math.floor(y / BIN));
+    return this.termini.get(`${x},${y}`);
+  }
+
+  /** A piece's run-ons where it ends: from its end towards the terminus, stopping MW_END_CLEAR short. */
+  private runOns(p: MotorwayPiece): [string, Float64Array][] {
+    const out: [string, Float64Array][] = [];
+    if (!this.terminus) return out;
+    for (const [end, an, s] of [
+      [p.endA, p.a, -1],
+      [p.endB, p.b, 1],
+    ] as const) {
+      if (!end) continue;
+      const [vx, vy] = this.terminus(an.x, an.y, s * an.tx, s * an.ty);
+      const L = Math.hypot(vx - an.x, vy - an.y);
+      if (L > 0) this.termini.set(`${vx},${vy}`, [(an.x - vx) / L, (an.y - vy) / L]);
+      if (L <= MW_END_CLEAR) continue;
+      const f = (L - MW_END_CLEAR) / L;
+      out.push([`${p.key}:${s}`, Float64Array.from([an.x, an.y, an.x + (vx - an.x) * f, an.y + (vy - an.y) * f])]);
+    }
+    return out;
+  }
 
   private bin(bi: number, bj: number): number[] {
     const key = (bi + 1048576) * 2097152 + (bj + 1048576);
@@ -999,18 +1040,18 @@ export class MotorwayLookup {
     const y1 = (bj + 1) * BIN + BIN_REACH;
     for (let cj = Math.floor((y0 - MW_SPILL) / MW_CELL); cj <= Math.floor((y1 + MW_SPILL) / MW_CELL); cj++)
       for (let ci = Math.floor((x0 - MW_SPILL) / MW_CELL); ci <= Math.floor((x1 + MW_SPILL) / MW_CELL); ci++)
-        for (const p of this.mw.cellPieces(ci, cj)) {
-          let li = this.lineOf.get(p.key);
-          if (li === undefined) {
-            li = this.lines.length;
-            this.lines.push(p.xy);
-            this.lineOf.set(p.key, li);
+        for (const p of this.mw.cellPieces(ci, cj))
+          for (const [key, xy] of [[p.key, p.xy] as [string, Float64Array], ...this.runOns(p)]) {
+            let li = this.lineOf.get(key);
+            if (li === undefined) {
+              li = this.lines.length;
+              this.lines.push(xy);
+              this.lineOf.set(key, li);
+            }
+            for (let k = 0; k + 3 < xy.length; k += 2)
+              if (Math.max(xy[k], xy[k + 2]) >= x0 && Math.min(xy[k], xy[k + 2]) <= x1 && Math.max(xy[k + 1], xy[k + 3]) >= y0 && Math.min(xy[k + 1], xy[k + 3]) <= y1)
+                hit.push(li * 65536 + k / 2);
           }
-          const xy = p.xy;
-          for (let k = 0; k + 3 < xy.length; k += 2)
-            if (Math.max(xy[k], xy[k + 2]) >= x0 && Math.min(xy[k], xy[k + 2]) <= x1 && Math.max(xy[k + 1], xy[k + 3]) >= y0 && Math.min(xy[k + 1], xy[k + 3]) <= y1)
-              hit.push(li * 65536 + k / 2);
-        }
     this.bins.set(key, hit);
     return hit;
   }
@@ -1243,6 +1284,8 @@ export function diamondRamps(road: ArrayLike<number>, lines: ArrayLike<number>[]
 
 /** How far beyond its end a motorway looks for its terminus (m): MW_END_RUN (lattice.ts) and a vertex's jitter. */
 export const MW_END_REACH = 300;
+/** The network sees a run-on as motorway as far as this short of its terminus (m): its ring and lanes, the vertex clear (MW_VERTEX). */
+const MW_END_CLEAR = 75;
 
 /**
  * Where a motorway runs into a roundabout, its carriageways part this far (m) before the
@@ -1289,28 +1332,27 @@ export function motorwayEnd(
       const d = Math.hypot(x - ex, y - ey);
       return d > 1 && d < MW_END_REACH && ((x - ex) * ux + (y - ey) * uy) / d > 0.6;
     };
+    // The nearest ring ahead; else the nearest main road's end, unless a ring lies within
+    // 40 m beyond it (a ring wins over a road end beside it, whichever is seen first).
     let ring: [number, number, number] | undefined;
     let end: [number, number] | undefined;
-    let bd = Infinity;
+    let dr = Infinity;
+    let de = Infinity;
     for (const r of roads) {
       if (r.ramp) continue;
       if (r.ring) {
         const [cx, cy, rad] = ringDisc(r.xy);
         const d = Math.hypot(cx - ex, cy - ey);
-        if (!ahead(cx, cy) || d >= bd) continue;
-        bd = d;
-        ring = [cx, cy, rad];
-        end = undefined;
+        if (ahead(cx, cy) && d < dr) [dr, ring] = [d, [cx, cy, rad]];
       } else if (r.cls <= 1)
         for (const k of [0, r.xy.length - 2]) {
           const [x, y] = [r.xy[k], r.xy[k + 1]];
           const d = Math.hypot(x - ex, y - ey);
-          if (!ahead(x, y) || d >= bd - 40) continue; // a ring wins over a road end nearby
-          bd = d;
-          end = [x, y];
-          ring = undefined;
+          if (ahead(x, y) && d < de) [de, end] = [d, [x, y]];
         }
     }
+    if (ring && dr < de + 40) end = undefined;
+    else ring = undefined;
     if (end) {
       const [tx, ty] = end;
       const D = Math.hypot(tx - ex, ty - ey);
