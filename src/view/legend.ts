@@ -5,7 +5,8 @@ import { MIN_PX, STREET_M, STREET_PX, WIDTH_M } from '../render/roads';
 import { drawPois } from '../render/symbols';
 import { STYLE } from '../render/style';
 import { MARGIN, type Gap } from './frame';
-import { TEXT, type Lang, type TextKey } from './legendText';
+import type { Lang } from './lang';
+import { TEXT, type TextKey } from './legendText';
 
 type Ctx = OffscreenCanvasRenderingContext2D;
 

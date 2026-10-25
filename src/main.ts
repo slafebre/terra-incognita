@@ -8,7 +8,8 @@ import { WorkerPool } from './worker/pool';
 import { parseSnapshot, type Snapshot } from './snapshot';
 import { InfoPanel } from './view/info';
 import { Legend } from './view/legend';
-import { pickLang } from './view/legendText';
+import { pickLang } from './view/lang';
+import { Welcome } from './view/welcome';
 import './style.css';
 
 const canvas = document.getElementById('map') as HTMLCanvasElement;
@@ -66,9 +67,12 @@ const info = new InfoPanel({
   snap: snap && snapPath ? { path: snapPath, commit: snap.commit } : undefined,
 });
 if (params.has('info')) info.toggle(true);
-// `?lang=nl` (en, nl, fr, de) overrides the browser's language for the legend.
-const legend = new Legend(pickLang(params.get('lang'), navigator.languages ?? [navigator.language]));
+// `?lang=nl` (en, nl, fr, de) overrides the browser's language for the legend and welcome sheet.
+const lang = pickLang(params.get('lang'), navigator.languages ?? [navigator.language]);
+const legend = new Legend(lang);
 if (params.has('legend')) legend.toggle(true);
+const welcome = new Welcome(lang);
+if (params.has('welcome') || Welcome.firstVisit()) welcome.show();
 const input = new Input(canvas, vp, actual, desired);
 
 function resize(): void {

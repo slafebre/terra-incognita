@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { pickLang } from '../src/view/legendText';
+import { pickLang } from '../src/view/lang';
 
 describe('legend language', () => {
   it('follows the first supported browser language', () => {

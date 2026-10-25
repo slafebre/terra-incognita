@@ -37,6 +37,7 @@ Then open http://localhost:5173.
 - **Pan:** drag, or use the arrow keys or WASD.
 - **Zoom (0.5×–2×):** pinch, ctrl/⌘ + scroll wheel, trackpad pinch, or `+` and `-`.
 - **Legend:** press `l`, or click the Legend tab in the right margin. It follows your browser's language (English, Dutch, French or German).
+- **Welcome sheet:** shown on your first visit; press `?` or click the `?` in the bottom-left corner to see it again.
 
 ### URL parameters
 
@@ -49,7 +50,8 @@ Add these to the address to choose what you see:
 | `?at=x,y` | Starts at a position, in world metres. |
 | `?z=2` | Starts at a zoom level between `0.5` and `2`. |
 | `?legend` | Opens with the legend out. |
-| `?lang=fr` | Sets the legend language (`en`, `nl`, `fr` or `de`). |
+| `?welcome` | Opens with the welcome sheet, even if you've seen it. |
+| `?lang=fr` | Sets the language of the legend and welcome sheet (`en`, `nl`, `fr` or `de`). |
 
 Without `?at` you start somewhere random. Visit [the village above](https://terraincognitamap.com/?seed=7&R=0.1&at=735390,766960&z=2) or [the alpine valley](https://terraincognitamap.com/?seed=7&R=0.95&at=979600,-223880).
 

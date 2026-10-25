@@ -194,3 +194,144 @@ body {
 #legend-tab[aria-expanded='true'] {
   color: #2d2826;
 }
+
+/* Welcome sheet (src/view/welcome.ts): a sheet of the map's paper with its neatline. */
+#welcome {
+  box-sizing: border-box;
+  width: min(540px, calc(100vw - 2 * var(--margin)));
+  max-height: calc(100dvh - 2 * var(--margin));
+  padding: 9px;
+  border: 0;
+  background: #fcfaf3;
+  color: #4a3d2e;
+  font: 14px/1.5 ui-sans-serif, system-ui, sans-serif;
+  box-shadow: 0 2px 22px rgba(40, 34, 30, 0.3);
+}
+#welcome::backdrop {
+  background: rgba(40, 34, 30, 0.22);
+}
+#welcome .sheet {
+  padding: 18px 24px 18px;
+  border: 1px solid rgb(40, 34, 30);
+}
+#welcome header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+  margin-bottom: 14px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid rgba(107, 90, 68, 0.3);
+}
+#welcome h1 {
+  margin: 0;
+  font-size: 26px;
+  font-weight: 700;
+  line-height: 1.15;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: rgb(40, 34, 30);
+}
+#welcome .sub {
+  margin: 4px 0 0;
+  color: #8a7a64;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+#welcome .scale {
+  margin-top: 2px;
+  color: rgb(30, 100, 200);
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+#welcome p {
+  margin: 0 0 10px;
+}
+#welcome h3 {
+  margin: 16px 0 6px;
+  color: #8a7a64;
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+#welcome dl {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 5px 16px;
+  margin: 0;
+  font-size: 13px;
+}
+#welcome dt {
+  font-weight: 600;
+}
+#welcome dd {
+  margin: 0;
+}
+#welcome kbd {
+  display: inline-block;
+  min-width: 1.1em;
+  padding: 0 4px;
+  border: 1px solid rgba(107, 90, 68, 0.4);
+  border-bottom-width: 2px;
+  border-radius: 3px;
+  background: #fff;
+  font: 600 11px/1.45 ui-sans-serif, system-ui, sans-serif;
+  text-align: center;
+}
+#welcome .keys {
+  white-space: nowrap;
+}
+#welcome footer {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 18px;
+}
+#welcome footer button {
+  padding: 7px 16px;
+  border: 1px solid rgb(40, 34, 30);
+  border-radius: 0;
+  background: none;
+  color: rgb(40, 34, 30);
+  font: 600 11.5px/1 ui-sans-serif, system-ui, sans-serif;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+#welcome footer button:hover,
+#welcome footer button:focus-visible {
+  background: rgb(40, 34, 30);
+  color: #fcfaf3;
+  outline: none;
+}
+@media (max-width: 480px) {
+  #welcome .sheet {
+    padding: 14px 16px;
+  }
+  #welcome dl {
+    grid-template-columns: 1fr;
+    gap: 0;
+  }
+  #welcome dd {
+    margin-bottom: 6px;
+  }
+}
+#welcome-corner {
+  position: fixed;
+  left: 0;
+  bottom: 0;
+  width: var(--margin);
+  height: var(--margin);
+  padding: 0;
+  border: 0;
+  background: none;
+  color: #6b5a44;
+  font: 600 11px/1 ui-sans-serif, system-ui, sans-serif;
+  cursor: pointer;
+}
+#welcome-corner:hover {
+  color: #2d2826;
+}

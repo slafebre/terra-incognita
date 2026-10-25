@@ -1,6 +1,4 @@
-/** Languages the legend is written in. */
-export const LANGS = ['en', 'nl', 'fr', 'de'] as const;
-export type Lang = (typeof LANGS)[number];
+import type { Lang } from './lang';
 
 const en = {
   title: 'Legend',
@@ -213,12 +211,3 @@ export const TEXT: Record<Lang, Record<TextKey, string>> = {
     grid: 'Kilometergitter',
   },
 };
-
-/** `?lang=xx` if it's one of ours, else the first of the browser's languages that is, else English. */
-export function pickLang(param: string | null, prefs: readonly string[]): Lang {
-  for (const tag of [param ?? '', ...prefs]) {
-    const l = tag.toLowerCase().split(/[-_]/)[0];
-    if ((LANGS as readonly string[]).includes(l)) return l as Lang;
-  }
-  return 'en';
-}
