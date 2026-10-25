@@ -2,7 +2,7 @@ import { APRON, CELL, CHUNK, DEM_W } from '../lib/constants';
 import { COVER, COVER_SCALE } from '../gen/landcover';
 import { smoothPolyline } from '../lib/polyline';
 import { lineDistance, MW_RAMP_WIDTH, MW_VERGE, MW_WIDTH } from '../gen/motorway';
-import { ROAD_C, ROAD_D, ROAD_N, ROAD_P, ROAD_T, type SegmentPath } from '../gen/roads';
+import { ringDisc, ROAD_C, ROAD_D, ROAD_N, ROAD_P, ROAD_T, type SegmentPath } from '../gen/roads';
 import { VILLAGE } from '../gen/settle';
 import { LANE, type Street, type TownPlan } from '../gen/town';
 import { STYLE } from './style';
@@ -328,6 +328,10 @@ function overpasses(roads: SegmentPath[], lines: Float64Array[], cx: number, cy:
   const over = [new Path2D(), new Path2D(), new Path2D(), new Path2D(), new Path2D()];
   const reach = MW_WIDTH / 2 + OVERPASS_MARGIN;
   const near = lineDistance(lines, reach + 1);
+  // Roundabouts a motorway runs into (where it ends): the roads leaving them don't pass over it.
+  const toRing = lineDistance(lines, 64);
+  const termini = roads.filter((r) => r.ring).map((r) => ringDisc(r.xy)).filter(([x, y, r]) => toRing(x, y) < r + 5);
+  const atTerminus = (x: number, y: number) => termini.some(([tx, ty, r]) => Math.hypot(x - tx, y - ty) < r + reach + 8);
   const ox = cx * CHUNK;
   const oy = cy * CHUNK;
   for (const seg of roads) {
@@ -336,7 +340,7 @@ function overpasses(roads: SegmentPath[], lines: Float64Array[], cx: number, cy:
     const hit: boolean[] = [];
     let any = false;
     for (let i = 0; i < n; i++) {
-      const h = near(seg.xy[2 * i], seg.xy[2 * i + 1]) < reach;
+      const h = near(seg.xy[2 * i], seg.xy[2 * i + 1]) < reach && !atTerminus(seg.xy[2 * i], seg.xy[2 * i + 1]);
       hit.push(h);
       any ||= h;
     }

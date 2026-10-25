@@ -14,10 +14,10 @@ import {
   type PreResult,
 } from '../gen/hydro';
 import { latticeSegments } from '../gen/lattice';
-import { MW_SPILL, type MotorwayPiece } from '../gen/motorway';
+import { motorwayEnd, MW_END_REACH, MW_SPILL, type MotorwayPiece } from '../gen/motorway';
 import { FIELD_PAD, FIELD_REACH } from '../gen/fields';
 import { POI_PAD, type PoiPatch } from '../gen/poi';
-import { NET_CELL, NET_REACH, ROAD_PAD, type NetCell, type RoadEdge, type RoadPatch, type SegmentPath } from '../gen/roads';
+import { NET_CELL, NET_REACH, ROAD_C, ROAD_PAD, type NetCell, type RoadEdge, type RoadPatch, type SegmentPath } from '../gen/roads';
 import { expand, intersects, SeedStore, type Rect } from '../gen/seeds';
 import { TOWN, type Site } from '../gen/settle';
 import { PLAN_DRAW_PAD, PLAN_EXTENT, PLAN_MARGIN, type PlanInput, type TownPlan } from '../gen/town';
@@ -352,6 +352,35 @@ export class ChunkManager {
     return true;
   }
 
+  /**
+   * Centre lines of the motorways a chunk draws: those passing within MOTORWAY_DRAW, a
+   * piece where the motorway ends run on to its terminus (motorwayEnd) among `roads`
+   * (the chunk's and its neighbours', which hold every terminus near enough to matter).
+   */
+  private motorwaysToDraw(c: Chunk, roads: SegmentPath[]): Float64Array[] {
+    const r = chunkRect(c.cx, c.cy);
+    const q = expand(r, MOTORWAY_DRAW);
+    const out: Float64Array[] = [];
+    const lanes: SegmentPath[] = [];
+    for (const [gx, gy] of this.netCells(expand(r, MW_SPILL + MW_END_REACH)))
+      for (const p of this.nets.get(`${gx},${gy}`)?.data?.motorways ?? []) {
+        if (!p.endA && !p.endB) {
+          if (intersects(pieceBox(p), q)) out.push(p.xy);
+          continue;
+        }
+        const end = motorwayEnd(p, roads);
+        const near = (xy: ArrayLike<number>) => {
+          for (let k = 0; k < xy.length; k += 2) if (xy[k] >= q.x0 && xy[k] <= q.x1 && xy[k + 1] >= q.y0 && xy[k + 1] <= q.y1) return true;
+          return false;
+        };
+        if (near(end.xy)) out.push(end.xy);
+        // Its lanes into the roundabout: drawn as ramps, with the roads.
+        end.lanes.forEach((xy, i) => near(xy) && lanes.push({ key: `mwlane:${p.key}:${i}`, cls: ROAD_C, xy: Float32Array.from(xy), ramp: true }));
+      }
+    roads.push(...lanes);
+    return out;
+  }
+
   /** Centre lines of the motorway pieces passing within `m` of `r`. */
   private motorwaysNear(r: Rect, m: number): Float64Array[] {
     const out: Float64Array[] = [];
@@ -581,6 +610,8 @@ export class ChunkManager {
         const roads: SegmentPath[] = [];
         this.ring(c, (n) => (roads.push(...n!.roads!), true));
         const poi = this.poiPatch(c);
+        // (Adds the lanes where a motorway runs into a roundabout to the roads.)
+        const motorways = this.motorwaysToDraw(c, roads);
         task = {
           kind,
           cx: c.cx,
@@ -590,7 +621,7 @@ export class ChunkManager {
           cover,
           streams,
           roads,
-          motorways: this.motorwaysNear(chunkRect(c.cx, c.cy), MOTORWAY_DRAW),
+          motorways,
           plans: this.plansFor(c)!,
           poi,
           edges: this.fieldEdges(c),

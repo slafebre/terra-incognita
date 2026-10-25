@@ -485,6 +485,27 @@ const IC_GAP = 5000;
 const IC_TOWN = 4000;
 const IC_D_SHARE = 0.35;
 const IC_SEED = 0x1c7a3e;
+/**
+ * Motorway ends: the motorway runs on to a roundabout (radius MW_END_RING) at the vertex
+ * nearest MW_END_RUN m beyond its end, the terminus; from there a main road leads to the
+ * nearest town within MW_END_TOWN (N), else village within MW_END_VILLAGE (D).
+ */
+const MW_END_RUN = 150;
+/**
+ * Its radius (the half metre marks a terminus's ring in `rings`), and how level the
+ * ground must be and the most a stream under it may drain (as RING_LEVEL, RING_STREAM):
+ * looser, as it is built up on earthworks, a brook in a culvert (with the others, none of
+ * the termini tried had its roundabout).
+ */
+const MW_END_RING = 24.5;
+const MW_END_RING_LEVEL = 0.15;
+const MW_END_RING_STREAM = 20;
+const MW_END_TOWN = 12000;
+const MW_END_VILLAGE = 8000;
+/** The terminus of a motorway ending at (x, y), heading (tx, ty) out of it. */
+export function motorwayTerminus(x: number, y: number, tx: number, ty: number): number {
+  return nearestVertex(x + tx * MW_END_RUN, y + ty * MW_END_RUN);
+}
 /** Is vertex v within MW_VERTEX of a motorway? */
 function nearMotorway(field: CoarseField, v: number): boolean {
   if (!motorways) return false;
@@ -725,6 +746,28 @@ export function latticeCell(
       if (a.id >= b.id || (a.rank === TOWN && b.rank === TOWN)) continue;
       if (dist(a, b) <= MAX_LEN[ROAD_D] && relevant(a, b) && rngEdge(a, b, tv)) mainPath(ROAD_D, a, b);
     }
+
+  // Motorway ends: each runs on to a roundabout at its terminus (motorwayTerminus), and
+  // from there a main road to the nearest town (N), else village (D). Ends are found
+  // from the line alone, as far out as main roads are decided, so every cell agrees.
+  const termini = new Set<number>();
+  if (mw) {
+    const R = mainM + corridorR;
+    for (const e of mw.endsIn(x0 - R, y0 - R, x1 + R, y1 + R)) {
+      const v = motorwayTerminus(e.x, e.y, e.tx, e.ty);
+      termini.add(v);
+      const p = pos(v);
+      const end: Site = { id: `mwend:${v}`, rank: TOWN, x: p.x, y: p.y, z: p.z, R: 0 };
+      const nearest = (rank: 0 | 1, r: number) =>
+        set
+          .sitesIn(rank, p.x - r, p.y - r, p.x + r, p.y + r)
+          .filter((t) => dist(t, p) < r)
+          .sort((a, b) => dist(a, p) - dist(b, p) || (a.id < b.id ? -1 : 1))[0];
+      const town = nearest(TOWN, MW_END_TOWN);
+      const to = town ?? nearest(VILLAGE, MW_END_VILLAGE);
+      if (to && relevant(end, to)) mainPath(town ? ROAD_N : ROAD_D, end, to);
+    }
+  }
 
   // Interchanges: diamonds where main roads cross a motorway. Every N road crossing (near
   // square on) is a candidate, a D road crossing within IC_TOWN of a town or now and then (IC_D_SHARE);
@@ -1064,6 +1107,7 @@ export function latticeCell(
     return d;
   };
   const ringChance = (v: number) => {
+    if (neighbours(v).some((w) => termini.has(w))) return 0;
     const at = roadsAt(v);
     const main = at.filter((c) => c <= ROAD_D).length;
     if (at.length < 3 || main < 2 || siteVerts.has(v) || nearMotorway(field, v)) return 0;
@@ -1082,6 +1126,11 @@ export function latticeCell(
   };
   /** The roundabout at vertex v, [x, y, radius, class], if any. */
   const ringAt = (v: number): number[] => {
+    // At a motorway's terminus, always (where the drawing finds the ground for it).
+    if (termini.has(v) && roadsAt(v).length) {
+      const p = pos(v);
+      return [p.x, p.y, MW_END_RING, ROAD_N];
+    }
     if (!ringPasses(v) || neighbours(v).some((w) => ringPasses(w) && ringHash(w) < ringHash(v))) return [];
     const p = pos(v);
     const at = roadsAt(v);
@@ -1639,20 +1688,22 @@ export function routeCurves(tasks: SegmentTask[], p: RoadPatch, motorways: Array
     let lo = Infinity;
     let hi = -Infinity;
     let ok = true;
+    const stream = r === MW_END_RING ? MW_END_RING_STREAM : RING_STREAM;
     for (const f of [0, 0.5, 1, (r + RING_EDGE) / r])
       for (let q = 0; q < RING_SAMPLES && ok; q++) {
         const qx = sx + f * r * Math.cos((2 * Math.PI * q) / RING_SAMPLES);
         const qy = sy + f * r * Math.sin((2 * Math.PI * q) / RING_SAMPLES);
         const i = Math.round(qx / NODE) - p.gx;
         const j = Math.round(qy / NODE) - p.gy;
-        if (i < 0 || j < 0 || i >= w || j >= h || isLake(j * w + i) || p.A[j * w + i] > RING_STREAM) ok = false;
+        if (i < 0 || j < 0 || i >= w || j >= h || isLake(j * w + i) || p.A[j * w + i] > stream) ok = false;
         else {
           const z = zAt(qx, qy);
           lo = Math.min(lo, z);
           hi = Math.max(hi, z);
         }
       }
-    c = ok && hi - lo <= RING_LEVEL * 2 * (r + RING_EDGE) ? [sx, sy] : null;
+    const level = r === MW_END_RING ? MW_END_RING_LEVEL : RING_LEVEL;
+    c = ok && hi - lo <= level * 2 * (r + RING_EDGE) ? [sx, sy] : null;
     ringMemo.set(key, c);
     if (c) ringEnds.set(`${Math.round(sx)},${Math.round(sy)}`, [sx, sy, r]);
     return c;

@@ -2,7 +2,7 @@ import { gnoise, ND, smoothstep } from '../lib/noise';
 import { hash3 } from '../lib/hash';
 import { coarseEpochNow, type CoarseField } from './hydro';
 import { lakesOf } from './lakes';
-import { NET_CELL } from './roads';
+import { NET_CELL, ringDisc } from './roads';
 import type { Lattice, SeedView } from './seeds';
 import { HAMLET, type Rank, type Settlements, type Site, TOWN, VILLAGE } from './settle';
 import type { Terrain } from './terrain';
@@ -247,6 +247,26 @@ export class Motorways {
       R += this.terrain.region(x + GATE_R_SPAN * Math.cos(a), y + GATE_R_SPAN * Math.sin(a));
     }
     return R / 9;
+  }
+
+  /**
+   * Where motorways end in the cells overlapping a rectangle: the end anchors as placed,
+   * their heading pointing on out of the motorway. From the line alone (no routing), so
+   * cheap enough to look far: every cell building main roads near one finds it alike.
+   */
+  endsIn(x0: number, y0: number, x1: number, y1: number): MotorwayAnchor[] {
+    const out: MotorwayAnchor[] = [];
+    for (let cj = Math.floor(y0 / MW_CELL); cj <= Math.floor(y1 / MW_CELL); cj++)
+      for (let ci = Math.floor(x0 / MW_CELL); ci <= Math.floor(x1 / MW_CELL); ci++)
+        for (const p of this.rawPieces(ci, cj)) {
+          if (!this.keeps(p)) continue;
+          if (!this.continues(p.a, ci, cj)) {
+            const a = this.placed(p.a);
+            out.push({ ...a, tx: -a.tx, ty: -a.ty });
+          }
+          if (!this.continues(p.b, ci, cj)) out.push(this.placed(p.b));
+        }
+    return out;
   }
 
   /** The pieces a net cell carries: those of the motorway cells inside it (without their raw lines). */
@@ -1173,4 +1193,120 @@ export function diamondRamps(road: ArrayLike<number>, lines: ArrayLike<number>[]
     }
   }
   return out;
+}
+
+/** How far beyond its end a motorway looks for its terminus (m): MW_END_RUN (lattice.ts) and a vertex's jitter. */
+export const MW_END_REACH = 300;
+
+/** Where a motorway runs into a roundabout, its carriageways part this far (m) before the ring, into lanes meeting it MW_END_SPREAD (rad) either side. */
+const MW_END_SPLIT = 50;
+const MW_END_SPREAD = (40 * Math.PI) / 180;
+
+/**
+ * A piece's centre line, run on where the motorway ends (endA, endB) to its terminus as
+ * drawn: towards the roundabout ahead, parting MW_END_SPLIT m before its ring into two
+ * lanes (an island between, as ramps: `lanes`); else to the main road starting there
+ * (its end). Cubic curves, leaving along the motorway.
+ */
+export function motorwayEnd(
+  p: MotorwayPiece,
+  roads: { xy: ArrayLike<number>; ring?: boolean; ramp?: boolean; cls: number }[],
+): { xy: Float64Array; lanes: number[][] } {
+  const xy = p.xy;
+  const n = xy.length;
+  const lanes: number[][] = [];
+  const cubic = (x0: number, y0: number, x1: number, y1: number, x2: number, y2: number, x3: number, y3: number, step: number) => {
+    const L = Math.hypot(x3 - x0, y3 - y0);
+    const m = Math.max(2, Math.ceil(L / step));
+    const out: number[] = [];
+    for (let q = 1; q <= m; q++) {
+      const u = q / m;
+      const a = (1 - u) ** 3;
+      const b = 3 * u * (1 - u) ** 2;
+      const c = 3 * u * u * (1 - u);
+      const d = u ** 3;
+      out.push(a * x0 + b * x1 + c * x2 + d * x3, a * y0 + b * y1 + c * y2 + d * y3);
+    }
+    return out;
+  };
+  const runOn = (ex: number, ey: number, ux: number, uy: number): number[] | undefined => {
+    const L = Math.hypot(ux, uy) || 1;
+    ux /= L;
+    uy /= L;
+    const ahead = (x: number, y: number) => {
+      const d = Math.hypot(x - ex, y - ey);
+      return d > 1 && d < MW_END_REACH && ((x - ex) * ux + (y - ey) * uy) / d > 0.6;
+    };
+    let ring: [number, number, number] | undefined;
+    let end: [number, number] | undefined;
+    let bd = Infinity;
+    for (const r of roads) {
+      if (r.ramp) continue;
+      if (r.ring) {
+        const [cx, cy, rad] = ringDisc(r.xy);
+        const d = Math.hypot(cx - ex, cy - ey);
+        if (!ahead(cx, cy) || d >= bd) continue;
+        bd = d;
+        ring = [cx, cy, rad];
+        end = undefined;
+      } else if (r.cls <= 1)
+        for (const k of [0, r.xy.length - 2]) {
+          const [x, y] = [r.xy[k], r.xy[k + 1]];
+          const d = Math.hypot(x - ex, y - ey);
+          if (!ahead(x, y) || d >= bd - 40) continue; // a ring wins over a road end nearby
+          bd = d;
+          end = [x, y];
+          ring = undefined;
+        }
+    }
+    if (end) {
+      const [tx, ty] = end;
+      const D = Math.hypot(tx - ex, ty - ey);
+      const ax = (tx - ex) / D;
+      const ay = (ty - ey) / D;
+      return cubic(ex, ey, ex + (ux * D) / 3, ey + (uy * D) / 3, tx - (ax * D) / 3, ty - (ay * D) / 3, tx, ty, OUT_STEP);
+    }
+    if (!ring) return undefined;
+    // On towards the ring's centre, to MW_END_SPLIT short of the ring…
+    const [cx, cy, rad] = ring;
+    const d0 = Math.hypot(cx - ex, cy - ey);
+    const ax = (cx - ex) / d0;
+    const ay = (cy - ey) / d0;
+    const back = Math.min(rad + MW_END_SPLIT, d0 - 1);
+    const sx = cx - ax * back;
+    const sy = cy - ay * back;
+    const D = Math.hypot(sx - ex, sy - ey);
+    const line = D > 1 ? cubic(ex, ey, ex + (ux * D) / 3, ey + (uy * D) / 3, sx - (ax * D) / 3, sy - (ay * D) / 3, sx, sy, OUT_STEP) : [];
+    // …then two lanes, from the carriageway's edges, into the ring either side of the way in.
+    const off = (MW_WIDTH - MW_RAMP_WIDTH) / 2;
+    for (const side of [-1, 1]) {
+      const lx = sx - side * ay * off;
+      const ly = sy + side * ax * off;
+      // Where it meets the ring, on its own side of the way in (turning (−ax, −ay) by +θ
+      // goes to the right of the heading, the lane's offset side·(−ay, ax) to its left).
+      const ang = Math.atan2(-ay, -ax) - side * MW_END_SPREAD;
+      const rx = cx + rad * Math.cos(ang);
+      const ry = cy + rad * Math.sin(ang);
+      const hx = cx - rx;
+      const hy = cy - ry;
+      const hl = Math.hypot(hx, hy) || 1;
+      const Ls = Math.hypot(rx - lx, ry - ly);
+      lanes.push([lx, ly, ...cubic(lx, ly, lx + (ax * Ls) / 3, ly + (ay * Ls) / 3, rx - ((hx / hl) * Ls) / 3, ry - ((hy / hl) * Ls) / 3, rx, ry, IC_STEP / 2)]);
+    }
+    return line;
+  };
+  let line = Array.from(xy);
+  if (p.endA) {
+    const r = runOn(xy[0], xy[1], xy[0] - xy[2], xy[1] - xy[3]);
+    if (r) {
+      const rev: number[] = [];
+      for (let q = r.length - 2; q >= 0; q -= 2) rev.push(r[q], r[q + 1]);
+      line = [...rev, ...line];
+    }
+  }
+  if (p.endB) {
+    const r = runOn(xy[n - 2], xy[n - 1], xy[n - 2] - xy[n - 4], xy[n - 1] - xy[n - 3]);
+    if (r) line = [...line, ...r];
+  }
+  return { xy: Float64Array.from(line), lanes };
 }

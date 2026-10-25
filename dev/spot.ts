@@ -10,6 +10,7 @@ import { APRON, CELL, CHUNK, DEM_W } from '../src/lib/constants';
 import { marchingSquares } from '../src/lib/contours';
 import { setRegionOverride } from '../src/gen/terrain';
 import type { SegmentPath } from '../src/gen/roads';
+import { motorwayEnd, type MotorwayPiece } from '../src/gen/motorway';
 import type { TaskRequest, TaskResult } from '../src/worker/protocol';
 import { runTask } from '../src/worker/tasks';
 import { applySnap, snap } from './snap';
@@ -94,13 +95,22 @@ if (process.env.SVG) {
     }
   }
   // Motorways (experimental): their true width, the central reservation as a thin line.
-  const nets = (m as unknown as { nets: Map<string, { data?: { motorways?: { xy: ArrayLike<number> }[] } }> }).nets;
+  // (Run on into their roundabouts where they end, with the lanes there, as the chunks draw them.)
+  const nets = (m as unknown as { nets: Map<string, { data?: { motorways?: MotorwayPiece[] } }> }).nets;
+  const lanes: string[] = [];
   for (const n of nets.values())
     for (const p of n.data?.motorways ?? []) {
+      const end = p.endA || p.endB ? motorwayEnd(p, [...byKey.values()]) : { xy: p.xy, lanes: [] };
       let d = '';
-      for (let i = 0; i < p.xy.length; i += 2) d += `${i ? 'L' : 'M'}${f(p.xy[i])} ${f(p.xy[i + 1])}`;
+      for (let i = 0; i < end.xy.length; i += 2) d += `${i ? 'L' : 'M'}${f(end.xy[i])} ${f(end.xy[i + 1])}`;
       svg += `<path d="${d}" stroke="#d62c54" stroke-opacity="0.75" stroke-width="24" fill="none"/><path d="${d}" stroke="#463a34" stroke-width="0.7" fill="none"/>`;
+      for (const l of end.lanes) {
+        let e = '';
+        for (let i = 0; i < l.length; i += 2) e += `${i ? 'L' : 'M'}${f(l[i])} ${f(l[i + 1])}`;
+        lanes.push(`<path d="${e}" stroke="#9c1c40" stroke-width="6" fill="none"/>`);
+      }
     }
+  svg += lanes.join('');
   const STROKE = ['#d2382f', '#e8b72b', '#888', '#222', '#222'];
   const WIDTH = [5, 4, 3, 1.2, 1.2];
   for (const s of [...byKey.values()].sort((a, b) => b.cls - a.cls)) {
