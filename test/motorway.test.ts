@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { CoarseField } from '../src/gen/hydro';
-import { MW_CELL, Motorways, tightestRadius } from '../src/gen/motorway';
+import { MW_CELL, MW_SPILL, Motorways, tightestRadius } from '../src/gen/motorway';
 import { NET_REACH } from '../src/gen/roads';
 import { expand, SeedStore, SeedView } from '../src/gen/seeds';
 import { Settlements } from '../src/gen/settle';
@@ -64,6 +64,23 @@ describe('motorways', () => {
       expect(Math.abs(Math.atan2(Math.sin(hp - hq), Math.cos(hp - hq)))).toBeLessThan(0.05);
     }
     expect(joins).toBeGreaterThan(3);
+  });
+
+  it('stays within MW_SPILL of its own cell (chunks wait for the net cells that near)', () => {
+    let worst = 0;
+    for (const p of all) {
+      // The raw line lies inside the cell: the midpoint of its ends does too.
+      const b = p.base!;
+      const ci = Math.floor((b[0] + b[b.length - 2]) / 2 / MW_CELL);
+      const cj = Math.floor((b[1] + b[b.length - 1]) / 2 / MW_CELL);
+      for (let k = 0; k < p.xy.length; k += 2) {
+        const dx = Math.max(ci * MW_CELL - p.xy[k], 0, p.xy[k] - (ci + 1) * MW_CELL);
+        const dy = Math.max(cj * MW_CELL - p.xy[k + 1], 0, p.xy[k + 1] - (cj + 1) * MW_CELL);
+        worst = Math.max(worst, Math.max(dx, dy));
+      }
+    }
+    console.log(`furthest outside its cell: ${worst.toFixed(0)} m`);
+    expect(worst).toBeLessThan(MW_SPILL);
   });
 
   it('keeps to wide curves', () => {

@@ -14,6 +14,7 @@ import {
   type PreResult,
 } from '../gen/hydro';
 import { latticeSegments } from '../gen/lattice';
+import { MW_SPILL, type MotorwayPiece } from '../gen/motorway';
 import { FIELD_PAD, FIELD_REACH } from '../gen/fields';
 import { POI_PAD, type PoiPatch } from '../gen/poi';
 import { NET_CELL, NET_REACH, ROAD_PAD, type NetCell, type RoadEdge, type RoadPatch, type SegmentPath } from '../gen/roads';
@@ -92,6 +93,25 @@ interface PlanState {
 }
 
 const point = (s: Site): Rect => ({ x0: s.x, y0: s.y, x1: s.x, y1: s.y });
+
+/** Bounding boxes of motorway pieces, computed once each. */
+const pieceBoxes = new WeakMap<MotorwayPiece, Rect>();
+function pieceBox(p: MotorwayPiece): Rect {
+  let b = pieceBoxes.get(p);
+  if (!b) {
+    b = { x0: Infinity, y0: Infinity, x1: -Infinity, y1: -Infinity };
+    for (let k = 0; k < p.xy.length; k += 2) {
+      b.x0 = Math.min(b.x0, p.xy[k]);
+      b.x1 = Math.max(b.x1, p.xy[k]);
+      b.y0 = Math.min(b.y0, p.xy[k + 1]);
+      b.y1 = Math.max(b.y1, p.xy[k + 1]);
+    }
+    pieceBoxes.set(p, b);
+  }
+  return b;
+}
+/** Motorways passing this near a chunk (m) are drawn by it (they are wide). */
+const MOTORWAY_DRAW = 64;
 /** Where a settlement's street plan may draw. */
 const planDrawRect = (s: Site) => expand(point(s), PLAN_EXTENT[s.rank] + PLAN_DRAW_PAD);
 /** Chunks whose roads a plan reads: its extent and margin, plus one lattice edge (edges are owned by their midpoint's chunk). */
@@ -183,7 +203,8 @@ export class ChunkManager {
     this.roadsRect = expand(this.genRect, CHUNK);
     this.hydroRect = expand(this.roadsRect, CHUNK);
     this.preRect = expand(this.hydroRect, WIN_CHUNKS * CHUNK);
-    this.netRect = expand(this.roadsRect, EDGE_REACH);
+    // (Motorway pieces stray further from the net cell carrying them than lattice edges.)
+    this.netRect = expand(this.roadsRect, Math.max(EDGE_REACH, MW_SPILL));
     this.keepBitmapRect = expand(union, 2 * CHUNK);
     this.forgetRect = expand(actual, FORGET);
     this.focus = focus;
@@ -325,6 +346,15 @@ export class ChunkManager {
     return true;
   }
 
+  /** Centre lines of the motorway pieces passing within `m` of `r`. */
+  private motorwaysNear(r: Rect, m: number): Float64Array[] {
+    const out: Float64Array[] = [];
+    const q = expand(r, m);
+    for (const [gx, gy] of this.netCells(expand(r, MW_SPILL)))
+      for (const p of this.nets.get(`${gx},${gy}`)?.data?.motorways ?? []) if (intersects(pieceBox(p), q)) out.push(p.xy);
+    return out;
+  }
+
   private edgesNear(r: Rect): RoadEdge[] {
     const out: RoadEdge[] = [];
     for (const [gx, gy] of this.netCells(expand(r, EDGE_REACH))) out.push(...(this.nets.get(`${gx},${gy}`)?.data?.edges ?? []));
@@ -417,7 +447,7 @@ export class ChunkManager {
   }
 
   private renderReady(c: Chunk): boolean {
-    return this.ring(c, (n) => !!n?.roads) && !!this.plansFor(c);
+    return this.ring(c, (n) => !!n?.roads) && !!this.plansFor(c) && this.netsReady(expand(chunkRect(c.cx, c.cy), MW_SPILL));
   }
 
   /** Best next task (a pre task may batch several chunks). */
@@ -552,6 +582,7 @@ export class ChunkManager {
           cover,
           streams,
           roads,
+          motorways: this.motorwaysNear(chunkRect(c.cx, c.cy), MOTORWAY_DRAW),
           plans: this.plansFor(c)!,
           poi,
           edges: this.fieldEdges(c),

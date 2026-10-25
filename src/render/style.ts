@@ -45,6 +45,11 @@ export const STYLE = {
     casingWidth: 0.65,
     track: 'rgb(70, 58, 52)',
     path: 'rgb(70, 58, 52)',
+    /**
+     * Motorways (experimental): a dual carriageway, cased, its central reservation a dark
+     * line down the middle; true width (m) with a minimum on screen (CSS px).
+     */
+    motorway: { fill: 'rgb(214, 44, 84)', median: 'rgb(70, 58, 52)', medianWidth: 0.7, widthM: 24, minPx: 5 },
     /** Bridges: parapet lines (CSS px) a gap away from the way's edge. */
     bridge: { color: 'rgb(40, 34, 30)', deck: 'rgb(255, 255, 255)', gap: 0.8, line: 0.7 },
   },

@@ -225,3 +225,81 @@ export function drawRoads(
     ctx.setLineDash([]);
   }
 }
+
+/**
+ * Motorways (experimental): each centre line cased, filled, and split down the middle
+ * by its central reservation; drawn over the other roads (where ways cross it is not
+ * decided yet). Over water they are bridges, with parapets as other roads have.
+ */
+export function drawMotorways(ctx: Ctx, lines: Float64Array[], cx: number, cy: number, pxPerM: number, dpr: number, water: Float32Array): void {
+  if (!lines.length) return;
+  const m = STYLE.roads.motorway;
+  const path = new Path2D();
+  const bridges = new Path2D();
+  const ox = cx * CHUNK;
+  const oy = cy * CHUNK;
+  for (const xy of lines) {
+    const n = xy.length / 2;
+    if (n < 2) continue;
+    const xs: number[] = [];
+    const ys: number[] = [];
+    for (let i = 0; i < n; i++) {
+      xs.push((xy[2 * i] - ox) * pxPerM);
+      ys.push((xy[2 * i + 1] - oy) * pxPerM);
+    }
+    path.moveTo(xs[0], ys[0]);
+    for (let i = 1; i < n; i++) path.lineTo(xs[i], ys[i]);
+    // Bridges: runs over water, one point past either shore (as drawRoads).
+    const wet: boolean[] = [];
+    for (let i = 0; i < n; i++) {
+      const gi = APRON + Math.round(xs[i] / pxPerM / CELL);
+      const gj = APRON + Math.round(ys[i] / pxPerM / CELL);
+      const inside = gi >= 0 && gj >= 0 && gi < DEM_W && gj < DEM_W;
+      wet.push(inside ? water[gj * DEM_W + gi] > 0 : i > 0 && wet[i - 1]);
+    }
+    for (let i = 0; i < n; i++) {
+      if (!wet[i]) continue;
+      let e = i;
+      while (e + 1 < n && wet[e + 1]) e++;
+      const s0 = Math.max(0, i - 1);
+      const e0 = Math.min(n - 1, e + 1);
+      bridges.moveTo(xs[s0], ys[s0]);
+      for (let k = s0 + 1; k <= e0; k++) bridges.lineTo(xs[k], ys[k]);
+      i = e;
+    }
+  }
+  const W = Math.max(m.widthM * pxPerM, m.minPx * dpr);
+  const casing = 2 * STYLE.roads.casingWidth * dpr;
+  const carriageway = () => {
+    ctx.strokeStyle = STYLE.roads.casing;
+    ctx.lineWidth = W + casing;
+    ctx.stroke(path);
+    ctx.strokeStyle = m.fill;
+    ctx.lineWidth = W;
+    ctx.stroke(path);
+    ctx.strokeStyle = m.median;
+    ctx.lineWidth = m.medianWidth * dpr;
+    ctx.stroke(path);
+  };
+  ctx.lineCap = 'round';
+  ctx.lineJoin = 'round';
+  carriageway();
+  // Bridges, on top: parapets and the gap between them, then the deck again.
+  const { gap, line } = STYLE.roads.bridge;
+  ctx.lineCap = 'butt';
+  ctx.strokeStyle = STYLE.roads.bridge.color;
+  ctx.lineWidth = W + casing + 2 * (gap + line) * dpr;
+  ctx.stroke(bridges);
+  ctx.strokeStyle = STYLE.roads.bridge.deck;
+  ctx.lineWidth = W + casing + 2 * gap * dpr;
+  ctx.stroke(bridges);
+  ctx.strokeStyle = STYLE.roads.casing;
+  ctx.lineWidth = W + casing;
+  ctx.stroke(bridges);
+  ctx.strokeStyle = m.fill;
+  ctx.lineWidth = W;
+  ctx.stroke(bridges);
+  ctx.strokeStyle = m.median;
+  ctx.lineWidth = m.medianWidth * dpr;
+  ctx.stroke(bridges);
+}

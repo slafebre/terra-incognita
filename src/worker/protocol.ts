@@ -21,6 +21,8 @@ export type TaskRequest =
       water: Float32Array;
       cover: Int8Array;
       roads: SegmentPath[];
+      /** Centre lines of the motorways passing near the chunk (world metres). */
+      motorways: Float64Array[];
       plans: TownPlan[];
       /** Fine nodes round the chunk for its points of interest (none if a solve was missing). */
       poi?: PoiPatch;

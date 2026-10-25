@@ -1,6 +1,7 @@
 import { gnoise, ND, smoothstep } from '../lib/noise';
 import type { CoarseField } from './hydro';
 import { lakesOf } from './lakes';
+import { NET_CELL } from './roads';
 import type { Lattice, SeedView } from './seeds';
 import { HAMLET, type Rank, type Settlements, type Site, TOWN, VILLAGE } from './settle';
 import type { Terrain } from './terrain';
@@ -24,6 +25,12 @@ import type { Terrain } from './terrain';
 
 /** Grid on which the line's anchors are found (m). */
 export const MW_CELL = 4096;
+/**
+ * How far a piece may lie outside its own cell (m): its raw line keeps inside, towns
+ * bend it by up to PUSH and the routing strays up to K × OFF (with a margin for the
+ * curve through the routed points). A chunk is drawn once the pieces this near are known.
+ */
+export const MW_SPILL = 2500;
 /** Line-field sample spacing (m): world-aligned, so neighbouring cells share their border samples. */
 const SAMPLE = 64;
 const NS = MW_CELL / SAMPLE;
@@ -143,8 +150,8 @@ export interface MotorwayPiece {
   b: MotorwayAnchor;
   /** Routed centre line, world metres [x0, y0, …], every OUT_STEP m or so, anchor to anchor. */
   xy: Float64Array;
-  /** The raw line it was routed along (dev). */
-  base: number[];
+  /** The raw line it was routed along (dev; not carried by net cells). */
+  base?: number[];
   /** The motorway ends at a (or b): no piece continues it there. */
   endA: boolean;
   endB: boolean;
@@ -212,6 +219,15 @@ export class Motorways {
       R += this.terrain.region(x + GATE_R_SPAN * Math.cos(a), y + GATE_R_SPAN * Math.sin(a));
     }
     return R / 9;
+  }
+
+  /** The pieces a net cell carries: those of the motorway cells inside it (without their raw lines). */
+  netCellPieces(gx: number, gy: number): MotorwayPiece[] {
+    const n = NET_CELL / MW_CELL;
+    const out: MotorwayPiece[] = [];
+    for (let cj = gy * n; cj < (gy + 1) * n; cj++)
+      for (let ci = gx * n; ci < (gx + 1) * n; ci++) for (const p of this.cellPieces(ci, cj)) out.push({ ...p, base: undefined });
+    return out;
   }
 
   /** The pieces of every cell overlapping the rectangle. */
@@ -813,3 +829,5 @@ function hermite(Q: number[], a: MotorwayAnchor, b: MotorwayAnchor, h: number): 
   }
   return Float64Array.from(out);
 }
+
+if (NET_CELL % MW_CELL) throw new Error('net cells must hold whole motorway cells');

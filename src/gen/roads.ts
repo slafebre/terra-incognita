@@ -1,6 +1,7 @@
 import { COARSE_REACH, LAKE_REACH } from './hydro';
 import { LAKE_TILE } from './lakes';
 import { COARSE_KEEP_EXTRA } from './seeds';
+import type { MotorwayPiece } from './motorway';
 import type { Site } from './settle';
 
 /**
@@ -73,6 +74,8 @@ export interface RoadEdge {
 export interface NetCell {
   sites: Site[];
   edges: RoadEdge[];
+  /** Motorway pieces of the motorway cells inside it (experimental, motorway.ts). */
+  motorways: MotorwayPiece[];
 }
 
 /** Relative neighbourhood graph test: no other site is closer to both a and b. */

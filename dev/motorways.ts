@@ -136,7 +136,7 @@ function run(): void {
     ctx.strokeStyle = 'rgba(80, 40, 120, 0.6)';
     ctx.lineWidth = 3;
     ctx.setLineDash([6, 8]);
-    poly(p.base);
+    poly(p.base!);
     ctx.stroke();
   }
   ctx.setLineDash([]);
@@ -174,7 +174,7 @@ function run(): void {
     ctx.beginPath();
     ctx.arc(x, y, 40, 0, 2 * Math.PI);
     ctx.stroke();
-    console.log(`tight ${r.toFixed(0)} m: piece ${p.key} at ${p.xy[mi].toFixed(0)},${p.xy[mi + 1].toFixed(0)}, ${p.xy.length / 2} points, base ${p.base.length / 2}`);
+    console.log(`tight ${r.toFixed(0)} m: piece ${p.key} at ${p.xy[mi].toFixed(0)},${p.xy[mi + 1].toFixed(0)}, ${p.xy.length / 2} points, base ${p.base!.length / 2}`);
   }
   // Settlements.
   for (const s of set.sitesIn(VILLAGE, ox, oy, ox + size, oy + size)) {

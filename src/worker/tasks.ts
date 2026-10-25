@@ -1,6 +1,7 @@
 import { generateDem } from '../gen/dem';
 import { CoarseField, generatePre, solveHydro } from '../gen/hydro';
 import { latticeCell, routeCurves } from '../gen/lattice';
+import { Motorways } from '../gen/motorway';
 import { FARM, Settlements } from '../gen/settle';
 import { Terrain } from '../gen/terrain';
 import { planFarm } from '../gen/farm';
@@ -34,8 +35,10 @@ export function runTask(t: TaskRequest): { result: TaskResult; transfer: Transfe
       const view = new SeedView(t.seeds);
       const terrain = new Terrain(view);
       const field = new CoarseField(terrain, view);
-      const result = latticeCell(t.gx, t.gy, field, new Settlements(field, terrain, view), terrain);
-      return { result: { kind: 'net', result, ms: ms() }, transfer: [] };
+      const set = new Settlements(field, terrain, view);
+      const motorways = new Motorways(field, terrain, set, view).netCellPieces(t.gx, t.gy);
+      const result = { ...latticeCell(t.gx, t.gy, field, set, terrain), motorways };
+      return { result: { kind: 'net', result, ms: ms() }, transfer: motorways.map((m) => m.xy.buffer) };
     }
     case 'roads': {
       const result = routeCurves(t.segments, t.patch);

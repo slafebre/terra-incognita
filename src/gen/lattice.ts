@@ -487,7 +487,7 @@ function edgeCostRaw(field: CoarseField, u: number, v: number, cls: RoadClass): 
 /** No edge costs less than this × its length (for A* estimates). */
 const MIN_FACTOR = 1 - VALLEY_BONUS;
 
-export function latticeCell(gx: number, gy: number, field: CoarseField, set: Settlements, terrain?: Terrain): NetCell {
+export function latticeCell(gx: number, gy: number, field: CoarseField, set: Settlements, terrain?: Terrain): Omit<NetCell, 'motorways'> {
   if (DEBUG_PATHS) DEBUG_TERRAIN = terrain;
   field.checkSeeds();
   const debugSeen = new Set<string>();
