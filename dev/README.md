@@ -1,4 +1,4 @@
-# Developing Topo
+# Developing Terra Incognita
 
 Notes for working on the generator: debugging parameters, reproducing a view, and the command-line dev tools. For how the generator works, see [SPEC.md](../SPEC.md).
 

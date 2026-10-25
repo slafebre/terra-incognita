@@ -32,7 +32,7 @@ export function takeSnapshot(
 
 export function parseSnapshot(j: unknown): Snapshot {
   const s = j as Partial<Snapshot> | null;
-  if (!s || s.topo !== 1 || !s.chunks || !s.coarse || !Array.isArray(s.at)) throw new Error('not a Topo snapshot');
+  if (!s || s.topo !== 1 || !s.chunks || !s.coarse || !Array.isArray(s.at)) throw new Error('not a Terra Incognita snapshot');
   return s as Snapshot;
 }
 

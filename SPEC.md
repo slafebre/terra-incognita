@@ -1,4 +1,4 @@
-# Topo — infinite generated topographic map
+# Terra Incognita — infinite generated topographic map
 
 Status: milestones 1–3 implemented; milestone 4 (settlements & roads) in progress, 2026-10-24.
 

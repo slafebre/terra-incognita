@@ -58,3 +58,7 @@ The map is generated in 512 m chunks by a pool of Web Workers and drawn with Can
 There is no global seed. Terrain is gradient noise whose random values are created the first time some land needs them, and forgotten once no remaining land depends on them. Neighbouring chunks always agree exactly along their shared edges, but nothing is remembered once you leave.
 
 The full design is in [SPEC.md](SPEC.md). Debugging parameters, the reproduction panel and the command-line dev tools are covered in [dev/README.md](dev/README.md).
+
+## License
+
+[MIT](LICENSE)
