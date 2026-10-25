@@ -3,7 +3,7 @@ import { hash3 } from '../lib/hash';
 import { lerp, smoothstep } from '../lib/noise';
 import { segPointDist } from './buildings';
 import { NODE } from './hydro';
-import { nearestVertex, neighbours, vertexPos, verticesIn } from './lattice';
+import { MAX_EDGE, nearestVertex, neighbours, vertexPos, verticesIn } from './lattice';
 import type { PoiPatch } from './poi';
 import { ROAD_P, ROAD_T, type SegmentPath } from './roads';
 import type { TownPlan } from './town';
@@ -366,17 +366,19 @@ export function layFields({ cx, cy, edges, patch: p, roads, plans, open, slope }
     if (!a) nb.set(v, (a = neighbours(v)));
     return a;
   };
-  /** The two triangles' third vertices across edge u–w. */
-  const thirds = (u: number, w: number) => nbOf(u).filter((t) => nbOf(w).includes(t));
+  /** The two triangles' third vertices across edge u–w: w's neighbours in u's ring (counterclockwise). */
+  const thirds = (u: number, w: number) => {
+    const n = nbOf(u);
+    const k = n.indexOf(w);
+    return [n[(k + 1) % n.length], n[(k + n.length - 1) % n.length]];
+  };
+  /** The triangles at v: each two neighbours in a row. */
+  const trisAt = (v: number) => nbOf(v).map((a, k, n) => [v, a, n[(k + 1) % n.length]]);
   const seen = new Set<string>();
   /** Triangles of blocks too large to cut (their land gets furlongs instead, below). */
   const largeTris = new Set<string>();
   const starts: number[][] = [];
-  for (const v of verticesIn({ x0: X0 - 160, y0: Y0 - 160, x1: X1 + 160, y1: Y1 + 160 })) {
-    const n = nbOf(v);
-    for (let a = 0; a < n.length; a++)
-      for (let b = a + 1; b < n.length; b++) if (nbOf(n[a]).includes(n[b])) starts.push([v, n[a], n[b]]);
-  }
+  for (const v of verticesIn({ x0: X0 - MAX_EDGE, y0: Y0 - MAX_EDGE, x1: X1 + MAX_EDGE, y1: Y1 + MAX_EDGE })) starts.push(...trisAt(v));
   for (const t0 of starts) {
     const k0 = triKey(t0[0], t0[1], t0[2]);
     if (seen.has(k0)) continue;
@@ -640,20 +642,16 @@ export function layFields({ cx, cy, edges, patch: p, roads, plans, open, slope }
         const inCell = (x: number, y: number) => intervals(cell, x - 1e4, y, 1, 0).some(([a, b]) => a <= 1e4 && b >= 1e4);
         // The lattice triangles meeting the cell.
         const tris = new Map<string, number[]>();
-        for (const v of verticesIn({ x0: Math.min(...xs) - 160, y0: Math.min(...ys) - 160, x1: Math.max(...xs) + 160, y1: Math.max(...ys) + 160 })) {
-          const n = nbOf(v);
-          for (let a = 0; a < n.length; a++)
-            for (let b = a + 1; b < n.length; b++) {
-              if (!nbOf(n[a]).includes(n[b])) continue;
-              const t = [v, n[a], n[b]];
-              const k = triKey(v, n[a], n[b]);
-              if (tris.has(k)) continue;
-              const [P, Q, S] = t.map(pos);
-              const meets =
-                inCell(P[0], P[1]) || inCell(Q[0], Q[1]) || inCell(S[0], S[1]) || poly.some((c) => inTriangle(c.x, c.y, P, Q, S)) ||
-                cell.some((e) => [[P, Q], [Q, S], [S, P]].some(([U, V]) => segsCross(e.ax, e.ay, e.bx, e.by, U[0], U[1], V[0], V[1])));
-              if (meets) tris.set(k, t);
-            }
+        for (const v of verticesIn({ x0: Math.min(...xs) - MAX_EDGE, y0: Math.min(...ys) - MAX_EDGE, x1: Math.max(...xs) + MAX_EDGE, y1: Math.max(...ys) + MAX_EDGE })) {
+          for (const t of trisAt(v)) {
+            const k = triKey(t[0], t[1], t[2]);
+            if (tris.has(k)) continue;
+            const [P, Q, S] = t.map(pos);
+            const meets =
+              inCell(P[0], P[1]) || inCell(Q[0], Q[1]) || inCell(S[0], S[1]) || poly.some((c) => inTriangle(c.x, c.y, P, Q, S)) ||
+              cell.some((e) => [[P, Q], [Q, S], [S, P]].some(([U, V]) => segsCross(e.ax, e.ay, e.bx, e.by, U[0], U[1], V[0], V[1])));
+            if (meets) tris.set(k, t);
+          }
         }
         // Pieces: joined across edges without a way.
         const done = new Set<string>();

@@ -28,9 +28,10 @@ import type { Terrain } from './terrain';
 
 /**
  * Road network on a shared lattice. All roads are made of the edges of one graph:
- * a triangular lattice of vertices every LATTICE m, each jittered by a hash of its
- * position (never far enough to make edges cross). Roads can only meet at vertices,
- * so they cannot overlap, braid or cross without a junction.
+ * a triangular lattice of vertices every LATTICE m, each jittered well off it by a
+ * hash of its position, joined by their Delaunay triangulation (so no direction is
+ * preferred, and edges never cross). Roads can only meet at vertices, so they cannot
+ * overlap, braid or cross without a junction.
  *
  *  1. Edge costs per road class: length, a soft penalty for slope against the
  *     class's limit (judged on the coarse surface over 500 m: at the scale of one
@@ -59,14 +60,23 @@ import type { Terrain } from './terrain';
 
 export const LATTICE = 150;
 const ROW = (LATTICE * Math.sqrt(3)) / 2;
-/** Vertex jitter radius: well below the 0.29 × spacing at which triangles could flip. */
-const JITTER = 0.22 * LATTICE;
+/**
+ * Vertex jitter radius. Edges are those of the vertices' Delaunay triangulation, so
+ * they never cross however far vertices move; a fixed set of six neighbours showed
+ * through as roads in six directions on open ground. Vertices stay
+ * (1 − 2 × 0.4) × LATTICE = 30 m apart at least.
+ */
+const JITTER = 0.4 * LATTICE;
+/** No circle free of vertices is wider than this radius (the lattice's covering radius plus jitter)… */
+const EMPTY_R = LATTICE / Math.sqrt(3) + JITTER;
+/** …so no edge, a chord of one, is longer than this. */
+export const MAX_EDGE = 2 * EMPTY_R;
 
 /** Valley floors (drainage area ramp, km²) cost up to VALLEY_BONUS less. */
 const VALLEY_AREA = [0.3, 4];
 const VALLEY_BONUS = 0.3;
 /** Turning by θ at a vertex costs TURN_COST × (1 − cos θ) (m); a sharp turn (cos θ < SHARP_COS,
- * the lattice's 120°) costs SHARP_TURN — on steep ground the fine routing makes the hairpins. */
+ * over about 100°) costs SHARP_TURN — on steep ground the fine routing makes the hairpins. */
 const TURN_COST = 25;
 const SHARP_COS = -0.2;
 const SHARP_TURN = 400;
@@ -168,31 +178,117 @@ export function vertexPos(v: number): [number, number] {
   return [(i + (j & 1) * 0.5) * LATTICE + r * Math.cos(a), j * ROW + r * Math.sin(a)];
 }
 
-const NB_EVEN: [number, number][] = [[1, 0], [-1, 0], [-1, -1], [0, -1], [-1, 1], [0, 1]];
-const NB_ODD: [number, number][] = [[1, 0], [-1, 0], [0, -1], [1, -1], [0, 1], [1, 1]];
-function neighbours(v: number): number[] {
-  const i = vi(v);
-  const j = vj(v);
-  return ((j & 1) !== 0 ? NB_ODD : NB_EVEN).map(([di, dj]) => pack(i + di, j + dj));
-}
-
-/** Nearest vertex to (x, y). */
-export function nearestVertex(x: number, y: number): number {
-  const j0 = Math.round(y / ROW);
-  let best = 0;
-  let bd = Infinity;
-  for (let j = j0 - 1; j <= j0 + 1; j++) {
-    const i0 = Math.round(x / LATTICE - (j & 1) * 0.5);
-    for (let i = i0 - 1; i <= i0 + 1; i++) {
+/** Calls fn for every vertex within r of (x, y), with its position. */
+function forVerticesNear(x: number, y: number, r: number, fn: (v: number, px: number, py: number) => void): void {
+  for (let j = Math.floor((y - r - JITTER) / ROW); j <= Math.ceil((y + r + JITTER) / ROW); j++) {
+    const s = (j & 1) * 0.5;
+    for (let i = Math.floor((x - r - JITTER) / LATTICE - s); i <= Math.ceil((x + r + JITTER) / LATTICE - s); i++) {
       const v = pack(i, j);
       const [px, py] = vertexPos(v);
-      const d = Math.hypot(px - x, py - y);
-      if (d < bd) {
-        bd = d;
-        best = v;
-      }
+      if ((px - x) ** 2 + (py - y) ** 2 <= r * r) fn(v, px, py);
     }
   }
+}
+
+/**
+ * Is a–b an edge of the Delaunay triangulation of points (xs, ys) (a and b among
+ * them, at indices ia, ib)? Circles through a and b have centres m + t·n on the
+ * bisector (n the left normal); each point p rules out the t whose circle holds it,
+ * those beyond its own t from its side. It is an edge if some t is left.
+ */
+function delaunayEdge(xs: number[], ys: number[], ia: number, ib: number): boolean {
+  const ax = xs[ia];
+  const ay = ys[ia];
+  const mx = (ax + xs[ib]) / 2;
+  const my = (ay + ys[ib]) / 2;
+  const nx = ay - ys[ib];
+  const ny = xs[ib] - ax;
+  const h2 = (nx * nx + ny * ny) / 4;
+  let lo = -Infinity;
+  let hi = Infinity;
+  for (let k = 0; k < xs.length; k++) {
+    if (k === ia || k === ib) continue;
+    const px = xs[k] - mx;
+    const py = ys[k] - my;
+    const s = nx * px + ny * py;
+    const d = px * px + py * py - h2;
+    if (s > 0) hi = Math.min(hi, d / (2 * s));
+    else if (s < 0) lo = Math.max(lo, d / (2 * s));
+    else if (d < 0) return false;
+    if (lo >= hi) return false;
+  }
+  return true;
+}
+
+/** Most neighbours a vertex has (plus one: search states use the last slot for "no way in"). */
+const DEG = 16;
+const nbCache = new Map<number, number[]>();
+/**
+ * The vertex's neighbours, counterclockwise from −x: each two in a row (and the last
+ * and the first) make a triangle with it. Its Delaunay edges, no longer than MAX_EDGE. A Delaunay
+ * edge crossing a candidate, if any, has both ends within 2 × MAX_EDGE of the vertex,
+ * and that pair alone rules the candidate out, so the points within that radius
+ * decide alike from either end.
+ */
+function neighbours(v: number): number[] {
+  let out = nbCache.get(v);
+  if (out) return out;
+  const [x, y] = vertexPos(v);
+  const ids: number[] = [];
+  const xs: number[] = [];
+  const ys: number[] = [];
+  forVerticesNear(x, y, 2 * MAX_EDGE, (w, px, py) => {
+    ids.push(w);
+    xs.push(px);
+    ys.push(py);
+  });
+  const self = ids.indexOf(v);
+  const found: [number, number][] = [];
+  for (let k = 0; k < ids.length; k++)
+    if (k !== self && (xs[k] - x) ** 2 + (ys[k] - y) ** 2 <= MAX_EDGE * MAX_EDGE && delaunayEdge(xs, ys, self, k))
+      found.push([Math.atan2(ys[k] - y, xs[k] - x), ids[k]]);
+  out = found.sort((a, b) => a[0] - b[0]).map((f) => f[1]);
+  if (out.length >= DEG) throw new Error(`lattice vertex with ${out.length} neighbours`);
+  if (nbCache.size > NET_CACHE_MAX) nbCache.clear();
+  nbCache.set(v, out);
+  return out;
+}
+
+/**
+ * Local indices for the vertices (i, j) of a box (vi0, vj0, ni × nj) in a search, and
+ * each one's neighbours as local indices (−1 outside the box), worked out once.
+ */
+function localIndex(vi0: number, vj0: number, ni: number, nj: number) {
+  const loc = (v: number) => {
+    const p = vi(v) - vi0;
+    const q = vj(v) - vj0;
+    return p < 0 || q < 0 || p >= ni || q >= nj ? -1 : q * ni + p;
+  };
+  const glob = (l: number) => pack((l % ni) + vi0, Math.floor(l / ni) + vj0);
+  const nbs: (Int32Array | undefined)[] = [];
+  const nbOf = (l: number): Int32Array => {
+    let a = nbs[l];
+    if (!a) {
+      const ws = neighbours(glob(l));
+      a = nbs[l] = new Int32Array(ws.length);
+      for (let k = 0; k < ws.length; k++) a[k] = loc(ws[k]);
+    }
+    return a;
+  };
+  return { loc, glob, nbOf };
+}
+
+/** Nearest vertex to (x, y): within EMPTY_R, as every point has one. */
+export function nearestVertex(x: number, y: number): number {
+  let best = 0;
+  let bd = Infinity;
+  forVerticesNear(x, y, EMPTY_R, (v, px, py) => {
+    const d = (px - x) ** 2 + (py - y) ** 2;
+    if (d < bd) {
+      bd = d;
+      best = v;
+    }
+  });
   return best;
 }
 
@@ -240,8 +336,8 @@ function pruneNetCaches(x0: number, y0: number, x1: number, y1: number): void {
     return x < x0 - NET_KEEP || x > x1 + NET_KEEP || y < y0 - NET_KEEP || y > y1 + NET_KEEP;
   };
   for (const v of c.vertex.keys()) if (far(v)) c.vertex.delete(v);
-  for (const k of c.cost.keys()) if (far(Math.floor(Math.floor(k / 5) / 9))) c.cost.delete(k);
-  for (const k of c.terrain.keys()) if (far(Math.floor(k / 9))) c.terrain.delete(k);
+  for (const k of c.cost.keys()) if (far(Math.floor(Math.floor(k / 5) / DIRS))) c.cost.delete(k);
+  for (const k of c.terrain.keys()) if (far(Math.floor(k / DIRS))) c.terrain.delete(k);
 }
 function netCaches(): typeof caches {
   const e = coarseEpochNow();
@@ -268,13 +364,14 @@ function vdata(field: CoarseField, v: number) {
   return d;
 }
 
-/** Direction from vertex v to its neighbour w, 0..8 (4 is v itself). */
-const dirCode = (v: number, w: number) => (vj(w) - vj(v) + 1) * 3 + (vi(w) - vi(v) + 1);
+/** Direction from vertex v to its neighbour w, 0..DIRS − 1: index offsets are within ±4 (MAX_EDGE + 2 × JITTER < 4 rows). */
+const DIRS = 81;
+const dirCode = (v: number, w: number) => (vj(w) - vj(v) + 4) * 9 + (vi(w) - vi(v) + 4);
 /** Cost of edge u–v for a road class (symmetric). */
 function edgeCost(field: CoarseField, u: number, v: number, cls: RoadClass): number {
   const m = netCaches().cost;
   const lo = Math.min(u, v);
-  const ck = (lo * 9 + dirCode(lo, Math.max(u, v))) * 5 + cls;
+  const ck = (lo * DIRS + dirCode(lo, Math.max(u, v))) * 5 + cls;
   const hit = m.get(ck);
   if (hit !== undefined) return hit;
   const c = edgeCostRaw(field, u, v, cls);
@@ -293,7 +390,7 @@ const SLOPE_BASE = 500;
 function edgeTerrain(field: CoarseField, u: number, v: number): { grade: number; local: number; stream: number } {
   const m = netCaches().terrain;
   const lo = Math.min(u, v);
-  const key = lo * 9 + dirCode(lo, Math.max(u, v));
+  const key = lo * DIRS + dirCode(lo, Math.max(u, v));
   let r = m.get(key);
   if (r) return r;
   const a = vdata(field, u);
@@ -432,8 +529,9 @@ export function latticeCell(gx: number, gy: number, field: CoarseField, set: Set
     const reach = CORRIDOR * d + extra;
     const va = nearestVertex(a.x, a.y);
     const vb = nearestVertex(b.x, b.y);
-    // The corridor's box, indexed locally; states are local index × 9 + the code of
-    // the direction the vertex was entered from (4 = the start), for turn costs.
+    // The corridor's box, indexed locally; states are local index × DEG + the slot,
+    // among its neighbours, of the vertex it was entered from (DEG − 1 = the start),
+    // for turn costs.
     const R = reach / 2 + LATTICE;
     const mx = (a.x + b.x) / 2;
     const my = (a.y + b.y) / 2;
@@ -442,17 +540,12 @@ export function latticeCell(gx: number, gy: number, field: CoarseField, set: Set
     const ni = Math.ceil((mx + R) / LATTICE) + 2 - vi0 + 1;
     const nj = Math.ceil((my + R) / ROW) + 2 - vj0 + 1;
     const N = ni * nj;
-    const loc = (v: number) => {
-      const p0 = vi(v) - vi0;
-      const q0 = vj(v) - vj0;
-      return p0 < 0 || q0 < 0 || p0 >= ni || q0 >= nj ? -1 : q0 * ni + p0;
-    };
-    const glob = (l: number) => pack((l % ni) + vi0, Math.floor(l / ni) + vj0);
+    const { loc, glob, nbOf } = localIndex(vi0, vj0, ni, nj);
     const px = new Float64Array(N).fill(NaN);
     const py = new Float64Array(N);
     const inside = new Int8Array(N); // 0 unknown, 1 in, 2 out
-    const ec = new Float64Array(N * 6).fill(-1); // edge costs by vertex and direction
-    const len = new Float64Array(N * 6).fill(-1); // and lengths
+    const ec = new Float64Array(N * DEG).fill(-1); // edge costs by vertex and neighbour slot
+    const len = new Float64Array(N * DEG).fill(-1); // and lengths
     const at = (l: number) => {
       if (Number.isNaN(px[l])) {
         const q = pos(glob(l));
@@ -467,32 +560,26 @@ export function latticeCell(gx: number, gy: number, field: CoarseField, set: Set
       at(lb);
       const bx = px[lb];
       const by = py[lb];
-      const cost = new Float64Array(N * 9).fill(Infinity);
-      const prev = new Int32Array(N * 9).fill(-1);
-      const done = new Uint8Array(N * 9);
+      const cost = new Float64Array(N * DEG).fill(Infinity);
+      const prev = new Int32Array(N * DEG).fill(-1);
+      const done = new Uint8Array(N * DEG);
       const heap = new MinHeap(256);
       at(la);
-      cost[la * 9 + 4] = 0;
-      heap.push(la * 9 + 4, MIN_FACTOR * Math.hypot(px[la] - bx, py[la] - by));
+      cost[la * DEG + DEG - 1] = 0;
+      heap.push(la * DEG + DEG - 1, MIN_FACTOR * Math.hypot(px[la] - bx, py[la] - by));
       let goal = -1;
       while (heap.size) {
         const st = heap.pop();
         if (done[st]) continue;
         done[st] = 1;
-        const code = st % 9;
-        const l = (st - code) / 9;
+        const slot = st % DEG;
+        const l = (st - slot) / DEG;
         if (l === lb) {
           goal = st;
           break;
         }
-        const p0 = l % ni;
-        const q0 = (l - p0) / ni;
-        let lf = -1;
-        if (code !== 4) {
-          const fp = p0 + (code % 3) - 1;
-          const fq = q0 + Math.floor(code / 3) - 1;
-          if (fp >= 0 && fq >= 0 && fp < ni && fq < nj) lf = fq * ni + fp;
-        }
+        const nb = nbOf(l);
+        const lf = slot === DEG - 1 ? -1 : nb[slot];
         at(l);
         const c0 = cost[st];
         // The incoming edge, for turn costs.
@@ -505,30 +592,26 @@ export function latticeCell(gx: number, gy: number, field: CoarseField, set: Set
           uy = py[l] - py[lf];
           lenIn = Math.hypot(ux, uy);
         }
-        const nb = ((q0 + vj0) & 1) !== 0 ? NB_ODD : NB_EVEN;
-        for (let dd = 0; dd < 6; dd++) {
-          const wp = p0 + nb[dd][0];
-          const wq = q0 + nb[dd][1];
-          if (wp < 0 || wq < 0 || wp >= ni || wq >= nj) continue;
-          const lw = wq * ni + wp;
-          if (lw === lf) continue;
+        for (let dd = 0; dd < nb.length; dd++) {
+          const lw = nb[dd];
+          if (lw < 0 || lw === lf) continue;
           if (inside[lw] === 0) {
             at(lw);
             inside[lw] = Math.hypot(px[lw] - a.x, py[lw] - a.y) + Math.hypot(px[lw] - b.x, py[lw] - b.y) <= reach ? 1 : 2;
           }
           if (inside[lw] === 2) continue;
-          let e = ec[l * 6 + dd];
-          if (e < 0) e = ec[l * 6 + dd] = edgeCost(field, glob(l), glob(lw), k);
+          let e = ec[l * DEG + dd];
+          if (e < 0) e = ec[l * DEG + dd] = edgeCost(field, glob(l), glob(lw), k);
           let c = c0 + e;
           if (lf >= 0) {
             const wx = px[lw] - px[l];
             const wy = py[lw] - py[l];
-            let lenOut = len[l * 6 + dd];
-            if (lenOut < 0) lenOut = len[l * 6 + dd] = Math.hypot(wx, wy);
+            let lenOut = len[l * DEG + dd];
+            if (lenOut < 0) lenOut = len[l * DEG + dd] = Math.hypot(wx, wy);
             const cos = (ux * wx + uy * wy) / (lenIn * lenOut);
             c += cos < SHARP_COS ? SHARP_TURN : TURN_COST * (1 - cos);
           }
-          const ns = lw * 9 + (q0 - wq + 1) * 3 + (p0 - wp + 1);
+          const ns = lw * DEG + nbOf(lw).indexOf(l);
           if (c >= cost[ns]) continue;
           cost[ns] = c;
           prev[ns] = st;
@@ -537,7 +620,7 @@ export function latticeCell(gx: number, gy: number, field: CoarseField, set: Set
       }
       if (goal >= 0) {
         out = [];
-        for (let st = goal; prev[st] >= 0; st = prev[st]) out.push([glob((prev[st] - (prev[st] % 9)) / 9), glob((st - (st % 9)) / 9)]);
+        for (let st = goal; prev[st] >= 0; st = prev[st]) out.push([glob(Math.floor(prev[st] / DEG)), glob(Math.floor(st / DEG))]);
       }
     }
     if (paths.size > 20000) paths.delete(paths.keys().next().value!);
@@ -576,29 +659,24 @@ export function latticeCell(gx: number, gy: number, field: CoarseField, set: Set
    * way from a vertex back to the network.
    */
   const forest = (sources: Set<number>, m: number, reach: number, k: RoadClass, targets: number[]): ((v: number) => number[]) => {
-    // Vertices of the box, indexed locally; states are local index × 9 + direction code.
+    // Vertices of the box, indexed locally; states are local index × DEG + slot of the way in.
     const vi0 = Math.floor((x0 - m - JITTER) / LATTICE) - 2;
     const vi1 = Math.ceil((x1 + m + JITTER) / LATTICE) + 2;
     const vj0 = Math.floor((y0 - m - JITTER) / ROW) - 2;
     const vj1 = Math.ceil((y1 + m + JITTER) / ROW) + 2;
     const ni = vi1 - vi0 + 1;
     const nj = vj1 - vj0 + 1;
-    const loc = (v: number) => {
-      const a = vi(v) - vi0;
-      const b = vj(v) - vj0;
-      return a < 0 || b < 0 || a >= ni || b >= nj ? -1 : b * ni + a;
-    };
-    const glob = (l: number) => pack((l % ni) + vi0, Math.floor(l / ni) + vj0);
-    const cost = new Float64Array(ni * nj * 9).fill(Infinity);
-    const parent = new Int32Array(ni * nj * 9).fill(-1);
-    const done = new Uint8Array(ni * nj * 9);
+    const { loc, glob, nbOf } = localIndex(vi0, vj0, ni, nj);
+    const cost = new Float64Array(ni * nj * DEG).fill(Infinity);
+    const parent = new Int32Array(ni * nj * DEG).fill(-1);
+    const done = new Uint8Array(ni * nj * DEG);
     const best = new Int32Array(ni * nj).fill(-1); // vertex → its cheapest state
     const heap = new MinHeap(1024);
     for (const s0 of sources) {
       const l = loc(s0);
       if (l < 0) continue;
-      cost[l * 9 + 4] = 0;
-      heap.push(l * 9 + 4, 0);
+      cost[l * DEG + DEG - 1] = 0;
+      heap.push(l * DEG + DEG - 1, 0);
     }
     // Stop once every target is reached: their ways are then final.
     const wanted = new Uint8Array(ni * nj);
@@ -615,8 +693,8 @@ export function latticeCell(gx: number, gy: number, field: CoarseField, set: Set
     const px = new Float64Array(N).fill(NaN);
     const py = new Float64Array(N);
     const inside = new Int8Array(N); // 0 unknown, 1 in, 2 out
-    const ec = new Float64Array(N * 6).fill(-1);
-    const len = new Float64Array(N * 6).fill(-1);
+    const ec = new Float64Array(N * DEG).fill(-1);
+    const len = new Float64Array(N * DEG).fill(-1);
     const at = (l: number) => {
       if (Number.isNaN(px[l])) {
         const q = pos(glob(l));
@@ -628,22 +706,16 @@ export function latticeCell(gx: number, gy: number, field: CoarseField, set: Set
       const st = heap.pop();
       if (done[st]) continue;
       done[st] = 1;
-      const code = st % 9;
-      const l = (st - code) / 9;
+      const slot = st % DEG;
+      const l = (st - slot) / DEG;
       if (best[l] < 0) {
         best[l] = st;
         if (wanted[l]) left--;
       }
-      const a = l % ni;
-      const b = (l - a) / ni;
       const c0 = cost[st];
       // The vertex this state came from (local), for turn costs.
-      let lf = -1;
-      if (code !== 4) {
-        const fa = a + (code % 3) - 1;
-        const fb = b + Math.floor(code / 3) - 1;
-        if (fa >= 0 && fb >= 0 && fa < ni && fb < nj) lf = fb * ni + fa;
-      }
+      const nb = nbOf(l);
+      const lf = slot === DEG - 1 ? -1 : nb[slot];
       at(l);
       // The incoming edge, for turn costs.
       let ux = 0;
@@ -655,31 +727,27 @@ export function latticeCell(gx: number, gy: number, field: CoarseField, set: Set
         uy = py[l] - py[lf];
         lenIn = Math.hypot(ux, uy);
       }
-      const nb = ((b + vj0) & 1) !== 0 ? NB_ODD : NB_EVEN;
-      for (let d = 0; d < 6; d++) {
-        const wa = a + nb[d][0];
-        const wb = b + nb[d][1];
-        if (wa < 0 || wb < 0 || wa >= ni || wb >= nj) continue;
-        const lw = wb * ni + wa;
-        if (lw === lf) continue;
+      for (let d = 0; d < nb.length; d++) {
+        const lw = nb[d];
+        if (lw < 0 || lw === lf) continue;
         if (inside[lw] === 0) {
           at(lw);
           inside[lw] = inBoxXY(px[lw], py[lw], m) ? 1 : 2;
         }
         if (inside[lw] === 2) continue;
-        let e = ec[l * 6 + d];
-        if (e < 0) e = ec[l * 6 + d] = edgeCost(field, glob(l), glob(lw), k);
+        let e = ec[l * DEG + d];
+        if (e < 0) e = ec[l * DEG + d] = edgeCost(field, glob(l), glob(lw), k);
         let c = c0 + e;
         if (lf >= 0) {
           const wx = px[lw] - px[l];
           const wy = py[lw] - py[l];
-          let lenOut = len[l * 6 + d];
-          if (lenOut < 0) lenOut = len[l * 6 + d] = Math.hypot(wx, wy);
+          let lenOut = len[l * DEG + d];
+          if (lenOut < 0) lenOut = len[l * DEG + d] = Math.hypot(wx, wy);
           const cos = (ux * wx + uy * wy) / (lenIn * lenOut);
           c += cos < SHARP_COS ? SHARP_TURN : TURN_COST * (1 - cos);
         }
-        // Entered from l: direction code of l as seen from lw.
-        const ns = lw * 9 + (b - wb + 1) * 3 + (a - wa + 1);
+        // Entered from l: l's slot among lw's neighbours.
+        const ns = lw * DEG + nbOf(lw).indexOf(l);
         if (c > reach || c >= cost[ns]) continue;
         cost[ns] = c;
         parent[ns] = st;
@@ -690,7 +758,7 @@ export function latticeCell(gx: number, gy: number, field: CoarseField, set: Set
       const out: number[] = [];
       const l = loc(v);
       if (l < 0 || best[l] < 0) return out;
-      for (let st = best[l]; st >= 0; st = parent[st]) out.push(glob((st - (st % 9)) / 9));
+      for (let st = best[l]; st >= 0; st = parent[st]) out.push(glob(Math.floor(st / DEG)));
       return out;
     };
   };
@@ -1003,7 +1071,7 @@ export function latticeSegments(edges: RoadEdge[], cx: number, cy: number): Segm
   };
   // Ways near the chunk: everything within ROOM_REACH of a piece of it (up to
   // PIECE_EDGES edges out), measured between edge midpoints.
-  const NEAR = PIECE_EDGES * 1.7 * LATTICE + ROOM_REACH + 1.7 * LATTICE;
+  const NEAR = PIECE_EDGES * MAX_EDGE + ROOM_REACH + MAX_EDGE;
   const local = edges.filter((o) => {
     const mx = (o.route[0] + o.route[2]) / 2 - (cx + 0.5) * CHUNK;
     const my = (o.route[1] + o.route[3]) / 2 - (cy + 0.5) * CHUNK;

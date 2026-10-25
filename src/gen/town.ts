@@ -1118,6 +1118,9 @@ export function planTown({ site, roads, patch: p }: PlanInput): TownPlan {
     }
     // Pieces near the branch point don't count as obstacles: they're its own junction.
     const home = (_li: number, _s: number, x: number, y: number) => Math.hypot(x - P.x, y - P.y) < 30;
+    // …but the parent only at the branch point itself: just past a bend in it, the
+    // branch can run back across it.
+    const homeCross = (li: number, s: number, x: number, y: number) => (li === c.li ? Math.abs(s - c.s) < 1 : home(li, s, x, y));
     const other = (li: number) => li !== c.li;
     const [tx, ty] = dirAt(c.li, P.k);
     // Normal to the parent, on the candidate's side.
@@ -1213,14 +1216,20 @@ export function planTown({ site, roads, patch: p }: PlanInput): TownPlan {
       }
       // Running into the network: join where it crosses, or where it comes within reach ahead.
       const hit =
-        crossing(x, y, nx, ny, home) ??
+        crossing(x, y, nx, ny, homeCross) ??
         (() => {
           const n = nearest(nx, ny, SNAP, home);
           if (!n) return null;
           const ahead = Math.cos(Math.atan2(n.y - y, n.x - x) - a);
-          return ahead > 0.35 ? n : null;
+          // On the way there it may cross another street (or its parent) first: it meets that one.
+          return ahead > 0.35 ? (crossing(x, y, n.x, n.y, (li, s, px, py) => li === n.li || homeCross(li, s, px, py)) ?? n) : null;
         })();
       if (hit) {
+        // Not where the way it meets crosses water: a dead end short of it.
+        if (wet(hit.x, hit.y)) {
+          stop = 'water';
+          break;
+        }
         const [hx, hy] = dirAt(hit.li, hit.k);
         const inc = Math.atan2(hit.y - y, hit.x - x);
         const ang = Math.abs(angDiff(inc, Math.atan2(hy, hx)));
