@@ -2,7 +2,7 @@ import { APRON, CELL, CELLS, CHUNK, DEM_W } from '../lib/constants';
 import { marchingSquares } from '../lib/contours';
 import { smoothPolyline } from '../lib/polyline';
 import { COVER } from '../gen/landcover';
-import { layFields } from '../gen/fields';
+import { type Fields, layFields } from '../gen/fields';
 import { placePois, type PoiPatch } from '../gen/poi';
 import type { SegmentPath } from '../gen/roads';
 import type { TownPlan } from '../gen/town';
@@ -36,6 +36,8 @@ export interface RenderInput {
   poi?: PoiPatch;
   /** Lattice edges carrying ways near the chunk ([ax, ay, bx, by] each): its field parcels' blocks. */
   edges: number[][];
+  /** Its field parcels as laid out before from the same inputs (they don't depend on the zoom), if any. */
+  fields?: Fields;
   /** Raster edge length in device pixels. */
   pxSize: number;
   /** Device pixels per CSS pixel (line widths are specified in CSS px). */
@@ -84,7 +86,11 @@ export function farmlandTests(cx: number, cy: number, cover: Int8Array, water: F
 /** River width in metres for drainage area A (km²). */
 export const riverWidth = (A: number) => 1.1 * Math.pow(A, 0.55);
 
-export function renderChunk({ cx, cy, dem, cover, water, streams, roads, motorways: lines, plans, poi, edges, pxSize, dpr }: RenderInput): OffscreenCanvas {
+/** The raster, and the field parcels it laid out (or was given). */
+export function renderChunk({ cx, cy, dem, cover, water, streams, roads, motorways: lines, plans, poi, edges, fields: given, pxSize, dpr }: RenderInput): {
+  canvas: OffscreenCanvas;
+  fields?: Fields;
+} {
   // Motorways against the ground (viaducts, tunnels, earthworks); where they run level
   // they clear the woods and fields beside them (under a viaduct and over a tunnel the
   // land runs on).
@@ -233,12 +239,15 @@ export function renderChunk({ cx, cy, dem, cover, water, streams, roads, motorwa
   const drawn = [...roads.filter((r) => !redrawn.has(r.key)), ...plans.flatMap((p) => p.roads)];
 
   // --- Field parcels and hedges (on farmland: no woods, rock, heath, marsh or water) ----
+  let fields = given;
   if (poi) {
-    const farmland = farmlandTests(cx, cy, cover, water, slope);
-    // Not on a motorway or its verges.
-    const mwDist = lineDistance([...motorways, ...rampLines], MW_VERGE);
-    const open = (x: number, y: number) => farmland.open(x, y) && mwDist(x, y) >= MW_VERGE;
-    const fields = layFields({ cx, cy, edges, patch: poi, roads: drawn, plans, ...farmland, open });
+    if (!fields) {
+      const farmland = farmlandTests(cx, cy, cover, water, slope);
+      // Not on a motorway or its verges.
+      const mwDist = lineDistance([...motorways, ...rampLines], MW_VERGE);
+      const open = (x: number, y: number) => farmland.open(x, y) && mwDist(x, y) >= MW_VERGE;
+      fields = layFields({ cx, cy, edges, patch: poi, roads: drawn, plans, ...farmland, open });
+    }
     drawFields(ctx, fields, cx, cy, pxPerM, dpr);
   }
 
@@ -261,7 +270,7 @@ export function renderChunk({ cx, cy, dem, cover, water, streams, roads, motorwa
   // Points of interest: the chunk's own (hilltops, wayside crosses, springs) and the plans' (water towers).
   const pois = [...(poi ? placePois({ cx, cy, patch: poi, roads: drawn, plans }) : []), ...plans.flatMap((p) => p.pois)];
   drawPois(ctx, pois, cx, cy, pxPerM, dpr);
-  return canvas;
+  return { canvas, fields };
 }
 
 /**

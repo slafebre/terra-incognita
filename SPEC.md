@@ -371,6 +371,8 @@ Motorways differ from the network's roads: they cross other ways without junctio
 - The retention set is about 350 chunks on a phone and about 550 on a desktop. The 4 m DEM takes 64 KB per chunk as Float32. Rasters are re-rendered on demand rather than all kept: only visible chunks plus one ring keep their bitmaps.
 - Heavy arrays use transferable buffers. Workers keep their own copies of neighbouring data so it isn't copied back and forth.
 - Workers cache what overlapping tasks share, keyed by the seeds it depends on: coarse tiles, coarse heights on the 128 m grid, meander costs per chunk (each in 49 window solves), and the net's vertex terrain, edge costs and corridor paths (neighbouring cells read much the same land; pruned to about 16 km around the latest cell). The net caches are dropped when a tile position turns up with other seeds (land forgotten and made anew; `test/netcache.test.ts`).
+- Lattice vertex positions and neighbour lists are kept per worker in blocks of 32 × 32 vertices (they depend on no seed), pruned with the net caches; searches look neighbours and the way back up in flat tables.
+- A chunk keeps its field parcels' layout with the objects it was laid out from (its surface, the roads round it, plans, net and motorway cells, the solves under its fine nodes); a later render whose inputs are still those objects draws the kept layout instead of laying it out again (a zoom change redraws a chunk at about half the cost).
 
 ## 6. Code layout (planned)
 

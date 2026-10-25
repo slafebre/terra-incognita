@@ -73,9 +73,10 @@ export function runTask(t: TaskRequest): { result: TaskResult; transfer: Transfe
       };
     }
     case 'render': {
-      const canvas = renderChunk(t);
+      const { canvas, fields } = renderChunk(t);
       const bitmap = canvas.transferToImageBitmap();
-      return { result: { kind: 'render', bitmap, ms: ms() }, transfer: [bitmap] };
+      // (A layout it was given goes no further: the manager has it.)
+      return { result: { kind: 'render', bitmap, fields: t.fields ? undefined : fields, ms: ms() }, transfer: [bitmap] };
     }
   }
 }

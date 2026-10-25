@@ -15,7 +15,7 @@ import {
 } from '../gen/hydro';
 import { latticeSegments } from '../gen/lattice';
 import { motorwayEnd, MW_END_REACH, MW_SPILL, type MotorwayPiece } from '../gen/motorway';
-import { FIELD_PAD, FIELD_REACH } from '../gen/fields';
+import { FIELD_PAD, FIELD_REACH, type Fields } from '../gen/fields';
 import { POI_PAD, type PoiPatch } from '../gen/poi';
 import { NET_CELL, NET_REACH, ROAD_C, ROAD_PAD, type NetCell, type RoadEdge, type RoadPatch, type SegmentPath } from '../gen/roads';
 import { expand, intersects, SeedStore, type Rect } from '../gen/seeds';
@@ -44,6 +44,12 @@ export interface Chunk {
   region?: number;
   bitmap?: ImageBitmap;
   bitmapBucket: number;
+  /**
+   * Its field parcels as last laid out, and what they were laid out from (fieldInputs):
+   * given to the next render while those are the same objects (a zoom change redraws
+   * the chunk, not its fields).
+   */
+  fields?: { inputs: unknown[]; layout: Fields };
 }
 
 type Candidate = { chunk: Chunk; kind: TaskKind; priority: number };
@@ -95,6 +101,8 @@ const wholeChunks = (r: Rect): Rect => ({
   x1: Math.ceil(r.x1 / CHUNK) * CHUNK,
   y1: Math.ceil(r.y1 / CHUNK) * CHUNK,
 });
+
+const sameItems = (a: unknown[], b: unknown[]) => a.length === b.length && a.every((x, i) => x === b[i]);
 
 /** Smallest rectangle holding every one of `rs`. */
 const bounds = (rs: Rect[]): Rect =>
@@ -582,6 +590,7 @@ export class ChunkManager {
     const c = cands[0].chunk;
     let task: TaskRequest;
     let transfer: Transferable[] = [];
+    let fieldInputs: unknown[] | undefined;
     switch (kind) {
       case 'pre': {
         const r = cands.reduce(
@@ -652,6 +661,9 @@ export class ChunkManager {
         const poi = this.poiPatch(c);
         // (Adds the lanes where a motorway runs into a roundabout to the roads.)
         const motorways = this.motorwaysToDraw(c, roads);
+        const plans = this.plansFor(c)!;
+        fieldInputs = this.fieldInputs(c, plans);
+        const kept = c.fields && sameItems(c.fields.inputs, fieldInputs) ? c.fields.layout : undefined;
         task = {
           kind,
           cx: c.cx,
@@ -662,9 +674,10 @@ export class ChunkManager {
           streams,
           roads,
           motorways,
-          plans: this.plansFor(c)!,
+          plans,
           poi,
           edges: this.fieldEdges(c),
+          fields: kept,
           pxSize: this.pxSize,
           dpr: Math.min(this.dpr, DPR_MAX),
         };
@@ -680,7 +693,7 @@ export class ChunkManager {
         for (const k of cands) k.chunk.busy = false;
         this.stats[res.kind].ms += res.ms;
         this.stats[res.kind].n++;
-        this.receive(cands, res, bucket);
+        this.receive(cands, res, bucket, fieldInputs);
       })
       .catch((err) => {
         for (const k of cands) {
@@ -696,7 +709,7 @@ export class ChunkManager {
     return this.chunks.get(c.key) === c;
   }
 
-  private receive(cands: Candidate[], res: TaskResult, bucket: number): void {
+  private receive(cands: Candidate[], res: TaskResult, bucket: number, fieldInputs?: unknown[]): void {
     const c = cands[0].chunk;
     switch (res.kind) {
       case 'pre':
@@ -727,6 +740,7 @@ export class ChunkManager {
         c.bitmap?.close();
         c.bitmap = res.bitmap;
         c.bitmapBucket = bucket;
+        if (res.fields && fieldInputs) c.fields = { inputs: fieldInputs, layout: res.fields };
         this.onChange();
         break;
     }
@@ -792,6 +806,27 @@ export class ChunkManager {
         p.lake[o] = own.hydro.lake[k];
       }
     return p;
+  }
+
+  /**
+   * What a chunk's field parcels are laid out from, as the objects holding it: its
+   * surface, the roads drawn round it, the plans drawing into it, the net and motorway
+   * cells it reads, and the solves under its fine nodes. Data is only ever replaced,
+   * never changed in place, so the same objects mean the same layout.
+   */
+  private fieldInputs(c: Chunk, plans: TownPlan[]): unknown[] {
+    const out: unknown[] = [c.dem, ...plans];
+    this.ring(c, (n) => (out.push(n?.roads), true));
+    const r = chunkRect(c.cx, c.cy);
+    for (const [gx, gy] of this.netCells(expand(r, EDGE_REACH))) out.push(this.nets.get(`${gx},${gy}`)?.data);
+    for (const [gx, gy] of this.netCells(expand(r, MW_SPILL + MW_END_REACH))) out.push(this.mws.get(`${gx},${gy}`)?.data);
+    const pad = Math.ceil(Math.max(POI_PAD, FIELD_PAD) / NODES);
+    for (let dy = -pad; dy <= pad; dy++)
+      for (let dx = -pad; dx <= pad; dx++) {
+        const n = this.get(c.cx + dx, c.cy + dy);
+        out.push(n?.hydro, n?.pre);
+      }
+    return out;
   }
 
   /** Lattice edges carrying ways within FIELD_REACH of a chunk (its field parcels' blocks), as their two vertices. */

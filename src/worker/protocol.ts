@@ -1,4 +1,5 @@
 import type { DemPatch, DemResult } from '../gen/dem';
+import type { Fields } from '../gen/fields';
 import type { HydroResult, HydroWindow, PreResult } from '../gen/hydro';
 import type { MotorwayPiece } from '../gen/motorway';
 import type { PoiPatch } from '../gen/poi';
@@ -30,6 +31,8 @@ export type TaskRequest =
       poi?: PoiPatch;
       /** Lattice edges carrying ways near the chunk ([ax, ay, bx, by] each). */
       edges: number[][];
+      /** Its field parcels as an earlier render laid them out from the same inputs, if any. */
+      fields?: Fields;
       streams: Float32Array;
       pxSize: number;
       dpr: number;
@@ -43,7 +46,8 @@ export type TaskResult =
   | { kind: 'roads'; result: SegmentPath[]; ms: number }
   | { kind: 'plan'; result: TownPlan; ms: number }
   | { kind: 'dem'; result: DemResult; ms: number }
-  | { kind: 'render'; bitmap: ImageBitmap; ms: number };
+  /** `fields`: the field parcels laid out, if not given (kept for the next render). */
+  | { kind: 'render'; bitmap: ImageBitmap; fields?: Fields; ms: number };
 
 export type TaskKind = TaskRequest['kind'];
 

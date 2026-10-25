@@ -202,14 +202,68 @@ export function vertexPos(v: number): [number, number] {
   return [(i + (j & 1) * 0.5) * LATTICE + r * Math.cos(a), j * ROW + r * Math.sin(a)];
 }
 
+/**
+ * Vertex positions and neighbour lists by blocks of VB × VB vertices, kept per worker
+ * (they depend on no seed; pruned with the net caches). The neighbour searches look up
+ * ~110 positions per vertex, and a Map of a million lists was slow to search.
+ */
+const VB = 32;
+interface VertexBlock {
+  /** Positions [x, y] of vertex (bi·VB + p, bj·VB + q) at 2·(q·VB + p). */
+  pos: Float64Array;
+  /** Neighbour lists (see `neighbours`), as they are worked out. */
+  nbs: (number[] | undefined)[];
+}
+const vblocks = new Map<number, VertexBlock>();
+let lastBlockKey = NaN;
+let lastBlock: VertexBlock | undefined;
+/** Blocks kept at most (all are dropped beyond it). */
+const VBLOCKS_MAX = 2000;
+function vertexBlock(bi: number, bj: number): VertexBlock {
+  const key = (bi + 65536) * 131072 + bj + 65536;
+  if (key === lastBlockKey) return lastBlock!;
+  let b = vblocks.get(key);
+  if (!b) {
+    if (vblocks.size >= VBLOCKS_MAX) vblocks.clear();
+    b = { pos: new Float64Array(2 * VB * VB), nbs: new Array(VB * VB) };
+    for (let q = 0; q < VB; q++)
+      for (let p = 0; p < VB; p++) {
+        const [x, y] = vertexPos(pack(bi * VB + p, bj * VB + q));
+        b.pos[2 * (q * VB + p)] = x;
+        b.pos[2 * (q * VB + p) + 1] = y;
+      }
+    vblocks.set(key, b);
+  }
+  lastBlockKey = key;
+  lastBlock = b;
+  return b;
+}
+/** Drops the vertex blocks more than `keep` from a rectangle. */
+function pruneVertexBlocks(x0: number, y0: number, x1: number, y1: number, keep: number): void {
+  for (const key of vblocks.keys()) {
+    const bi = Math.floor(key / 131072) - 65536;
+    const bj = (key % 131072) - 65536;
+    const bx0 = bi * VB * LATTICE;
+    const by0 = bj * VB * ROW;
+    if (bx0 + VB * LATTICE < x0 - keep || bx0 > x1 + keep || by0 + VB * ROW < y0 - keep || by0 > y1 + keep) vblocks.delete(key);
+  }
+  lastBlockKey = NaN;
+  lastBlock = undefined;
+}
+
 /** Calls fn for every vertex within r of (x, y), with its position. */
 function forVerticesNear(x: number, y: number, r: number, fn: (v: number, px: number, py: number) => void): void {
   for (let j = Math.floor((y - r - JITTER) / ROW); j <= Math.ceil((y + r + JITTER) / ROW); j++) {
     const s = (j & 1) * 0.5;
+    const bj = Math.floor(j / VB);
+    const q = j - bj * VB;
     for (let i = Math.floor((x - r - JITTER) / LATTICE - s); i <= Math.ceil((x + r + JITTER) / LATTICE - s); i++) {
-      const v = pack(i, j);
-      const [px, py] = vertexPos(v);
-      if ((px - x) ** 2 + (py - y) ** 2 <= r * r) fn(v, px, py);
+      const bi = Math.floor(i / VB);
+      const o = 2 * (q * VB + i - bi * VB);
+      const pos = vertexBlock(bi, bj).pos;
+      const px = pos[o];
+      const py = pos[o + 1];
+      if ((px - x) ** 2 + (py - y) ** 2 <= r * r) fn(pack(i, j), px, py);
     }
   }
 }
@@ -246,7 +300,6 @@ function delaunayEdge(xs: number[], ys: number[], ia: number, ib: number): boole
 
 /** Most neighbours a vertex has (plus one: search states use the last slot for "no way in"). */
 const DEG = 16;
-const nbCache = new Map<number, number[]>();
 /**
  * The vertex's neighbours, counterclockwise from −x: each two in a row (and the last
  * and the first) make a triangle with it. Its Delaunay edges, no longer than MAX_EDGE. A Delaunay
@@ -255,9 +308,16 @@ const nbCache = new Map<number, number[]>();
  * decide alike from either end.
  */
 function neighbours(v: number): number[] {
-  let out = nbCache.get(v);
+  const vi_ = vi(v);
+  const vj_ = vj(v);
+  const bi = Math.floor(vi_ / VB);
+  const bj = Math.floor(vj_ / VB);
+  const block = vertexBlock(bi, bj);
+  const slot = (vj_ - bj * VB) * VB + vi_ - bi * VB;
+  let out = block.nbs[slot];
   if (out) return out;
-  const [x, y] = vertexPos(v);
+  const x = block.pos[2 * slot];
+  const y = block.pos[2 * slot + 1];
   const ids: number[] = [];
   const xs: number[] = [];
   const ys: number[] = [];
@@ -273,14 +333,16 @@ function neighbours(v: number): number[] {
       found.push([Math.atan2(ys[k] - y, xs[k] - x), ids[k]]);
   out = found.sort((a, b) => a[0] - b[0]).map((f) => f[1]);
   if (out.length >= DEG) throw new Error(`lattice vertex with ${out.length} neighbours`);
-  if (nbCache.size > NET_CACHE_MAX) nbCache.clear();
-  nbCache.set(v, out);
+  // (Looked up again: working it out may have dropped and made the block anew.)
+  vertexBlock(bi, bj).nbs[slot] = out;
   return out;
 }
 
 /**
  * Local indices for the vertices (i, j) of a box (vi0, vj0, ni × nj) in a search, and
- * each one's neighbours as local indices (−1 outside the box), worked out once.
+ * each one's neighbours as local indices (−1 outside the box), worked out once: vertex
+ * l's are nb[l·DEG …], nbOf(l) of them; rev[l·DEG + d] is the slot l has among its
+ * d-th neighbour's own (−1 if none), once revOf(l) has run.
  */
 function localIndex(vi0: number, vj0: number, ni: number, nj: number) {
   const loc = (v: number) => {
@@ -289,17 +351,34 @@ function localIndex(vi0: number, vj0: number, ni: number, nj: number) {
     return p < 0 || q < 0 || p >= ni || q >= nj ? -1 : q * ni + p;
   };
   const glob = (l: number) => pack((l % ni) + vi0, Math.floor(l / ni) + vj0);
-  const nbs: (Int32Array | undefined)[] = [];
-  const nbOf = (l: number): Int32Array => {
-    let a = nbs[l];
-    if (!a) {
+  const N = ni * nj;
+  const deg = new Int8Array(N).fill(-1); // −1: not worked out yet
+  const nb = new Int32Array(N * DEG);
+  const rev = new Int32Array(N * DEG);
+  const revDone = new Uint8Array(N);
+  const nbOf = (l: number): number => {
+    if (deg[l] < 0) {
       const ws = neighbours(glob(l));
-      a = nbs[l] = new Int32Array(ws.length);
-      for (let k = 0; k < ws.length; k++) a[k] = loc(ws[k]);
+      for (let k = 0; k < ws.length; k++) nb[l * DEG + k] = loc(ws[k]);
+      deg[l] = ws.length;
     }
-    return a;
+    return deg[l];
   };
-  return { loc, glob, nbOf };
+  const slotOf = (w: number, l: number): number => {
+    const n = nbOf(w);
+    for (let k = 0; k < n; k++) if (nb[w * DEG + k] === l) return k;
+    return -1;
+  };
+  const revOf = (l: number): void => {
+    if (revDone[l]) return;
+    const n = nbOf(l);
+    for (let d = 0; d < n; d++) {
+      const w = nb[l * DEG + d];
+      rev[l * DEG + d] = w < 0 ? -1 : slotOf(w, l);
+    }
+    revDone[l] = 1;
+  };
+  return { loc, glob, nbOf, revOf, nb, rev };
 }
 
 /** Nearest vertex to (x, y): within EMPTY_R, as every point has one. */
@@ -364,6 +443,8 @@ function pruneNetCaches(x0: number, y0: number, x1: number, y1: number): void {
   for (const v of c.vertex.keys()) if (far(v)) c.vertex.delete(v);
   for (const k of c.cost.keys()) if (far(Math.floor(Math.floor(k / 5) / DIRS))) c.cost.delete(k);
   for (const k of c.terrain.keys()) if (far(Math.floor(k / DIRS))) c.terrain.delete(k);
+  for (const v of c.motorway.keys()) if (far(v)) c.motorway.delete(v);
+  pruneVertexBlocks(x0, y0, x1, y1, NET_KEEP);
 }
 function netCaches(): typeof caches {
   const e = coarseEpochNow();
@@ -649,7 +730,7 @@ export function latticeCell(
     const ni = Math.ceil((mx + R) / LATTICE) + 2 - vi0 + 1;
     const nj = Math.ceil((my + R) / ROW) + 2 - vj0 + 1;
     const N = ni * nj;
-    const { loc, glob, nbOf } = localIndex(vi0, vj0, ni, nj);
+    const { loc, glob, nbOf, revOf, nb, rev } = localIndex(vi0, vj0, ni, nj);
     const px = new Float64Array(N).fill(NaN);
     const py = new Float64Array(N);
     const inside = new Int8Array(N); // 0 unknown, 1 in, 2 out
@@ -687,11 +768,13 @@ export function latticeCell(
           goal = st;
           break;
         }
-        const nb = nbOf(l);
-        const lf = slot === DEG - 1 ? -1 : nb[slot];
+        const n = nbOf(l);
+        revOf(l);
+        const base = l * DEG;
+        const lf = slot === DEG - 1 ? -1 : nb[base + slot];
         at(l);
         const c0 = cost[st];
-        // The incoming edge, for turn costs.
+        // The incoming edge, for turn costs (its length is the edge l–lf's, as cached).
         let ux = 0;
         let uy = 0;
         let lenIn = 0;
@@ -699,10 +782,11 @@ export function latticeCell(
           at(lf);
           ux = px[l] - px[lf];
           uy = py[l] - py[lf];
-          lenIn = Math.hypot(ux, uy);
+          lenIn = len[l * DEG + slot];
+          if (lenIn < 0) lenIn = len[l * DEG + slot] = Math.hypot(ux, uy);
         }
-        for (let dd = 0; dd < nb.length; dd++) {
-          const lw = nb[dd];
+        for (let dd = 0; dd < n; dd++) {
+          const lw = nb[base + dd];
           if (lw < 0 || lw === lf) continue;
           if (inside[lw] === 0) {
             at(lw);
@@ -720,7 +804,7 @@ export function latticeCell(
             const cos = (ux * wx + uy * wy) / (lenIn * lenOut);
             c += cos < SHARP_COS ? SHARP_TURN : TURN_COST * (1 - cos);
           }
-          const ns = lw * DEG + nbOf(lw).indexOf(l);
+          const ns = lw * DEG + rev[base + dd];
           if (c >= cost[ns]) continue;
           cost[ns] = c;
           prev[ns] = st;
@@ -820,7 +904,7 @@ export function latticeCell(
     const vj1 = Math.ceil((y1 + m + JITTER) / ROW) + 2;
     const ni = vi1 - vi0 + 1;
     const nj = vj1 - vj0 + 1;
-    const { loc, glob, nbOf } = localIndex(vi0, vj0, ni, nj);
+    const { loc, glob, nbOf, revOf, nb, rev } = localIndex(vi0, vj0, ni, nj);
     const cost = new Float64Array(ni * nj * DEG).fill(Infinity);
     const parent = new Int32Array(ni * nj * DEG).fill(-1);
     const done = new Uint8Array(ni * nj * DEG);
@@ -868,10 +952,12 @@ export function latticeCell(
       }
       const c0 = cost[st];
       // The vertex this state came from (local), for turn costs.
-      const nb = nbOf(l);
-      const lf = slot === DEG - 1 ? -1 : nb[slot];
+      const n = nbOf(l);
+      revOf(l);
+      const base = l * DEG;
+      const lf = slot === DEG - 1 ? -1 : nb[base + slot];
       at(l);
-      // The incoming edge, for turn costs.
+      // The incoming edge, for turn costs (its length is the edge l–lf's, as cached).
       let ux = 0;
       let uy = 0;
       let lenIn = 0;
@@ -879,10 +965,11 @@ export function latticeCell(
         at(lf);
         ux = px[l] - px[lf];
         uy = py[l] - py[lf];
-        lenIn = Math.hypot(ux, uy);
+        lenIn = len[l * DEG + slot];
+        if (lenIn < 0) lenIn = len[l * DEG + slot] = Math.hypot(ux, uy);
       }
-      for (let d = 0; d < nb.length; d++) {
-        const lw = nb[d];
+      for (let d = 0; d < n; d++) {
+        const lw = nb[base + d];
         if (lw < 0 || lw === lf) continue;
         if (inside[lw] === 0) {
           at(lw);
@@ -901,7 +988,7 @@ export function latticeCell(
           c += cos < SHARP_COS ? SHARP_TURN : TURN_COST * (1 - cos);
         }
         // Entered from l: l's slot among lw's neighbours.
-        const ns = lw * DEG + nbOf(lw).indexOf(l);
+        const ns = lw * DEG + rev[base + d];
         if (c > reach || c >= cost[ns]) continue;
         cost[ns] = c;
         parent[ns] = st;
