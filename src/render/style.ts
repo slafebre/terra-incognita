@@ -50,7 +50,7 @@ export const STYLE = {
      * line down the middle; at its true width (MW_WIDTH), at least minPx on screen (CSS px).
      * Interchange ramps: single, cased, in the same colour (MW_RAMP_WIDTH, at least rampMinPx).
      */
-    motorway: { fill: 'rgb(214, 44, 84)', median: 'rgb(70, 58, 52)', medianWidth: 0.7, minPx: 5, rampMinPx: 1.8 },
+    motorway: { fill: 'rgb(214, 44, 84)', median: 'rgb(70, 58, 52)', medianWidth: 0.7, minPx: 5, rampMinPx: 2.2 },
     /** Bridges: parapet lines (CSS px) a gap away from the way's edge. */
     bridge: { color: 'rgb(40, 34, 30)', deck: 'rgb(255, 255, 255)', gap: 0.8, line: 0.7 },
   },

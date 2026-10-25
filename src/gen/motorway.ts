@@ -28,8 +28,8 @@ import type { Terrain } from './terrain';
 export const MW_CELL = 4096;
 /** Width of the dual carriageway (m), and how far (m) from its centre line other things keep. */
 export const MW_WIDTH = 24;
-/** Width of an interchange's ramps and of the lanes into a terminus's roundabout (m). */
-export const MW_RAMP_WIDTH = 6;
+/** Width of an interchange's ramps (m). */
+export const MW_RAMP_WIDTH = 8;
 /** Streets, built-up land and farmsteads: the band either side counts as water (no street, no building, no junction on a bridge). */
 export const MW_PLAN_CLEAR = MW_WIDTH / 2 + 12;
 /** Building footprints. */
