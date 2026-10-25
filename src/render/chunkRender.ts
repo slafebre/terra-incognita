@@ -10,7 +10,7 @@ import { cellCoverage, drawCoverSymbols, FILLS } from './landcover';
 import { drawBuildings } from './buildings';
 import { clearUnderBuiltUp, drawChurches, drawRoads } from './roads';
 import { lineDistance, MW_VERGE } from '../gen/motorway';
-import { classifyMotorways, surfaceLines } from './motorway';
+import { classifyMotorways, MW_LEVEL, runsOf } from './motorway';
 import { drawPois } from './symbols';
 import { drawFields } from './fields';
 import { coverAt } from './landcover';
@@ -87,10 +87,11 @@ export function farmlandTests(cx: number, cy: number, cover: Int8Array, water: F
 export const riverWidth = (A: number) => 1.1 * Math.pow(A, 0.55);
 
 export function renderChunk({ cx, cy, dem, cover, water, streams, roads, motorways: lines, motorwayZ, plans, poi, edges, pxSize, dpr }: RenderInput): OffscreenCanvas {
-  // Motorways against the ground (viaducts, tunnels, earthworks); what lies above it
-  // clears the land under it and takes ways over it.
+  // Motorways against the ground (viaducts, tunnels, earthworks); where they run level
+  // they clear the woods and fields beside them (under a viaduct and over a tunnel the
+  // land runs on).
   const mws = classifyMotorways(lines, motorwayZ, poi);
-  const motorways = surfaceLines(mws);
+  const motorways = mws.flatMap((m) => runsOf(m, (c) => c === MW_LEVEL));
   const canvas = new OffscreenCanvas(pxSize, pxSize);
   const ctx = canvas.getContext('2d')!;
   const pxPerM = pxSize / CHUNK;
