@@ -110,9 +110,9 @@ export function drawChurches(ctx: Ctx, plans: TownPlan[], cx: number, cy: number
 /**
  * Roads: each fine segment is smoothed with its endpoints fixed (they're shared
  * waypoints), so segments drawn by neighbouring chunks meet exactly. All casings
- * go first — streets, interchange ramps, roads, motorways — then the fills in the same
- * order, so junctions merge cleanly (a ramp into the road it leaves and the motorway it
- * joins). Where a way crosses water (`water`: the chunk's lake depth per DEM vertex) it
+ * go first — streets, C roads, interchange ramps, D and N roads, motorways — then the fills in the same
+ * order, so junctions merge cleanly (a ramp into the main road it leaves and the motorway
+ * it joins; minor roads go under ramps, as under the motorway). Where a way crosses water (`water`: the chunk's lake depth per DEM vertex) it
  * is drawn again on top as a bridge, with parapets either side; so is a way over a
  * motorway (experimental).
  */
@@ -200,9 +200,11 @@ export function drawRoads(
     ctx.lineWidth = streetWidth(cls) + casing;
     ctx.stroke(streetPaths[cls]);
   }
+  ctx.lineWidth = width(ROAD_C) + casing;
+  ctx.stroke(paths[ROAD_C]);
   ctx.lineWidth = rampW + casing;
   ctx.stroke(ramps);
-  for (const cls of [ROAD_C, ROAD_D, ROAD_N]) {
+  for (const cls of [ROAD_D, ROAD_N]) {
     ctx.lineWidth = width(cls) + casing;
     ctx.stroke(paths[cls]);
   }
@@ -214,10 +216,14 @@ export function drawRoads(
     ctx.lineWidth = streetWidth(cls);
     ctx.stroke(streetPaths[cls]);
   }
+  ctx.strokeStyle = STYLE.roads.fill[ROAD_C];
+  ctx.lineWidth = width(ROAD_C);
+  ctx.stroke(paths[ROAD_C]);
+  // Ramps over minor roads (they belong to the motorway), under the main roads they join.
   ctx.strokeStyle = mw.fill;
   ctx.lineWidth = rampW;
   ctx.stroke(ramps);
-  for (const cls of [ROAD_C, ROAD_D, ROAD_N]) {
+  for (const cls of [ROAD_D, ROAD_N]) {
     ctx.strokeStyle = STYLE.roads.fill[cls];
     ctx.lineWidth = width(cls);
     ctx.stroke(paths[cls]);
