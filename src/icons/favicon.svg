@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="32" height="32">
+  <!-- The map's triangulation-point symbol on its paper. favicon-32.png and apple-touch-icon.png are rendered from this design. -->
+  <rect width="32" height="32" rx="5" fill="#fcfaf3"/>
+  <path d="M16 4.5L28 25.5H4Z" fill="none" stroke="#2d2826" stroke-width="2.6"/>
+  <circle cx="16" cy="18.5" r="2.8" fill="#2d2826"/>
+</svg>
