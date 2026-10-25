@@ -1198,9 +1198,15 @@ export function diamondRamps(road: ArrayLike<number>, lines: ArrayLike<number>[]
 /** How far beyond its end a motorway looks for its terminus (m): MW_END_RUN (lattice.ts) and a vertex's jitter. */
 export const MW_END_REACH = 300;
 
-/** Where a motorway runs into a roundabout, its carriageways part this far (m) before the ring, into lanes meeting it MW_END_SPREAD (rad) either side. */
+/**
+ * Where a motorway runs into a roundabout, its carriageways part this far (m) before the
+ * ring, into lanes meeting it MW_END_SPREAD (rad) either side, arriving MW_END_FLARE
+ * (rad) off the line to the ring's centre, away from the way in: they flare round onto
+ * the ring (aimed at its centre, they met it square on).
+ */
 const MW_END_SPLIT = 50;
 const MW_END_SPREAD = (40 * Math.PI) / 180;
+const MW_END_FLARE = (60 * Math.PI) / 180;
 
 /**
  * A piece's centre line, run on where the motorway ends (endA, endB) to its terminus as
@@ -1287,11 +1293,14 @@ export function motorwayEnd(
       const ang = Math.atan2(-ay, -ax) - side * MW_END_SPREAD;
       const rx = cx + rad * Math.cos(ang);
       const ry = cy + rad * Math.sin(ang);
-      const hx = cx - rx;
-      const hy = cy - ry;
-      const hl = Math.hypot(hx, hy) || 1;
+      // Arriving between the ring's centre and its tangent leading away from the way in.
+      const inx = -Math.cos(ang);
+      const iny = -Math.sin(ang);
+      const away = Math.sign(-iny * (-ay * side) + inx * (ax * side)) || 1;
+      const hx = Math.cos(MW_END_FLARE) * inx - away * Math.sin(MW_END_FLARE) * iny;
+      const hy = Math.cos(MW_END_FLARE) * iny + away * Math.sin(MW_END_FLARE) * inx;
       const Ls = Math.hypot(rx - lx, ry - ly);
-      lanes.push([lx, ly, ...cubic(lx, ly, lx + (ax * Ls) / 3, ly + (ay * Ls) / 3, rx - ((hx / hl) * Ls) / 3, ry - ((hy / hl) * Ls) / 3, rx, ry, IC_STEP / 2)]);
+      lanes.push([lx, ly, ...cubic(lx, ly, lx + (ax * Ls) / 2, ly + (ay * Ls) / 2, rx - (hx * Ls) / 2, ry - (hy * Ls) / 2, rx, ry, IC_STEP / 2)]);
     }
     return line;
   };
