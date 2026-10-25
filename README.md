@@ -1,6 +1,6 @@
 # Terra Incognita
 
-**An endless topographic map that makes itself up as you go.**
+**An endless topographic map that makes itself up as you go.** Explore it at **[terraincognitamap.com](https://terraincognitamap.com)**.
 
 Drag the map in any direction and new country appears: hills and valleys, rivers and lakes, woods, fields and hedges, villages with every house drawn, and the roads, tracks and footpaths between them. It's drawn at 1:10,000 in the style of the French IGN Top25 hiking maps.
 
@@ -23,7 +23,9 @@ The landscape changes character every 8–20 km, from lowland through hills and 
 
 ## Try it
 
-You'll need [Node.js](https://nodejs.org/).
+Open **[terraincognitamap.com](https://terraincognitamap.com)** in any modern browser, on a computer or a phone.
+
+To run it yourself, you'll need [Node.js](https://nodejs.org/):
 
 ```
 npm install
@@ -49,7 +51,7 @@ Add these to the address to choose what you see:
 | `?legend` | Opens with the legend out. |
 | `?lang=fr` | Sets the legend language (`en`, `nl`, `fr` or `de`). |
 
-Without `?at` you start somewhere random. The village above is `?seed=7&R=0.1&at=735390,766960&z=2`, and the alpine valley is `?seed=7&R=0.95&at=979600,-223880`.
+Without `?at` you start somewhere random. Visit [the village above](https://terraincognitamap.com/?seed=7&R=0.1&at=735390,766960&z=2) or [the alpine valley](https://terraincognitamap.com/?seed=7&R=0.95&at=979600,-223880).
 
 ## How it works
 
