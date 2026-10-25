@@ -1,10 +1,10 @@
 import { hash1, hash3, rng } from '../lib/hash';
 import { lerp, smoothstep } from '../lib/noise';
-import { placeBuildings, segQuadDist, type Way } from './buildings';
+import { placeBuildings, segPointDist, segQuadDist, type Way } from './buildings';
 import { NODE } from './hydro';
 import { RESERVOIR, TOWER, type Poi } from './poi';
 import { nearestVertex, vertexPos } from './lattice';
-import { ROAD_C, ROAD_P, ROAD_T, type RoadPatch, type SegmentPath } from './roads';
+import { outsideCircle, ROAD_C, ROAD_P, ROAD_T, ringDisc, ringLine, type RoadPatch, type SegmentPath } from './roads';
 import { HAMLET, TOWN, VILLAGE, type Rank, type Site } from './settle';
 
 /**
@@ -178,6 +178,11 @@ const IND_LOOP_CHANCE = 0.5;
 const IND_LOOP = 9;
 /** Chance of a second estate. */
 const IND_SECOND = 0.3;
+/** Chance of a roundabout at an estate's gate (where the road is level and no other way meets it there), and its radius (m): small, an access road's. */
+const IND_RING = 0.6;
+const IND_RING_R = [10, 12];
+/** No streets leave a road this close to a roundabout's ring (m). */
+const RING_CLEAR = 25;
 /** An estate's land: this far either side of its streets, and of its main road along its front (IND_ROAD_FRONT m either way from its junction; m). */
 const IND_FRONT = 45;
 const IND_ROAD_FRONT = 110;
@@ -209,6 +214,8 @@ interface Line {
   pruned?: boolean;
   /** A street of an industrial estate. */
   ind?: boolean;
+  /** A roundabout's ring. */
+  ring?: boolean;
 }
 
 /** Debugging: why branches ended or were refused, summed over plans. */
@@ -390,6 +397,22 @@ export function planTown({ site, roads, patch: p }: PlanInput): TownPlan {
     for (let k = 0; k + 1 < xs.length; k++) indexPiece(li, k);
     return li;
   };
+  /** Roundabouts: their centres and radii. Streets meet their rings, but don't leave a road beside one. */
+  const rings: { x: number; y: number; r: number }[] = [];
+  /** Adds a roundabout's ring (closed polyline xy) as a road line of class cls. */
+  const addRing = (xy: ArrayLike<number>, cls: number) => {
+    const n = xy.length / 2 - 1;
+    const [x, y, r] = ringDisc(xy);
+    rings.push({ x, y, r });
+    const xs: number[] = [];
+    const ys: number[] = [];
+    for (let i = 0; i <= n; i++) {
+      xs.push(xy[2 * i]);
+      ys.push(xy[2 * i + 1]);
+    }
+    lines[addLine(xs, ys, true, 0, null, cls)].ring = true;
+  };
+  const nearRing = (x: number, y: number, m: number) => rings.some((g) => Math.hypot(x - g.x, y - g.y) < g.r + m);
   /** Pieces near (x, y) within r: [line, piece]. */
   const piecesNear = (x: number, y: number, r: number): [number, number][] => {
     const out: [number, number][] = [];
@@ -573,6 +596,7 @@ export function planTown({ site, roads, patch: p }: PlanInput): TownPlan {
     const ends = new Map<string, number[]>();
     const ek = (r: SegmentPath, end: number) => `${r.xy[end]},${r.xy[end + 1]}`;
     net.forEach((r, i) => {
+      if (r.ring) return;
       for (const end of [0, r.xy.length - 2]) {
         const k = ek(r, end);
         if (!ends.has(k)) ends.set(k, []);
@@ -593,6 +617,10 @@ export function planTown({ site, roads, patch: p }: PlanInput): TownPlan {
     net.forEach((r, i) => {
       if (used.has(i)) return;
       used.add(i);
+      if (r.ring) {
+        addRing(r.xy, r.cls);
+        return;
+      }
       let chain = pts(r, false);
       // Extend forwards from the end, then backwards from the start.
       for (const back of [false, true]) {
@@ -655,7 +683,7 @@ export function planTown({ site, roads, patch: p }: PlanInput): TownPlan {
   /** Branch points along line li, on both sides, within the settlement. */
   const offer = (li: number) => {
     const L = lines[li];
-    if (L.ind) return;
+    if (L.ind || L.ring) return;
     const total = L.s[L.s.length - 1];
     for (const side of [1, -1]) {
       // Spacing comes from the zone at each point.
@@ -663,7 +691,7 @@ export function planTown({ site, roads, patch: p }: PlanInput): TownPlan {
       while (s < total - 15) {
         const { x, y } = pointAt(li, s);
         const d = zoneDist(x, y, L.road);
-        const st = Math.hypot(x - cx, y - cy) < hardReach ? styleAt(d) : null;
+        const st = Math.hypot(x - cx, y - cy) < hardReach && !nearRing(x, y, RING_CLEAR) ? styleAt(d) : null;
         if (!st) {
           s += 30;
           continue;
@@ -693,6 +721,8 @@ export function planTown({ site, roads, patch: p }: PlanInput): TownPlan {
       const L = Math.hypot(xs[i] - xs[i - 1], ys[i] - ys[i - 1]);
       if (Math.abs(zAt(xs[i], ys[i]) - zAt(xs[i - 1], ys[i - 1])) > HARD * grade * L) steep++;
       if (crossing(xs[i - 1], ys[i - 1], xs[i], ys[i], nearEnd)) return no('link: crosses'), false;
+      // Not into a roundabout, not even at its ends.
+      if (nearRing(xs[i], ys[i], 2) || crossing(xs[i - 1], ys[i - 1], xs[i], ys[i], (li) => !lines[li].ring)) return no('link: roundabout'), false;
       if (i < n - 1 && nearest(xs[i], ys[i], GAP, nearEnd)) return no('link: alongside'), false;
       if (i < n - 1 && inEstate(xs[i], ys[i], IND_STREET_KEEP - IND_FRONT)) return no('link: estate'), false;
     }
@@ -830,6 +860,12 @@ export function planTown({ site, roads, patch: p }: PlanInput): TownPlan {
   };
   /** The estates' main road fronts: the road's points, and the side of it the estate lies on (+1: left of its direction). */
   const roadFronts: { xs: number[]; ys: number[]; side: number }[] = [];
+  /** The estates' gates: where their access streets (lines) leave the road, of class cls. */
+  const gates: { x: number; y: number; road: number; access: number; cls: number }[] = [];
+  /** …those given a roundabout (radius r, ring xy). */
+  const gateRings: { x: number; y: number; road: number; access: number; cls: number; r: number; xy: Float32Array }[] = [];
+  /** Roundabouts draw on a stream of their own: the rest of the plan is as without them. */
+  const ringRand = rng(hash1(seed ^ 0x52b0));
   // How far each place is from the estates' land (to IND_FRONT beyond it), on a
   // grid of IND_CELL m over the patch: their streets, and their road fronts on their side.
   const efW = Math.ceil(((w - 1) * NODE) / IND_CELL) + 1;
@@ -878,7 +914,10 @@ export function planTown({ site, roads, patch: p }: PlanInput): TownPlan {
     const xs = [x0];
     const ys = [y0];
     // Pieces near its start are its own junction (wide enough that the street it leaves isn't "alongside").
-    const home = (_li: number, _s: number, x: number, y: number) => Math.hypot(x - x0, y - y0) < IND_GAP + 20;
+    // Near its start, its parent is no obstacle; other streets only at the junction
+    // itself, where it may cross nothing, not even its parent.
+    const home = (li: number, _s: number, x: number, y: number) => Math.hypot(x - x0, y - y0) < (li === parent ? IND_GAP + 20 : 2);
+    const junction = (_li: number, _s: number, x: number, y: number) => Math.hypot(x - x0, y - y0) < 2;
     let a = a0;
     let base = a0;
     const drift = (rand() * 2 - 1) * IND_DRIFT;
@@ -915,14 +954,15 @@ export function planTown({ site, roads, patch: p }: PlanInput): TownPlan {
       const dc = Math.hypot(nx - cx, ny - cy);
       if (Math.hypot(nx - ex, ny - ey) > IND_R || dc > hardReach - IND_KEEP || dc < indInner) break;
       const hit =
-        crossing(x, y, nx, ny, home) ??
+        crossing(x, y, nx, ny, junction) ??
         (() => {
           const n = nearest(nx, ny, SNAP, home);
-          return n && Math.cos(Math.atan2(n.y - y, n.x - x) - a) > 0.35 ? n : null;
+          // On the way there it may cross another street first: it meets that one.
+          return n && Math.cos(Math.atan2(n.y - y, n.x - x) - a) > 0.35 ? (crossing(x, y, n.x, n.y, (li, s, px, py) => li === n.li || junction(li, s, px, py)) ?? n) : null;
         })();
       if (hit) {
-        // Not onto tracks or paths: a dead end short of them.
-        if (lines[hit.li].road && lines[hit.li].cls > ROAD_C) break;
+        // Not onto tracks or paths, nor where it crosses water: a dead end short of them.
+        if ((lines[hit.li].road && lines[hit.li].cls > ROAD_C) || wet(hit.x, hit.y)) break;
         const [hx, hy] = dirAt(hit.li, hit.k);
         const ang = Math.abs(angDiff(Math.atan2(hit.y - y, hit.x - x), Math.atan2(hy, hx)));
         if (Math.min(ang, Math.PI - ang) < MIN_ANGLE) return no('estate: angle'), null;
@@ -982,7 +1022,9 @@ export function planTown({ site, roads, patch: p }: PlanInput): TownPlan {
     if (!acc || acc.len < 80) return no('estate: access'), false;
     const budget = lerp(IND_BUDGET[0], IND_BUDGET[1], rand());
     let built = acc.len;
-    const queue: { li: number; gen: number }[] = [{ li: addEstateStreet(acc.xs, acc.ys, acc.target, acc.len), gen: 1 }];
+    const access = addEstateStreet(acc.xs, acc.ys, acc.target, acc.len);
+    gates.push({ x: P.x, y: P.y, road: li, access, cls: lines[li].cls });
+    const queue: { li: number; gen: number }[] = [{ li: access, gen: 1 }];
     // Its road front: the road's points within IND_ROAD_FRONT of the junction, while the land beside them is flat.
     {
       const L = lines[li];
@@ -1056,12 +1098,12 @@ export function planTown({ site, roads, patch: p }: PlanInput): TownPlan {
       const cands: { li: number; s: number; side: number; score: number }[] = [];
       for (let li = 0; li < lines.length; li++) {
         const L = lines[li];
-        if (!L.road || L.cls > ROAD_C) continue;
+        if (!L.road || L.cls > ROAD_C || L.ring) continue;
         const total = L.s[L.s.length - 1];
         for (let s = 40; s < total - 40; s += 30) {
           const P = pointAt(li, s);
           const d = Math.hypot(P.x - cx, P.y - cy);
-          if (d < 0.8 * core || d > reach) continue;
+          if (d < 0.8 * core || d > reach || nearRing(P.x, P.y, 40)) continue;
           if (nearest(P.x, P.y, 40, (l2) => l2 === li)) continue; // its own junction alone on the road
           for (const side of [1, -1]) {
             const area = flatNear(li, s, side);
@@ -1077,6 +1119,36 @@ export function planTown({ site, roads, patch: p }: PlanInput): TownPlan {
       if (!grown) break;
       markEstates();
       no('ESTATE');
+    }
+    // A roundabout at a gate, now and then: where the road is dry and level there, no
+    // other street comes near and no other way ends within the ring (the network's
+    // segments keep their far ends).
+    for (const g of gates) {
+      if (ringRand() >= IND_RING) continue;
+      const r = lerp(IND_RING_R[0], IND_RING_R[1], ringRand());
+      let lo = Infinity;
+      let hi = -Infinity;
+      let ok = true;
+      for (let q = 0; q < 16 && ok; q++)
+        for (const f of [0.5, 1, (r + 5) / r]) {
+          const x = g.x + f * r * Math.cos((q * Math.PI) / 8);
+          const y = g.y + f * r * Math.sin((q * Math.PI) / 8);
+          if (wet(x, y) || areaAt(x, y) > STREAM_A) ok = false;
+          const z = zAt(x, y);
+          lo = Math.min(lo, z);
+          hi = Math.max(hi, z);
+        }
+      for (const q of net)
+        for (const i of [0, q.xy.length - 2]) if (Math.hypot(q.xy[i] - g.x, q.xy[i + 1] - g.y) < r + 5) ok = false;
+      if (nearest(g.x, g.y, r + 10, (li) => li === g.road || li === g.access)) ok = false;
+      if (!ok || hi - lo > 0.06 * 2 * (r + 5)) {
+        no('estate: no roundabout');
+        continue;
+      }
+      const xy = ringLine(g.x, g.y, r);
+      addRing(xy, g.cls);
+      gateRings.push({ ...g, r, xy });
+      no('ESTATE ROUNDABOUT');
     }
   }
 
@@ -1117,7 +1189,10 @@ export function planTown({ site, roads, patch: p }: PlanInput): TownPlan {
       continue;
     }
     // Pieces near the branch point don't count as obstacles: they're its own junction.
-    const home = (_li: number, _s: number, x: number, y: number) => Math.hypot(x - P.x, y - P.y) < 30;
+    // Leaving its parent, it may run beside it for a while; other streets only at the
+    // junction itself, where it may cross nothing, not even its parent.
+    const home = (li: number, _s: number, x: number, y: number) => Math.hypot(x - P.x, y - P.y) < (li === c.li ? 30 : 2);
+    const junction = (_li: number, _s: number, x: number, y: number) => Math.hypot(x - P.x, y - P.y) < 2;
     const other = (li: number) => li !== c.li;
     const [tx, ty] = dirAt(c.li, P.k);
     // Normal to the parent, on the candidate's side.
@@ -1213,13 +1288,19 @@ export function planTown({ site, roads, patch: p }: PlanInput): TownPlan {
       }
       // Running into the network: join where it crosses, or where it comes within reach ahead.
       const hit =
-        crossing(x, y, nx, ny, home) ??
+        crossing(x, y, nx, ny, junction) ??
         (() => {
           const n = nearest(nx, ny, SNAP, home);
           if (!n) return null;
           const ahead = Math.cos(Math.atan2(n.y - y, n.x - x) - a);
-          return ahead > 0.35 ? n : null;
+          // On the way there it may cross another street first: it meets that one.
+          return ahead > 0.35 ? (crossing(x, y, n.x, n.y, (li, s, px, py) => li === n.li || junction(li, s, px, py)) ?? n) : null;
         })();
+      // Not onto a street where it crosses water (a bridge): a dead end short of it.
+      if (hit && wet(hit.x, hit.y)) {
+        stop = 'water';
+        break;
+      }
       if (hit) {
         const [hx, hy] = dirAt(hit.li, hit.k);
         const inc = Math.atan2(hit.y - y, hit.x - x);
@@ -1325,8 +1406,25 @@ export function planTown({ site, roads, patch: p }: PlanInput): TownPlan {
         xy[2 * i] = L.xs[i];
         xy[2 * i + 1] = L.ys[i];
       }
-      return { cls: STREET, xy };
+      // An access street leaves from its gate's roundabout.
+      const g = gateRings.find((q) => lines[q.access] === L);
+      return { cls: STREET, xy: g ? Float32Array.from(outsideCircle(xy, g.x, g.y, g.r)[0]) : xy };
     });
+  // The roads through the gates' roundabouts stop at the ring; their pieces keep their keys.
+  gateRings.forEach((g, k) => {
+    net = net.flatMap((q) => {
+      if (q.ring || q.cls > ROAD_C) return [q];
+      let near = false;
+      for (let i = 2; i < q.xy.length && !near; i += 2) near = segPointDist(q.xy[i - 2], q.xy[i - 1], q.xy[i], q.xy[i + 1], g.x, g.y) < g.r;
+      if (!near) return [q];
+      const i = redrawn.indexOf(q);
+      if (i >= 0) redrawn.splice(i, 1);
+      const pieces = outsideCircle(q.xy, g.x, g.y, g.r).map((xy) => ({ key: q.key, cls: q.cls, xy: Float32Array.from(xy), micro: q.micro }));
+      redrawn.push(...pieces);
+      return pieces;
+    });
+    redrawn.push({ key: `${site.id}#rb${k}`, cls: g.cls as SegmentPath['cls'], xy: g.xy, ring: true });
+  });
   const upgraded: Street[] = [];
   // Built-up land: along every street, and along roads near streets or the core.
   const streetNear = (x: number, y: number) => nearest(x, y, 70, (li) => lines[li].road || !!lines[li].pruned || !!lines[li].ind);
@@ -1413,7 +1511,7 @@ export function planTown({ site, roads, patch: p }: PlanInput): TownPlan {
     fronts.push({ xy: xy.slice(), main: true, ind: true, order: -1 });
   }
   for (const L of lines) {
-    if (!L.road || (rank === HAMLET && L.cls > ROAD_C)) continue;
+    if (!L.road || L.ring || (rank === HAMLET && L.cls > ROAD_C)) continue;
     let run: number[] = [];
     const flush = () => {
       if (run.length >= 4) {
@@ -1451,6 +1549,8 @@ export function planTown({ site, roads, patch: p }: PlanInput): TownPlan {
       if (ind ? !inEstate(x, y, 0) || !flatAt(x, y) : inEstate(x, y, IND_KEEP)) return no('ground: estate'), false;
       if (wet(x, y)) return no('ground: lake'), false;
       if (areaAt(x, y) > STREAM_A) return no('ground: stream'), false;
+      // Not on a roundabout's island.
+      if (nearRing(x, y, 0)) return no('ground: roundabout'), false;
       if (r > extent - 5) return no('ground: extent'), false;
       if (rank !== HAMLET && r < CHURCH_CLEAR) return no('ground: church'), false;
       const g = Math.hypot(zAt(x + 4, y) - zAt(x - 4, y), zAt(x, y + 4) - zAt(x, y - 4)) / 8;
@@ -1476,7 +1576,7 @@ export function planTown({ site, roads, patch: p }: PlanInput): TownPlan {
         const x = (p.gx + i) * NODE;
         const y = (p.gy + j) * NODE;
         const d = Math.hypot(x - cx, y - cy);
-        if (d < r0 || d > r1 || wet(x, y) || areaAt(x, y) > STREAM_A || inEstate(x, y, IND_KEEP)) continue;
+        if (d < r0 || d > r1 || wet(x, y) || areaAt(x, y) > STREAM_A || inEstate(x, y, IND_KEEP) || nearRing(x, y, 10)) continue;
         cands.push({ x, y, z: p.zE[j * w + i] });
       }
     cands.sort((a, b) => b.z - a.z || a.x - b.x || a.y - b.y);
