@@ -1,7 +1,7 @@
 import { APRON, CELL, CHUNK, DEM_W } from '../lib/constants';
 import { COVER, COVER_SCALE } from '../gen/landcover';
 import { smoothPolyline } from '../lib/polyline';
-import { lineDistance, MW_VERGE, MW_WIDTH } from '../gen/motorway';
+import { lineDistance, MW_RAMP_WIDTH, MW_VERGE, MW_WIDTH } from '../gen/motorway';
 import { ROAD_C, ROAD_D, ROAD_N, ROAD_P, ROAD_T, type SegmentPath } from '../gen/roads';
 import { VILLAGE } from '../gen/settle';
 import { LANE, type Street, type TownPlan } from '../gen/town';
@@ -110,14 +110,17 @@ export function drawChurches(ctx: Ctx, plans: TownPlan[], cx: number, cy: number
 /**
  * Roads: each fine segment is smoothed with its endpoints fixed (they're shared
  * waypoints), so segments drawn by neighbouring chunks meet exactly. All casings
- * go first, then fills from minor to major, so junctions merge cleanly. Where a
- * way crosses water (`water`: the chunk's lake depth per DEM vertex) it is drawn
- * again on top as a bridge, with parapets either side.
+ * go first — streets, interchange ramps, roads, motorways — then the fills in the same
+ * order, so junctions merge cleanly (a ramp into the road it leaves and the motorway it
+ * joins). Where a way crosses water (`water`: the chunk's lake depth per DEM vertex) it
+ * is drawn again on top as a bridge, with parapets either side; so is a way over a
+ * motorway (experimental).
  */
 export function drawRoads(
   ctx: Ctx,
   roads: SegmentPath[],
   streets: Street[],
+  motorways: Float64Array[],
   cx: number,
   cy: number,
   pxPerM: number,
@@ -186,35 +189,66 @@ export function drawRoads(
   ctx.strokeStyle = STYLE.roads.track;
   ctx.lineWidth = width(ROAD_T);
   ctx.stroke(paths[ROAD_T]);
-  // Interchange ramps, under the roads they leave and the motorway they join.
-  const ramp = STYLE.roads.motorway;
-  const rampW = Math.max(ramp.rampM * pxPerM, ramp.rampMinPx * dpr);
-  ctx.strokeStyle = STYLE.roads.casing;
-  ctx.lineWidth = rampW + 2 * STYLE.roads.casingWidth * dpr;
-  ctx.stroke(ramps);
-  ctx.strokeStyle = ramp.fill;
-  ctx.lineWidth = rampW;
-  ctx.stroke(ramps);
+  const mw = STYLE.roads.motorway;
+  const rampW = Math.max(MW_RAMP_WIDTH * pxPerM, mw.rampMinPx * dpr);
+  const mwW = Math.max(MW_WIDTH * pxPerM, mw.minPx * dpr);
+  const casing = 2 * STYLE.roads.casingWidth * dpr;
+  const motorway = motorwayPaths(motorways, cx, cy, pxPerM, water);
+  // Casings.
   ctx.strokeStyle = STYLE.roads.casing;
   for (const cls of [LANE, 0]) {
-    ctx.lineWidth = streetWidth(cls) + 2 * STYLE.roads.casingWidth * dpr;
+    ctx.lineWidth = streetWidth(cls) + casing;
     ctx.stroke(streetPaths[cls]);
   }
+  ctx.lineWidth = rampW + casing;
+  ctx.stroke(ramps);
   for (const cls of [ROAD_C, ROAD_D, ROAD_N]) {
-    ctx.lineWidth = width(cls) + 2 * STYLE.roads.casingWidth * dpr;
+    ctx.lineWidth = width(cls) + casing;
     ctx.stroke(paths[cls]);
   }
+  ctx.lineWidth = mwW + casing;
+  ctx.stroke(motorway.path);
+  // Fills.
   ctx.strokeStyle = STYLE.roads.fill[ROAD_C];
   for (const cls of [LANE, 0]) {
     ctx.lineWidth = streetWidth(cls);
     ctx.stroke(streetPaths[cls]);
   }
+  ctx.strokeStyle = mw.fill;
+  ctx.lineWidth = rampW;
+  ctx.stroke(ramps);
   for (const cls of [ROAD_C, ROAD_D, ROAD_N]) {
     ctx.strokeStyle = STYLE.roads.fill[cls];
     ctx.lineWidth = width(cls);
     ctx.stroke(paths[cls]);
   }
+  ctx.strokeStyle = mw.fill;
+  ctx.lineWidth = mwW;
+  ctx.stroke(motorway.path);
+  ctx.strokeStyle = mw.median;
+  ctx.lineWidth = mw.medianWidth * dpr;
+  ctx.stroke(motorway.path);
+  // Bridges, on top: ways over water, motorways over water, then ways over motorways.
   drawBridges(ctx, bridges, pxPerM, dpr);
+  if (!motorways.length) return;
+  const { gap, line } = STYLE.roads.bridge;
+  ctx.lineCap = 'butt';
+  ctx.strokeStyle = STYLE.roads.bridge.color;
+  ctx.lineWidth = mwW + casing + 2 * (gap + line) * dpr;
+  ctx.stroke(motorway.bridges);
+  ctx.strokeStyle = STYLE.roads.bridge.deck;
+  ctx.lineWidth = mwW + casing + 2 * gap * dpr;
+  ctx.stroke(motorway.bridges);
+  ctx.strokeStyle = STYLE.roads.casing;
+  ctx.lineWidth = mwW + casing;
+  ctx.stroke(motorway.bridges);
+  ctx.strokeStyle = mw.fill;
+  ctx.lineWidth = mwW;
+  ctx.stroke(motorway.bridges);
+  ctx.strokeStyle = mw.median;
+  ctx.lineWidth = mw.medianWidth * dpr;
+  ctx.stroke(motorway.bridges);
+  drawBridges(ctx, overpasses(roads, motorways, cx, cy, pxPerM), pxPerM, dpr);
 }
 
 /** Bridges by class, on top: parapets, the gap between them, then the way itself again. */
@@ -247,24 +281,8 @@ function drawBridges(ctx: Ctx, bridges: Path2D[], pxPerM: number, dpr: number): 
   }
 }
 
-/**
- * Motorways (experimental): each centre line cased, filled, and split down the middle
- * by its central reservation; drawn over the other roads, which cross it on bridges
- * (drawn again on top where they pass over it). Over water they are bridges too, with
- * parapets as other roads have.
- */
-export function drawMotorways(
-  ctx: Ctx,
-  lines: Float64Array[],
-  roads: SegmentPath[],
-  cx: number,
-  cy: number,
-  pxPerM: number,
-  dpr: number,
-  water: Float32Array,
-): void {
-  if (!lines.length) return;
-  const m = STYLE.roads.motorway;
+/** Motorways' centre lines in chunk pixels, and the runs of them over water (as drawRoads' bridges). */
+function motorwayPaths(lines: Float64Array[], cx: number, cy: number, pxPerM: number, water: Float32Array): { path: Path2D; bridges: Path2D } {
   const path = new Path2D();
   const bridges = new Path2D();
   const ox = cx * CHUNK;
@@ -280,7 +298,7 @@ export function drawMotorways(
     }
     path.moveTo(xs[0], ys[0]);
     for (let i = 1; i < n; i++) path.lineTo(xs[i], ys[i]);
-    // Bridges: runs over water, one point past either shore (as drawRoads).
+    // Bridges: runs over water, one point past either shore.
     const wet: boolean[] = [];
     for (let i = 0; i < n; i++) {
       const gi = APRON + Math.round(xs[i] / pxPerM / CELL);
@@ -299,45 +317,19 @@ export function drawMotorways(
       i = e;
     }
   }
-  const W = Math.max(MW_WIDTH * pxPerM, m.minPx * dpr);
-  const casing = 2 * STYLE.roads.casingWidth * dpr;
-  const carriageway = () => {
-    ctx.strokeStyle = STYLE.roads.casing;
-    ctx.lineWidth = W + casing;
-    ctx.stroke(path);
-    ctx.strokeStyle = m.fill;
-    ctx.lineWidth = W;
-    ctx.stroke(path);
-    ctx.strokeStyle = m.median;
-    ctx.lineWidth = m.medianWidth * dpr;
-    ctx.stroke(path);
-  };
-  ctx.lineCap = 'round';
-  ctx.lineJoin = 'round';
-  carriageway();
-  // Bridges, on top: parapets and the gap between them, then the deck again.
-  const { gap, line } = STYLE.roads.bridge;
-  ctx.lineCap = 'butt';
-  ctx.strokeStyle = STYLE.roads.bridge.color;
-  ctx.lineWidth = W + casing + 2 * (gap + line) * dpr;
-  ctx.stroke(bridges);
-  ctx.strokeStyle = STYLE.roads.bridge.deck;
-  ctx.lineWidth = W + casing + 2 * gap * dpr;
-  ctx.stroke(bridges);
-  ctx.strokeStyle = STYLE.roads.casing;
-  ctx.lineWidth = W + casing;
-  ctx.stroke(bridges);
-  ctx.strokeStyle = m.fill;
-  ctx.lineWidth = W;
-  ctx.stroke(bridges);
-  ctx.strokeStyle = m.median;
-  ctx.lineWidth = m.medianWidth * dpr;
-  ctx.stroke(bridges);
-  // Ways over it: the runs of each within its half width (and a little), one point past
-  // either side, smoothed as drawRoads draws them.
+  return { path, bridges };
+}
+
+/**
+ * Ways over a motorway, by class: the runs of each within its half width (and a little),
+ * one point past either side, smoothed as drawRoads draws them (not the ramps).
+ */
+function overpasses(roads: SegmentPath[], lines: Float64Array[], cx: number, cy: number, pxPerM: number): Path2D[] {
   const over = [new Path2D(), new Path2D(), new Path2D(), new Path2D(), new Path2D()];
   const reach = MW_WIDTH / 2 + OVERPASS_MARGIN;
   const near = lineDistance(lines, reach + 1);
+  const ox = cx * CHUNK;
+  const oy = cy * CHUNK;
   for (const seg of roads) {
     const n = seg.xy.length / 2;
     if (n < 2 || seg.ramp) continue;
@@ -367,7 +359,7 @@ export function drawMotorways(
       i = e;
     }
   }
-  drawBridges(ctx, over, pxPerM, dpr);
+  return over;
 }
 
 /** Ways cross a motorway on a bridge over this much more than its half width (m). */

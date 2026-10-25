@@ -8,7 +8,7 @@ import type { SegmentPath } from '../gen/roads';
 import type { TownPlan } from '../gen/town';
 import { cellCoverage, drawCoverSymbols, FILLS } from './landcover';
 import { drawBuildings } from './buildings';
-import { clearUnderBuiltUp, drawChurches, drawMotorways, drawRoads } from './roads';
+import { clearUnderBuiltUp, drawChurches, drawRoads } from './roads';
 import { lineDistance, MW_VERGE } from '../gen/motorway';
 import { drawPois } from './symbols';
 import { drawFields } from './fields';
@@ -250,8 +250,7 @@ export function renderChunk({ cx, cy, dem, cover, water, streams, roads, motorwa
 
   drawStreams(ctx, streams, pxPerM, dpr);
   drawBuildings(ctx, plans, cx, cy, pxPerM, dpr);
-  drawRoads(ctx, drawn, plans.flatMap((p) => p.streets), cx, cy, pxPerM, dpr, water);
-  drawMotorways(ctx, motorways, drawn, cx, cy, pxPerM, dpr, water);
+  drawRoads(ctx, drawn, plans.flatMap((p) => p.streets), motorways, cx, cy, pxPerM, dpr, water);
   drawChurches(ctx, plans, cx, cy, pxPerM, dpr);
   // Points of interest: the chunk's own (hilltops, wayside crosses, springs) and the plans' (water towers).
   const pois = [...(poi ? placePois({ cx, cy, patch: poi, roads: drawn, plans }) : []), ...plans.flatMap((p) => p.pois)];

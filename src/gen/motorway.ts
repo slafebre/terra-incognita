@@ -28,6 +28,8 @@ import type { Terrain } from './terrain';
 export const MW_CELL = 4096;
 /** Width of the dual carriageway (m), and how far (m) from its centre line other things keep. */
 export const MW_WIDTH = 24;
+/** Width of an interchange's ramps (m). */
+export const MW_RAMP_WIDTH = 8;
 /** Streets, built-up land and farmsteads: the band either side counts as water (no street, no building, no junction on a bridge). */
 export const MW_PLAN_CLEAR = MW_WIDTH / 2 + 12;
 /** Building footprints. */
@@ -1067,8 +1069,8 @@ export function lineCrossings(pts: ArrayLike<number>, lines: ArrayLike<number>[]
 
 /**
  * Diamond interchanges: on each side, the ramps leave the crossing road IC_JOIN m from
- * the motorway's centre line (or at the road's end, if nearer), and meet the motorway
- * at its carriageway's edge IC_MERGE m along it from the crossing, either way.
+ * the motorway's centre line (or at the road's end, if nearer), and merge into the
+ * motorway IC_MERGE m along it from the crossing, either way, their outer edge on its.
  */
 const IC_JOIN = 90;
 const IC_MERGE = 380;
@@ -1142,10 +1144,12 @@ export function diamondRamps(road: ArrayLike<number>, lines: ArrayLike<number>[]
     const jy = road[j + 1];
     for (const dir of [-1, 1]) {
       const [mx, my, tx, ty] = along(dir, IC_MERGE);
-      // The side of the motorway the road leaves it on, and the carriageway's edge there.
+      // The side of the motorway the road leaves it on, and where the ramp ends: its outer
+      // edge on the carriageway's (ending on the edge line, half of it stuck out in a bump).
       const s = Math.sign(-ty * (jx - mx) + tx * (jy - my)) || 1;
-      const ex = mx - s * ty * (MW_WIDTH / 2);
-      const ey = my + s * tx * (MW_WIDTH / 2);
+      const edge = (MW_WIDTH - MW_RAMP_WIDTH) / 2;
+      const ex = mx - s * ty * edge;
+      const ey = my + s * tx * edge;
       const L = Math.hypot(ex - jx, ey - jy);
       // Leaving the road along the motorway's heading at the crossing (swung out if the
       // road meets it close by), arriving along it at the merge.
