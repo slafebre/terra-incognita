@@ -66,6 +66,8 @@ export interface RoadEdge {
   b: Site;
   /** Its two vertices [ax, ay, bx, by] (world metres). */
   route: number[];
+  /** Roundabouts at its vertices, as `SegmentTask.rings`. */
+  rings?: number[];
 }
 
 export interface NetCell {
@@ -110,6 +112,14 @@ export interface SegmentTask {
   spurA?: number[];
   spurB?: number[];
   /**
+   * Roundabouts at the ends of its edge or piece, [x, y, radius, class, …] (vertices
+   * as the network placed them): the ways meeting there stop at the ring, where the
+   * ground takes one.
+   */
+  rings?: number[];
+  /** The roundabouts it draws (as `rings`): those where it is the first edge, by key. */
+  ownRings?: number[];
+  /**
    * The run of edges of one road this edge belongs to (vertices in canonical order),
    * if short enough: routed on the fine terrain as one when too steep or crossing a
    * lake, by the chunk owning its middle edge (`owner`).
@@ -138,6 +148,69 @@ export interface SegmentPath {
   xy: Float32Array;
   /** Routed on the fine terrain (a steep piece). */
   micro?: boolean;
+  /** A roundabout's ring (closed: its first point repeated last). */
+  ring?: boolean;
+}
+
+/** A closed ring of radius r round (cx, cy), points every 3 m or so, from due east. */
+export function ringLine(cx: number, cy: number, r: number): Float32Array {
+  const n = Math.max(16, Math.ceil((2 * Math.PI * r) / 3));
+  const xy = new Float32Array(2 * n + 2);
+  for (let q = 0; q <= n; q++) {
+    const a = (2 * Math.PI * (q % n)) / n;
+    xy[2 * q] = cx + r * Math.cos(a);
+    xy[2 * q + 1] = cy + r * Math.sin(a);
+  }
+  return xy;
+}
+
+/** A ring's centre and radius [x, y, r] (from its closed polyline, as ringLine draws it). */
+export function ringDisc(xy: ArrayLike<number>): [number, number, number] {
+  const n = xy.length / 2 - 1;
+  let x = 0;
+  let y = 0;
+  for (let i = 0; i < n; i++) {
+    x += xy[2 * i] / n;
+    y += xy[2 * i + 1] / n;
+  }
+  return [x, y, Math.hypot(xy[0] - x, xy[1] - y)];
+}
+
+/** The parts of polyline xy outside the circle (cx, cy, r), each cut exactly at the circle; parts under 1 m are dropped. */
+export function outsideCircle(xy: ArrayLike<number>, cx: number, cy: number, r: number): number[][] {
+  const parts: number[][] = [];
+  const n = xy.length / 2;
+  let cur: number[] | null = Math.hypot(xy[0] - cx, xy[1] - cy) >= r ? [xy[0], xy[1]] : null;
+  for (let i = 1; i < n; i++) {
+    const px = xy[2 * i - 2];
+    const py = xy[2 * i - 1];
+    const dx = xy[2 * i] - px;
+    const dy = xy[2 * i + 1] - py;
+    const fx = px - cx;
+    const fy = py - cy;
+    const a = dx * dx + dy * dy;
+    const b = 2 * (fx * dx + fy * dy);
+    const disc = b * b - 4 * a * (fx * fx + fy * fy - r * r);
+    if (a > 0 && disc > 0) {
+      const sq = Math.sqrt(disc);
+      for (const t of [(-b - sq) / (2 * a), (-b + sq) / (2 * a)]) {
+        if (t <= 0 || t >= 1) continue;
+        // Each crossing enters or leaves the circle.
+        if (cur) {
+          cur.push(px + t * dx, py + t * dy);
+          parts.push(cur);
+          cur = null;
+        } else cur = [px + t * dx, py + t * dy];
+      }
+    }
+    if (cur) cur.push(xy[2 * i], xy[2 * i + 1]);
+  }
+  if (cur) parts.push(cur);
+  return parts.filter((q) => {
+    let len = 0;
+    for (let i = 2; i < q.length; i += 2) len += Math.hypot(q[i] - q[i - 2], q[i + 1] - q[i - 1]);
+    return len >= 1;
+  });
 }
 
 /** Fine node data around a chunk (row-major w × h, origin at global node gx, gy). */

@@ -3,7 +3,7 @@ import { lerp, smoothstep } from '../lib/noise';
 import { quadsOverlap, segPointDist, segQuadDist } from './buildings';
 import { NODE } from './hydro';
 import { nearestVertex, vertexPos, VSNAP } from './lattice';
-import { MAX_GRADE, ROAD_T, type SegmentPath } from './roads';
+import { MAX_GRADE, ROAD_T, ringDisc, type SegmentPath } from './roads';
 import { FARM } from './settle';
 import { BUILD_STEEP, hashString, PLAN_EXTENT, ROAD_CLEAR, STREAM_A, type PlanInput, type TownPlan } from './town';
 
@@ -237,9 +237,11 @@ export function planFarm({ site, roads, patch: p }: PlanInput): TownPlan {
   const order: Kind[] = kind === 'small' ? ['small'] : kind === 'l' ? ['l', 'small'] : [kind, 'l', 'small'];
 
   // --- Placement ---------------------------------------------------------------------
+  const islands = sorted.filter((r) => r.ring).map((r) => ringDisc(r.xy));
   const ok = (x: number, y: number, st: number) => {
     if (Math.hypot(x - site.x, y - site.y) > extent - 5) return note('ground: extent'), false;
     if (!dry(x, y)) return note('ground: water'), false;
+    if (islands.some(([rx, ry, r]) => Math.hypot(x - rx, y - ry) < r)) return note('ground: roundabout'), false;
     if (slope(x, y) >= st) return note('ground: steep'), false;
     return true;
   };

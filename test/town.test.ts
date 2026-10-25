@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { NODE } from '../src/gen/hydro';
 import { nearestVertex, vertexPos } from '../src/gen/lattice';
-import { ROAD_C, ROAD_D, ROAD_T, type RoadClass, type RoadPatch, type SegmentPath } from '../src/gen/roads';
+import { ROAD_C, ROAD_D, ROAD_T, ringDisc, type RoadClass, type RoadPatch, type SegmentPath } from '../src/gen/roads';
 import { HAMLET, TOWN, VILLAGE, type Rank, type Site } from '../src/gen/settle';
 import { PLAN_EXTENT, PLAN_MARGIN, planTown, ROAD_CLEAR, STREET_CLEAR, type PlanInput, type TownPlan } from '../src/gen/town';
 import { quadsOverlap, segPointDist, segQuadDist } from '../src/gen/buildings';
@@ -320,6 +320,22 @@ describe('street plans', () => {
       expect(terraced, name).toBeGreaterThan(0.1 * n);
       expect(n - terraced, name).toBeGreaterThan(0.2 * n);
     }
+  });
+
+  it('keep buildings off roundabout islands', () => {
+    let rings = 0;
+    for (const { name, plan } of plans)
+      for (const r of plan.roads.filter((q) => q.ring)) {
+        rings++;
+        const [x, y, rad] = ringDisc(r.xy);
+        const b = plan.buildings;
+        for (let j = 0; j < b.length; j += 8) {
+          const mx = (b[j] + b[j + 4]) / 2;
+          const my = (b[j + 1] + b[j + 5]) / 2;
+          expect(Math.hypot(mx - x, my - y), `${name}: building ${j / 8} on ${r.key}`).toBeGreaterThan(rad);
+        }
+      }
+    expect(rings, 'roundabouts at estate gates').toBeGreaterThan(0);
   });
 
   it('lay out industrial estates in towns on flat ground only', () => {

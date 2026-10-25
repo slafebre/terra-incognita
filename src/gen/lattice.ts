@@ -1,7 +1,7 @@
 import { CHUNK } from '../lib/constants';
 import { hash3 } from '../lib/hash';
 import { MinHeap } from '../lib/heap';
-import { smoothstep } from '../lib/noise';
+import { lerp, smoothstep } from '../lib/noise';
 import { coarseEpochNow, type CoarseField, NODE } from './hydro';
 import { lakesOf } from './lakes';
 import {
@@ -19,12 +19,15 @@ import {
   type RoadPatch,
   type Rival,
   WEDGE,
+  outsideCircle,
+  ringLine,
   rngEdge,
   type SegmentPath,
   type SegmentTask,
 } from './roads';
 import { FARM, HAMLET, type Site, type Settlements, TOWN, VILLAGE } from './settle';
 import type { Terrain } from './terrain';
+import { PLAN_EXTENT } from './town';
 
 /**
  * Road network on a shared lattice. All roads are made of the edges of one graph:
@@ -130,6 +133,26 @@ const TRACK_SPACE_SLOPE = 0.15;
 /** Track density falls by up to TRACK_THIN over this range of slope (500 m baseline). */
 const TRACK_THIN = 0.85;
 const TRACK_THIN_SLOPE = [0.1, 0.35];
+
+/**
+ * Roundabouts: the chance at a junction of three or more main roads (N, D) in the
+ * open; within RING_TOWN_R of a town (but not in its centre, RING_TOWN_CORE: its
+ * plan has a square there), and where a minor road joins a main road near one.
+ */
+const RING_OPEN = 0.35;
+const RING_NEAR = 0.85;
+const RING_NEAR_MINOR = 0.4;
+const RING_TOWN_R = 3000;
+const RING_TOWN_CORE = 450;
+/** None in a village's or hamlet's plan (they make their own crossroads), nor this close to one (m). */
+const RING_PLAN_GAP = 40;
+/** Radius of the ring's centre line (m) where main roads meet; near towns RING_TOWN_EXTRA more, and RING_N_EXTRA where an N road meets. */
+const RING_R = [13, 18];
+/** …and where a minor road joins a main road: small, an access road's. */
+const RING_MINOR_R = [10, 12];
+const RING_TOWN_EXTRA = 3;
+const RING_N_EXTRA = 2;
+const RING_SEED = 0x52b0;
 
 /** Spatial hash of points for radius queries. */
 class Grid<T extends { x: number; y: number }> {
@@ -937,6 +960,61 @@ export function latticeCell(gx: number, gy: number, field: CoarseField, set: Set
   }
   for (const e of links.values()) use(e.u, e.v, e.c);
 
+  // Roundabouts: now and then where main roads meet, often near towns, where a minor
+  // road joining a main road may get one too. Never at a settlement's own crossroads,
+  // nor in a village's or hamlet's plan, nor at two neighbouring vertices (the lower
+  // hash wins). A function of the network round the vertex, so cells agree.
+  const siteVerts = new Set(
+    ([TOWN, VILLAGE, HAMLET, FARM] as const).flatMap((r) => sitesIn(r, 2 * LATTICE)).map((s) => nearestVertex(s.x, s.y)),
+  );
+  const planned = [...sitesIn(VILLAGE, 2 * LATTICE + PLAN_EXTENT[VILLAGE] + RING_PLAN_GAP), ...sitesIn(HAMLET, 2 * LATTICE + PLAN_EXTENT[HAMLET] + RING_PLAN_GAP)];
+  const ringTowns = sitesIn(TOWN, 2 * LATTICE + RING_TOWN_R);
+  const ringHash = (v: number, k = 0) => hash3(RING_SEED + k, vi(v), vj(v)) / 4294967296;
+  /** The classes of the roads (N, D, C) at vertex v. */
+  const roadsAt = (v: number) => {
+    const out: RoadClass[] = [];
+    for (const w of neighbours(v)) {
+      const c = cls.get(edgeKey(v, w))?.c;
+      if (c !== undefined && c <= ROAD_C) out.push(c);
+    }
+    return out;
+  };
+  const townDist = (v: number) => {
+    const p = pos(v);
+    let d = Infinity;
+    for (const t of ringTowns) d = Math.min(d, dist(t, p));
+    return d;
+  };
+  const ringChance = (v: number) => {
+    const at = roadsAt(v);
+    const main = at.filter((c) => c <= ROAD_D).length;
+    if (at.length < 3 || main < 2 || siteVerts.has(v)) return 0;
+    const p = pos(v);
+    if (planned.some((s) => dist(s, p) < PLAN_EXTENT[s.rank] + RING_PLAN_GAP)) return 0;
+    const dt = townDist(v);
+    if (dt < RING_TOWN_CORE) return 0;
+    const near = dt < RING_TOWN_R;
+    return main >= 3 ? (near ? RING_NEAR : RING_OPEN) : near ? RING_NEAR_MINOR : 0;
+  };
+  const passes = new Map<number, boolean>();
+  const ringPasses = (v: number) => {
+    let b = passes.get(v);
+    if (b === undefined) passes.set(v, (b = ringHash(v) < ringChance(v)));
+    return b;
+  };
+  /** The roundabout at vertex v, [x, y, radius, class], if any. */
+  const ringAt = (v: number): number[] => {
+    if (!ringPasses(v) || neighbours(v).some((w) => ringPasses(w) && ringHash(w) < ringHash(v))) return [];
+    const p = pos(v);
+    const at = roadsAt(v);
+    const c = Math.min(...at);
+    const r =
+      at.filter((q) => q <= ROAD_D).length < 3
+        ? lerp(RING_MINOR_R[0], RING_MINOR_R[1], ringHash(v, 1))
+        : lerp(RING_R[0], RING_R[1], ringHash(v, 1)) + (townDist(v) < RING_TOWN_R ? RING_TOWN_EXTRA : 0) + (c === ROAD_N ? RING_N_EXTRA : 0);
+    return [p.x, p.y, r, c];
+  };
+
   // Owned edges: midpoint in the cell.
   const edges: RoadEdge[] = [];
   const vsite = (v: number): Site => {
@@ -947,7 +1025,8 @@ export function latticeCell(gx: number, gy: number, field: CoarseField, set: Set
     const a = pos(e.u);
     const b = pos(e.v);
     if (!inBox({ x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 }, 0)) continue;
-    edges.push({ id: k, cls: e.c, a: vsite(e.u), b: vsite(e.v), route: [a.x, a.y, b.x, b.y] });
+    const rings = [...ringAt(e.u), ...ringAt(e.v)];
+    edges.push({ id: k, cls: e.c, a: vsite(e.u), b: vsite(e.v), route: [a.x, a.y, b.x, b.y], ...(rings.length ? { rings } : {}) });
   }
   const sites = [...towns, ...villages, ...sitesIn(HAMLET, 0), ...sitesIn(FARM, 0)].filter((s) => inBox(s, 0));
   return { sites, edges };
@@ -976,6 +1055,9 @@ export function latticeSegments(edges: RoadEdge[], cx: number, cy: number): Segm
       at.get(k)!.push({ x: px, y: py, cls: e.cls, ox: qx, oy: qy, key: e.id });
     }
   }
+  // Roundabouts by vertex: [x, y, radius, class].
+  const ringOf = new Map<string, number[]>();
+  for (const e of edges) for (let i = 0; i + 4 <= (e.rings?.length ?? 0); i += 4) ringOf.set(k2(e.rings![i], e.rings![i + 1]), e.rings!.slice(i, i + 4));
   // Partner of each (edge, vertex): greedy matching, best class then straightest.
   const partner = new Map<string, [number, number]>();
   for (const [vk, inc] of at) {
@@ -1166,6 +1248,12 @@ export function latticeSegments(edges: RoadEdge[], cx: number, cy: number): Segm
       spurB: spur(bx, by, e.id),
     };
     const pc = pieceOf(e);
+    // Roundabouts at its ends and its piece's; the first edge at one (by key) draws it.
+    const ends = [k2(ax, ay), k2(bx, by)];
+    const rings = [...new Set(pc ? [...ends, k2(pc.pts[0], pc.pts[1]), k2(pc.pts[pc.pts.length - 2], pc.pts[pc.pts.length - 1])] : ends)].flatMap((vk) => ringOf.get(vk) ?? []);
+    const ownRings = ends.flatMap((vk) => ((at.get(vk) ?? []).every((i) => i.key >= e.id) ? (ringOf.get(vk) ?? []) : []));
+    if (rings.length) task.rings = rings;
+    if (ownRings.length) task.ownRings = ownRings;
     if (pc) {
       const n = pc.pts.length / 2;
       const { obstacles, wedges, rivals } = surroundings(pc.pts, new Set(pc.keys), e.cls);
@@ -1214,6 +1302,16 @@ const WET_MIN = 4;
 /** Snapping: cost (in fine nodes of distance) of a node beside a lake — the map's shoreline,
  * splined between nodes, reaches a few metres past the last lake node. */
 const SNAP_SHORE = 3;
+/**
+ * A roundabout stands where its ground is dry and off streams (drainage under
+ * RING_STREAM km²) and nearly level: no more than RING_LEVEL × its outer diameter
+ * between its highest and lowest point (sampled round its centre line and RING_EDGE
+ * m beyond).
+ */
+const RING_STREAM = 1;
+const RING_LEVEL = 0.06;
+const RING_EDGE = 5;
+const RING_SAMPLES = 16;
 
 /**
  * One curve per lattice edge: cubic Hermite between its two (snapped) vertices.
@@ -1418,8 +1516,63 @@ export function routeCurves(tasks: SegmentTask[], p: RoadPatch): SegmentPath[] {
     }
     return parts;
   };
+  /** Roundabouts that fit, by their centre rounded to the metre: [x, y, radius]. */
+  const ringEnds = new Map<string, number[]>();
+  const ringMemo = new Map<string, [number, number] | null>();
+  /**
+   * Where the roundabout at vertex (x, y) stands — the vertex, snapped — if the ground
+   * takes it. Reads only the patch round the vertex, so every chunk decides alike.
+   */
+  const ringCentre = (x: number, y: number, r: number): [number, number] | null => {
+    const key = `${x},${y}`;
+    let c = ringMemo.get(key);
+    if (c !== undefined) return c;
+    const [sx, sy] = snap(x, y);
+    let lo = Infinity;
+    let hi = -Infinity;
+    let ok = true;
+    for (const f of [0, 0.5, 1, (r + RING_EDGE) / r])
+      for (let q = 0; q < RING_SAMPLES && ok; q++) {
+        const qx = sx + f * r * Math.cos((2 * Math.PI * q) / RING_SAMPLES);
+        const qy = sy + f * r * Math.sin((2 * Math.PI * q) / RING_SAMPLES);
+        const i = Math.round(qx / NODE) - p.gx;
+        const j = Math.round(qy / NODE) - p.gy;
+        if (i < 0 || j < 0 || i >= w || j >= h || isLake(j * w + i) || p.A[j * w + i] > RING_STREAM) ok = false;
+        else {
+          const z = zAt(qx, qy);
+          lo = Math.min(lo, z);
+          hi = Math.max(hi, z);
+        }
+      }
+    c = ok && hi - lo <= RING_LEVEL * 2 * (r + RING_EDGE) ? [sx, sy] : null;
+    ringMemo.set(key, c);
+    if (c) ringEnds.set(`${Math.round(sx)},${Math.round(sy)}`, [sx, sy, r]);
+    return c;
+  };
+  /** A way with what lies inside a roundabout at either end cut off: it stops at the ring. */
+  const cutAtRings = (g: SegmentPath): SegmentPath[] => {
+    if (g.ring) return [g];
+    const n = g.xy.length;
+    let parts: number[][] | null = null;
+    for (const [x, y] of [
+      [g.xy[0], g.xy[1]],
+      [g.xy[n - 2], g.xy[n - 1]],
+    ]) {
+      const c = ringEnds.get(`${Math.round(x)},${Math.round(y)}`);
+      if (!c || Math.hypot(x - c[0], y - c[1]) > 0.5) continue;
+      parts = (parts ?? [Array.from(g.xy)]).flatMap((q) => outsideCircle(q, c[0], c[1], c[2]));
+    }
+    return parts ? parts.map((q) => ({ ...g, xy: Float32Array.from(q) })) : [g];
+  };
   const out: SegmentPath[] = [];
   for (const t of tasks) {
+    // Roundabouts: each where the ground takes it, drawn by the first edge there.
+    for (let i = 0; i + 4 <= (t.rings?.length ?? 0); i += 4) ringCentre(t.rings![i], t.rings![i + 1], t.rings![i + 2]);
+    for (let i = 0; i + 4 <= (t.ownRings?.length ?? 0); i += 4) {
+      const [x, y, r, c] = t.ownRings!.slice(i, i + 4);
+      const at = ringCentre(x, y, r);
+      if (at) out.push({ key: `rb:${x},${y}`, cls: c as RoadClass, xy: ringLine(at[0], at[1], r), ring: true });
+    }
     // Tracks and footpaths: drawn a piece at a time (or an edge with no piece) by the
     // chunk owning its middle edge — straight from end to end, fitted to an easy grade,
     // so they run straight across flat land and bend with the contours on a slope.
@@ -1458,7 +1611,7 @@ export function routeCurves(tasks: SegmentTask[], p: RoadPatch): SegmentPath[] {
     const g = !dA && !dB && wetLength(c.xy) > WET_MIN ? routed(t.key, t.cls, [t.ax, t.ay, t.bx, t.by], t.pa, t.pb, t.rivals, t.obstacles, t.wedges) : c;
     out.push(...drawn(g, dA, dB));
   }
-  return out;
+  return out.flatMap(cutAtRings);
 
   /**
    * A track or footpath piece drawn as straight runs, each shifted sideways to keep an
