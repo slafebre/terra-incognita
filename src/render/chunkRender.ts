@@ -97,6 +97,8 @@ export function renderChunk({ cx, cy, dem, cover, water, streams, roads, plans, 
   const sg = 1 - STYLE.shadow[1] / 255;
   const sb = 1 - STYLE.shadow[2] / 255;
   const [wr, wg, wb2] = STYLE.waterFill;
+  // Water coverage per pixel (alpha), to keep contours out of lakes; null while the chunk has none.
+  let wetMask: ImageData | null = null;
   const pxPerVertex = CELL * pxPerM;
   const col0 = new Int32Array(pxSize);
   const colF = new Float32Array(pxSize);
@@ -142,6 +144,7 @@ export function renderChunk({ cx, cy, dem, cover, water, streams, roads, plans, 
         r += (wr - r) * a;
         g += (wg - g) * a;
         b += (wb2 - b) * a;
+        (wetMask ??= new ImageData(pxSize, pxSize)).data[o + 3] = a * 255;
       }
       data[o++] = r;
       data[o++] = g;
@@ -190,17 +193,27 @@ export function renderChunk({ cx, cy, dem, cover, water, streams, roads, plans, 
       path.lineTo((segs[n + 2] - APRON) * scale, (segs[n + 3] - APRON) * scale);
     }
   }
-  ctx.lineCap = 'round';
-  ctx.lineJoin = 'round';
-  ctx.strokeStyle = STYLE.contour;
-  ctx.lineWidth = STYLE.contourWidth * dpr;
-  ctx.stroke(normal);
-  ctx.strokeStyle = STYLE.contourIndex;
-  ctx.lineWidth = STYLE.contourIndexWidth * dpr;
-  ctx.stroke(index);
-  ctx.strokeStyle = STYLE.cover.glacierContour;
-  ctx.lineWidth = STYLE.contourWidth * dpr;
-  ctx.stroke(ice);
+  // Lakes hide their contours: stroke them on a layer of their own and erase it under the water fill.
+  const layer = wetMask ? new OffscreenCanvas(pxSize, pxSize) : canvas;
+  const lctx = layer === canvas ? ctx : layer.getContext('2d')!;
+  lctx.lineCap = 'round';
+  lctx.lineJoin = 'round';
+  lctx.strokeStyle = STYLE.contour;
+  lctx.lineWidth = STYLE.contourWidth * dpr;
+  lctx.stroke(normal);
+  lctx.strokeStyle = STYLE.contourIndex;
+  lctx.lineWidth = STYLE.contourIndexWidth * dpr;
+  lctx.stroke(index);
+  lctx.strokeStyle = STYLE.cover.glacierContour;
+  lctx.lineWidth = STYLE.contourWidth * dpr;
+  lctx.stroke(ice);
+  if (wetMask) {
+    const mask = new OffscreenCanvas(pxSize, pxSize);
+    mask.getContext('2d')!.putImageData(wetMask, 0, 0);
+    lctx.globalCompositeOperation = 'destination-out';
+    lctx.drawImage(mask, 0, 0);
+    ctx.drawImage(layer, 0, 0);
+  }
 
   drawCoverSymbols(ctx, { cx, cy, dem, water, cover, pxPerM, dpr });
 
