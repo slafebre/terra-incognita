@@ -2,7 +2,7 @@ import { APRON, CELL, CHUNK, DEM_W } from '../lib/constants';
 import { COVER, COVER_SCALE } from '../gen/landcover';
 import { smoothPolyline } from '../lib/polyline';
 import { lineDistance, MW_RAMP_WIDTH, MW_VERGE, MW_WIDTH } from '../gen/motorway';
-import { drawEarthworks, type MotorwayDraw, surfaceLines, viaductLines } from './motorway';
+import { drawEarthworks, type MotorwayDraw, MW_LEVEL, runsOf, surfaceLines, viaductLines } from './motorway';
 import { ringDisc, ROAD_C, ROAD_D, ROAD_N, ROAD_P, ROAD_T, type SegmentPath } from '../gen/roads';
 import { VILLAGE } from '../gen/settle';
 import { LANE, type Street, type TownPlan } from '../gen/town';
@@ -115,7 +115,7 @@ export function drawChurches(ctx: Ctx, plans: TownPlan[], cx: number, cy: number
  * order, so junctions merge cleanly (a ramp into the main road it leaves and the motorway
  * it joins; minor roads go under ramps, as under the motorway). Where a way crosses water (`water`: the chunk's lake depth per DEM vertex) it
  * is drawn again on top as a bridge, with parapets either side; so is a way over a
- * motorway (experimental).
+ * motorway where it runs level (experimental; under a viaduct, the way passes beneath).
  */
 export function drawRoads(
   ctx: Ctx,
@@ -269,7 +269,9 @@ export function drawRoads(
   ctx.strokeStyle = mw.median;
   ctx.lineWidth = mw.medianWidth * dpr;
   ctx.stroke(motorway.bridges);
-  drawBridges(ctx, overpasses(roads, motorways, cx, cy, pxPerM), pxPerM, dpr);
+  // (Only over level stretches: under a viaduct the ways pass beneath, over a tunnel they don't cross it.)
+  const level = mws.flatMap((m) => runsOf(m, (c) => c === MW_LEVEL, true));
+  drawBridges(ctx, overpasses(roads, level, cx, cy, pxPerM), pxPerM, dpr);
 }
 
 /** Bridges by class, on top: parapets, the gap between them, then the way itself again. */
