@@ -4,7 +4,7 @@
 //   SEED=7 npx vite-node dev/spot.ts x y [R or -] [radius]
 //   SNAP=dev/snaps/topo_x_y.json npx vite-node dev/spot.ts [x y] [R] [radius]
 // SVG=<file> also draws the land within the radius: 5 m contours, streams, lakes and
-// every way (roads by class; tracks solid, footpaths dashed, fine-routed ones in red).
+// every way (roads by class; tracks solid, footpaths dashed, fine-routed ones in red), motorways and their ramps.
 import { ChunkManager } from '../src/chunks/manager';
 import { APRON, CELL, CHUNK, DEM_W } from '../src/lib/constants';
 import { marchingSquares } from '../src/lib/contours';
@@ -61,7 +61,7 @@ for (const s of byKey.values()) {
 if (process.env.SVG) {
   const { writeFileSync } = (await import(/* @vite-ignore */ FS)) as { writeFileSync(file: string, data: string): void };
   const x0 = X - RAD, y0 = Y - RAD, W = 2 * RAD;
-  let svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="${x0} ${y0} ${W} ${W}" width="${W}" height="${W}" style="background:#fbfaf6">`;
+  let svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="${x0} ${y0} ${W} ${W}" width="${Math.min(W, 900)}" height="${Math.min(W, 900)}" style="background:#fbfaf6">`;
   const f = (v: number) => v.toFixed(1);
   for (const c of m.chunks.values()) {
     const ox = c.cx * CHUNK, oy = c.cy * CHUNK;
@@ -93,13 +93,21 @@ if (process.env.SVG) {
       }
     }
   }
+  // Motorways (experimental): their true width, the central reservation as a thin line.
+  const nets = (m as unknown as { nets: Map<string, { data?: { motorways?: { xy: ArrayLike<number> }[] } }> }).nets;
+  for (const n of nets.values())
+    for (const p of n.data?.motorways ?? []) {
+      let d = '';
+      for (let i = 0; i < p.xy.length; i += 2) d += `${i ? 'L' : 'M'}${f(p.xy[i])} ${f(p.xy[i + 1])}`;
+      svg += `<path d="${d}" stroke="#d62c54" stroke-opacity="0.75" stroke-width="24" fill="none"/><path d="${d}" stroke="#463a34" stroke-width="0.7" fill="none"/>`;
+    }
   const STROKE = ['#d2382f', '#e8b72b', '#888', '#222', '#222'];
   const WIDTH = [5, 4, 3, 1.2, 1.2];
   for (const s of [...byKey.values()].sort((a, b) => b.cls - a.cls)) {
     let d = '';
     for (let i = 0; i < s.xy.length; i += 2) d += `${i ? 'L' : 'M'}${f(s.xy[i])} ${f(s.xy[i + 1])}`;
-    const col = s.cls >= 3 && s.micro ? '#c22' : STROKE[s.cls];
-    svg += `<path d="${d}" stroke="${col}" stroke-width="${WIDTH[s.cls]}" fill="none"${s.cls === 4 ? ' stroke-dasharray="5 3"' : ''}/>`;
+    const col = s.ramp ? '#9c1c40' : s.cls >= 3 && s.micro ? '#c22' : STROKE[s.cls];
+    svg += `<path d="${d}" stroke="${col}" stroke-width="${s.ramp ? 6 : WIDTH[s.cls]}" fill="none"${s.cls === 4 ? ' stroke-dasharray="5 3"' : ''}/>`;
   }
   writeFileSync(process.env.SVG, svg + '</svg>');
 }

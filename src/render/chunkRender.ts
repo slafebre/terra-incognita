@@ -89,7 +89,9 @@ export function renderChunk({ cx, cy, dem, cover, water, streams, roads, motorwa
   const pxPerM = pxSize / CHUNK;
   const { shade, slope } = shadeAndSlope(dem);
   // Built-up land replaces woods and vines under it (the cover here is this render's own copy).
-  clearUnderBuiltUp(cover, plans, cx, cy, motorways);
+  // (Ramps too: interchanges clear their land.)
+  const rampLines = roads.filter((r) => r.ramp).map((r) => Float64Array.from(r.xy));
+  clearUnderBuiltUp(cover, plans, cx, cy, [...motorways, ...rampLines]);
 
   // --- Land cover fills, hillshade, lakes ---------------------------------
   const img = ctx.createImageData(pxSize, pxSize);
@@ -228,7 +230,7 @@ export function renderChunk({ cx, cy, dem, cover, water, streams, roads, motorwa
   if (poi) {
     const farmland = farmlandTests(cx, cy, cover, water, slope);
     // Not on a motorway or its verges.
-    const mwDist = lineDistance(motorways, MW_VERGE);
+    const mwDist = lineDistance([...motorways, ...rampLines], MW_VERGE);
     const open = (x: number, y: number) => farmland.open(x, y) && mwDist(x, y) >= MW_VERGE;
     const fields = layFields({ cx, cy, edges, patch: poi, roads: drawn, plans, ...farmland, open });
     drawFields(ctx, fields, cx, cy, pxPerM, dpr);

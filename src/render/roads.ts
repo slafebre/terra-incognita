@@ -137,9 +137,14 @@ export function drawRoads(
   };
   const ox = cx * CHUNK;
   const oy = cy * CHUNK;
+  const ramps = new Path2D();
   for (const seg of roads) {
     const n = seg.xy.length / 2;
     if (n < 2) continue;
+    if (seg.ramp) {
+      trace(ramps, seg.xy, cx, cy, pxPerM, 0);
+      continue;
+    }
     const xs: number[] = [];
     const ys: number[] = [];
     for (let i = 0; i < n; i++) {
@@ -181,6 +186,15 @@ export function drawRoads(
   ctx.strokeStyle = STYLE.roads.track;
   ctx.lineWidth = width(ROAD_T);
   ctx.stroke(paths[ROAD_T]);
+  // Interchange ramps, under the roads they leave and the motorway they join.
+  const ramp = STYLE.roads.motorway;
+  const rampW = Math.max(ramp.rampM * pxPerM, ramp.rampMinPx * dpr);
+  ctx.strokeStyle = STYLE.roads.casing;
+  ctx.lineWidth = rampW + 2 * STYLE.roads.casingWidth * dpr;
+  ctx.stroke(ramps);
+  ctx.strokeStyle = ramp.fill;
+  ctx.lineWidth = rampW;
+  ctx.stroke(ramps);
   ctx.strokeStyle = STYLE.roads.casing;
   for (const cls of [LANE, 0]) {
     ctx.lineWidth = streetWidth(cls) + 2 * STYLE.roads.casingWidth * dpr;
@@ -326,7 +340,7 @@ export function drawMotorways(
   const near = lineDistance(lines, reach + 1);
   for (const seg of roads) {
     const n = seg.xy.length / 2;
-    if (n < 2) continue;
+    if (n < 2 || seg.ramp) continue;
     const hit: boolean[] = [];
     let any = false;
     for (let i = 0; i < n; i++) {

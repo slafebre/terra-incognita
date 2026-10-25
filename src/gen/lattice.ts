@@ -4,7 +4,7 @@ import { MinHeap } from '../lib/heap';
 import { lerp, smoothstep } from '../lib/noise';
 import { coarseEpochNow, type CoarseField, NODE } from './hydro';
 import { lakesOf } from './lakes';
-import { lineCrossings, lineDistance, MotorwayLookup, type Motorways } from './motorway';
+import { diamondRamps, lineCrossings, lineDistance, MotorwayLookup, type Motorways } from './motorway';
 import {
   MAX_GRADE,
   MAX_LEN,
@@ -475,6 +475,16 @@ const MW_VERTEX = 50;
 const MW_ANGLE = (35 * Math.PI) / 180;
 const MW_CROSS = [300, 300, 400, 800, 800];
 const MW_EDGE = 30;
+/**
+ * Interchanges: at least IC_GAP (m) apart, where the road's edge crosses at IC_ANGLE or
+ * more (the drawn curve crosses more shallowly still: at 35° the diamond was a sliver);
+ * D roads get one within IC_TOWN (m) of a town, or with chance IC_D_SHARE.
+ */
+const IC_ANGLE = (60 * Math.PI) / 180;
+const IC_GAP = 5000;
+const IC_TOWN = 4000;
+const IC_D_SHARE = 0.35;
+const IC_SEED = 0x1c7a3e;
 /** Is vertex v within MW_VERTEX of a motorway? */
 function nearMotorway(field: CoarseField, v: number): boolean {
   if (!motorways) return false;
@@ -715,6 +725,29 @@ export function latticeCell(
       if (a.id >= b.id || (a.rank === TOWN && b.rank === TOWN)) continue;
       if (dist(a, b) <= MAX_LEN[ROAD_D] && relevant(a, b) && rngEdge(a, b, tv)) mainPath(ROAD_D, a, b);
     }
+
+  // Interchanges: diamonds where main roads cross a motorway. Every N road crossing (near
+  // square on) is a candidate, a D road crossing within IC_TOWN of a town or now and then (IC_D_SHARE);
+  // one is built where it scores best of the candidates within IC_GAP (N above D). Main
+  // roads are known well beyond IC_GAP of the cell, so every cell decides alike.
+  const interchanges = new Set<string>();
+  if (motorways) {
+    const cand: { k: string; x: number; y: number; score: number }[] = [];
+    for (const [k, e] of cls) {
+      const a = pos(e.u);
+      const b = pos(e.v);
+      if (!inBoxXY((a.x + b.x) / 2, (a.y + b.y) / 2, IC_GAP + MAX_EDGE)) continue;
+      const c = motorways.crossing(a.x, a.y, b.x, b.y);
+      if (c.n !== 1 || c.angle < IC_ANGLE) continue;
+      const lo = Math.min(e.u, e.v);
+      const hi = Math.max(e.u, e.v);
+      const h = hash3(hash3(IC_SEED, vi(lo), vj(lo)), vi(hi), vj(hi)) / 4294967296;
+      if (e.c === ROAD_D && h >= IC_D_SHARE && !towns.some((t) => dist(t, c) < IC_TOWN)) continue;
+      cand.push({ k, x: c.x, y: c.y, score: (e.c === ROAD_N ? 1 : 0) + h });
+    }
+    for (const c of cand)
+      if (cand.every((o) => o === c || o.score < c.score || Math.hypot(o.x - c.x, o.y - c.y) >= IC_GAP)) interchanges.add(c.k);
+  }
 
   /**
    * Cheapest-path forest grown from `sources` over the vertices within margin m;
@@ -1071,7 +1104,15 @@ export function latticeCell(
     const b = pos(e.v);
     if (!inBox({ x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 }, 0)) continue;
     const rings = [...ringAt(e.u), ...ringAt(e.v)];
-    edges.push({ id: k, cls: e.c, a: vsite(e.u), b: vsite(e.v), route: [a.x, a.y, b.x, b.y], ...(rings.length ? { rings } : {}) });
+    edges.push({
+      id: k,
+      cls: e.c,
+      a: vsite(e.u),
+      b: vsite(e.v),
+      route: [a.x, a.y, b.x, b.y],
+      ...(rings.length ? { rings } : {}),
+      ...(interchanges.has(k) ? { interchange: true } : {}),
+    });
   }
   const sites = [...towns, ...villages, ...sitesIn(HAMLET, 0), ...sitesIn(FARM, 0)].filter((s) => inBox(s, 0));
   return { sites, edges };
@@ -1315,6 +1356,7 @@ export function latticeSegments(edges: RoadEdge[], cx: number, cy: number, motor
     const ownRings = ends.flatMap((vk) => ((at.get(vk) ?? []).every((i) => i.key >= e.id) ? (ringOf.get(vk) ?? []) : []));
     if (rings.length) task.rings = rings;
     if (ownRings.length) task.ownRings = ownRings;
+    if (e.interchange) task.interchange = true;
     if (pc) {
       const n = pc.pts.length / 2;
       const { obstacles, wedges, rivals } = surroundings(pc.pts, new Set(pc.keys), e.cls);
@@ -1676,6 +1718,12 @@ export function routeCurves(tasks: SegmentTask[], p: RoadPatch, motorways: Array
     // edge, so it can go round on its own. (Not when it heads into one to end there.)
     const g = !dA && !dB && wetLength(c.xy) > WET_MIN ? routed(t.key, t.cls, [t.ax, t.ay, t.bx, t.by], t.pa, t.pb, t.rivals, t.obstacles, t.wedges) : c;
     out.push(...drawn(g, dA, dB));
+  }
+  // Interchanges: the ramps, from the road as drawn (by this chunk, or the piece it is in).
+  for (const t of tasks) {
+    if (!t.interchange) continue;
+    const road = out.find((g) => !g.ramp && (g.key === t.key || g.key.split('+').includes(t.key)));
+    if (road) diamondRamps(road.xy, motorways).forEach((xy, i) => out.push({ key: `ic:${t.key}:${i}`, cls: ROAD_C, xy: Float32Array.from(xy), ramp: true }));
   }
   return out.flatMap(cutAtRings);
 

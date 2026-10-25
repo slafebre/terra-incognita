@@ -960,15 +960,18 @@ export class MotorwayLookup {
 
   /**
    * Segment a–b against the motorways (at most 2 × BIN_REACH long): how many
-   * times it crosses one, the smallest angle (rad, 0 to π/2) of those crossings, and
-   * its least distance from a centre line where it doesn't cross.
+   * times it crosses one, the smallest angle (rad, 0 to π/2) of those crossings, its
+   * least distance from a centre line where it doesn't cross, and where it crosses (one
+   * of the crossings).
    */
-  crossing(ax: number, ay: number, bx: number, by: number): { n: number; angle: number; dist: number } {
+  crossing(ax: number, ay: number, bx: number, by: number): { n: number; angle: number; dist: number; x: number; y: number } {
     const refs = new Set<number>();
     for (const [x, y] of [[ax, ay], [bx, by]]) for (const r of this.bin(Math.floor(x / BIN), Math.floor(y / BIN))) refs.add(r);
     let n = 0;
     let angle = Math.PI / 2;
     let dist = Infinity;
+    let x = NaN;
+    let y = NaN;
     const dx = bx - ax;
     const dy = by - ay;
     for (const r of refs) {
@@ -984,13 +987,15 @@ export class MotorwayLookup {
         // Half-open along the motorway, so a crossing at a shared point counts once.
         if (t >= 0 && t <= 1 && u >= 0 && u < 1) {
           n++;
+          x = ax + t * dx;
+          y = ay + t * dy;
           angle = Math.min(angle, Math.asin(Math.min(1, Math.abs(den) / (Math.hypot(dx, dy) * Math.hypot(fx, fy)))));
           continue;
         }
       }
       dist = Math.min(dist, pointSeg(ax, ay, cx, cy, ex, ey), pointSeg(bx, by, cx, cy, ex, ey), pointSeg(cx, cy, ax, ay, bx, by), pointSeg(ex, ey, ax, ay, bx, by));
     }
-    return { n, angle, dist };
+    return { n, angle, dist, x, y };
   }
 }
 
@@ -1056,6 +1061,111 @@ export function lineCrossings(pts: ArrayLike<number>, lines: ArrayLike<number>[]
           out.push(cx + (ex - cx) * t, cy + (ey - cy) * t);
         }
       }
+  }
+  return out;
+}
+
+/**
+ * Diamond interchanges: on each side, the ramps leave the crossing road IC_JOIN m from
+ * the motorway's centre line (or at the road's end, if nearer), and meet the motorway
+ * at its carriageway's edge IC_MERGE m along it from the crossing, either way.
+ */
+const IC_JOIN = 90;
+const IC_MERGE = 380;
+const IC_STEP = 10;
+/**
+ * The ramps swing out to about this far from the centre line (m) before running in to
+ * merge: the road's crossing edge often ends near the motorway (its vertices keep only
+ * MW_VERTEX away, and are snapped closer), which made the diamond a sliver.
+ */
+const IC_SWING = 70;
+
+/**
+ * The four ramps of a diamond where `road` crosses one of the motorways `lines` (their
+ * centre lines, pieces joined end to end): cubic curves from the road, leaving along the
+ * motorway, to its edge, tangent to it. Empty where the road doesn't cross one.
+ */
+export function diamondRamps(road: ArrayLike<number>, lines: ArrayLike<number>[]): number[][] {
+  // The crossing: the road's segment i, the motorway's line li and segment k.
+  let hit: { i: number; li: number; k: number; x: number; y: number } | undefined;
+  for (let i = 0; i + 3 < road.length && !hit; i += 2)
+    lines.forEach((xy, li) => {
+      if (hit) return;
+      const one = lineCrossings([road[i], road[i + 1], road[i + 2], road[i + 3]], [xy]);
+      if (!one.length) return;
+      for (let k = 0; k + 3 < xy.length; k += 2)
+        if (lineCrossings([xy[k], xy[k + 1], xy[k + 2], xy[k + 3]], [[road[i], road[i + 1], road[i + 2], road[i + 3]]]).length) {
+          hit = { i, li, k, x: one[0], y: one[1] };
+          return;
+        }
+    });
+  if (!hit) return [];
+  const { i, li, k, x: X, y: Y } = hit;
+  const near = lineDistance(lines, 2 * IC_JOIN);
+  /** The point `dist` m along the motorway from the crossing (dir ±1), and the heading there; across joined pieces. */
+  const along = (dir: number, dist: number): [number, number, number, number] => {
+    let xy = lines[li];
+    let q = dir > 0 ? k + 2 : k; // the next point
+    let px = X;
+    let py = Y;
+    let left = dist;
+    for (let guard = 0; guard < 10000; guard++) {
+      if (q < 0 || q >= xy.length) {
+        // Onto the piece joined here, if any.
+        const next = lines.find((o) => o !== xy && Math.hypot(o[dir > 0 ? 0 : o.length - 2] - px, o[dir > 0 ? 1 : o.length - 1] - py) < 1);
+        if (!next) break;
+        xy = next;
+        q = dir > 0 ? 2 : next.length - 4;
+        continue;
+      }
+      const sx = xy[q] - px;
+      const sy = xy[q + 1] - py;
+      const L = Math.hypot(sx, sy);
+      if (L >= left && L > 0) return [px + (sx * left) / L, py + (sy * left) / L, (dir * sx) / L, (dir * sy) / L];
+      left -= L;
+      px = xy[q];
+      py = xy[q + 1];
+      q += 2 * dir;
+    }
+    // Ran out of motorway (it ends): as far as it goes.
+    const b = dir > 0 ? xy.length - 4 : 0;
+    const L = Math.hypot(xy[b + 2] - xy[b], xy[b + 3] - xy[b + 1]) || 1;
+    return [px, py, (xy[b + 2] - xy[b]) / L, (xy[b + 3] - xy[b + 1]) / L];
+  };
+  const out: number[][] = [];
+  for (const side of [-1, 1]) {
+    // Where the ramps leave the road on this side.
+    let j = side < 0 ? i : i + 2;
+    while (j > 0 && j < road.length - 2 && near(road[j], road[j + 1]) < IC_JOIN) j += 2 * side;
+    const jx = road[j];
+    const jy = road[j + 1];
+    for (const dir of [-1, 1]) {
+      const [mx, my, tx, ty] = along(dir, IC_MERGE);
+      // The side of the motorway the road leaves it on, and the carriageway's edge there.
+      const s = Math.sign(-ty * (jx - mx) + tx * (jy - my)) || 1;
+      const ex = mx - s * ty * (MW_WIDTH / 2);
+      const ey = my + s * tx * (MW_WIDTH / 2);
+      const L = Math.hypot(ex - jx, ey - jy);
+      // Leaving the road along the motorway's heading at the crossing (swung out if the
+      // road meets it close by), arriving along it at the merge.
+      const [cx0, cy0] = along(dir, 1).slice(2) as [number, number];
+      const out0 = 1.6 * Math.max(0, IC_SWING - near(jx, jy));
+      const p1x = jx + cx0 * 0.35 * L - s * cy0 * out0;
+      const p1y = jy + cy0 * 0.35 * L + s * cx0 * out0;
+      const p2x = ex - tx * 0.5 * L;
+      const p2y = ey - ty * 0.5 * L;
+      const n = Math.max(4, Math.ceil(L / IC_STEP));
+      const pts: number[] = [];
+      for (let q = 0; q <= n; q++) {
+        const u = q / n;
+        const a = (1 - u) ** 3;
+        const b = 3 * u * (1 - u) ** 2;
+        const c = 3 * u * u * (1 - u);
+        const d = u ** 3;
+        pts.push(a * jx + b * p1x + c * p2x + d * ex, a * jy + b * p1y + c * p2y + d * ey);
+      }
+      out.push(pts);
+    }
   }
   return out;
 }

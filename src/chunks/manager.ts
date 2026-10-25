@@ -774,7 +774,9 @@ export class ChunkManager {
     const gx0 = Math.floor(r.x0 / NODE);
     const gy0 = Math.floor(r.y0 / NODE);
     const patch = this.nodePatch(gx0, gy0, Math.ceil(r.x1 / NODE) - gx0 + 1, Math.ceil(r.y1 / NODE) - gy0 + 1);
-    return patch && { site, roads, patch, motorways: this.motorwaysNear(r, 0) };
+    // Interchange ramps are part of the motorway to a plan: kept clear of, not joined.
+    const ramps = roads.filter((q) => q.ramp).map((q) => Float64Array.from(q.xy));
+    return patch && { site, roads: roads.filter((q) => !q.ramp), patch, motorways: [...this.motorwaysNear(r, 0), ...ramps] };
   }
 
   /**

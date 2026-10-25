@@ -76,6 +76,8 @@ export interface RoadEdge {
   route: number[];
   /** Roundabouts at its vertices, as `SegmentTask.rings`. */
   rings?: number[];
+  /** A main road crossing a motorway where they meet at a diamond interchange (experimental). */
+  interchange?: boolean;
 }
 
 export interface NetCell {
@@ -129,6 +131,8 @@ export interface SegmentTask {
   rings?: number[];
   /** The roundabouts it draws (as `rings`): those where it is the first edge, by key. */
   ownRings?: number[];
+  /** It crosses a motorway at a diamond interchange (`RoadEdge.interchange`): the chunk drawing it draws the ramps. */
+  interchange?: boolean;
   /**
    * The run of edges of one road this edge belongs to (vertices in canonical order),
    * if short enough: routed on the fine terrain as one when too steep or crossing a
@@ -160,6 +164,8 @@ export interface SegmentPath {
   micro?: boolean;
   /** A roundabout's ring (closed: its first point repeated last). */
   ring?: boolean;
+  /** A slip road of a motorway interchange (experimental; class C by its width and the clearances kept from it). */
+  ramp?: boolean;
 }
 
 /** A closed ring of radius r round (cx, cy), points every 3 m or so, from due east. */
