@@ -42,8 +42,8 @@ Grid overlay
 
 | Stage | Output | Runs when |
 |---|---|---|
-| `pre` | The surface window solves erode (`zPre`: the coarse eroded surface plus terrain detail from 64 to 512 m, §3.3) and region R, on a 16 m node grid. Batched 8 chunks per task. | Chunk is within generation rectangle + 1 chunk + 3 chunks. |
-| `hydro` | Window solve centred on the chunk (§3.3). Keeps the chunk ± 16 nodes. | Every chunk within ±3 chunks has `pre`. Solves are independent, so they run fully in parallel. |
+| `pre` | The surface window solves erode (`zPre`: the coarse eroded surface plus terrain detail from 64 to 512 m, §3.3) and region R, on a 16 m node grid. Batched 8 chunks per task. | Chunk is within the window (2 chunks) of a chunk needing `hydro`. |
+| `hydro` | Window solve centred on the chunk (§3.3). Keeps the chunk ± 16 nodes. | Every chunk within ±2 chunks has `pre`. Solves are independent, so they run fully in parallel. |
 | `net` | Per 8.2 km net cell: settlement sites, and the lattice edges carrying roads, tracks and footpaths (§3.4–3.5). | Cell is within 1 km of a chunk getting roads (the roads rectangle, and the roads plans pull in beyond it), or within 1.6 km of the generation rectangle (sites for land cover and plans). |
 | `mw` | Per net cell: the motorway pieces of its four motorway cells (§3.5.1). Cheap (most cells have none; each worker keeps the routed pieces). | Cell is within 6.5 km of a chunk getting roads, or 4.8 km of the generation rectangle. |
 | `roads` | Drawn curves for the lattice edges whose midpoint lies in the chunk, fitted to the fine terrain. | The chunk and its 8 neighbours have `hydro`, the net cells within 1 km exist, and the `mw` cells within 6.5 km. |
@@ -92,7 +92,10 @@ Grid overlay
 **Fine surface**
 - Nodes are 16 m apart. `zPre` = the coarse surface + the terrain detail between 64 and 512 m (terrain with octaves ≥ 64 m minus terrain with octaves ≥ 512 m). Window solves thus refine the coarse valley network instead of growing their own, and the map agrees with the coarse surface: slopes over 512 m correlate 0.92–0.94 (the best a 256 m sampling of the map could do is 0.95–0.98), heights within ~5–20 m on average (`dev/terraincmp.ts`). Before, window solves eroded the uplifted terrain themselves and the correlation was ~0.5.
 
-**Window solve (one per chunk, ±3 chunks, 224² nodes)**
+**Window solve (one per chunk, ±2 chunks, 160² nodes)**
+
+*(±3 chunks, 224² nodes, until 2026-10. Each node was solved in 49 windows; with ±2 in 25, and a solve takes about half as long: 62 → 32 ms; panning needs about a quarter less CPU. Measured on the same land (hashed seeds): seams and shorelines along chunk lines are as before; lowland and hill lakes keep most of their area with the half-chunk margin (below); long dammed lakes in alpine valleys no longer fit a window and are lost, and alpine valleys lie about 24 m higher, nearer the coarse surface, as the window edge draining at about the coarse level is closer. More coarse inflows at the window edge made no difference.)*
+
 1. **Outlets.**
    - Window-edge nodes drain at `max(min(zPre, coarse base), zPre − maxIncision(R))`.
    - Big coarse rivers entering the window are injected as inflows.
@@ -110,7 +113,8 @@ Grid overlay
    - `k` ranges from 0.012 (lowland) to 0.15 (alpine). `Smax` ranges from 0.18 to 0.75.
 5. **Lakes.**
    - *Dammed lakes:* every chunk has a seeded 5–12% chance of a dam (1.5–25 m by region) at a place-bound site. The lake floods upstream unless it would leak.
-   - *Natural lakes:* filled depressions of the uneroded surface of at least 25 nodes and 1.5 m deep, clear of the window edge. (On the eroded surface they depended on how deep each window, with its own truncated catchments, cut the outflow notch, and lakes ended at chunk lines.)
+   - *Natural lakes:* filled depressions of the uneroded surface of at least 25 nodes and 1.5 m deep. (On the eroded surface they depended on how deep each window, with its own truncated catchments, cut the outflow notch, and lakes ended at chunk lines.)
+   - Both must lie at least half a chunk (16 nodes) clear of the window edge, so the windows sharing a lake see it alike. (A whole chunk, as with ±3 windows, dropped about half the lakes of lowland and hills: lake area 3.5 → 1.7 % at R 0.15 against ±3, 2.7 % with half a chunk; and straight shores along chunk lines were no rarer: 2.84 % of shore length with a whole chunk, 2.26 % with half, 2.74 % with ±3, against ~1.6 % by chance.)
 6. **Valley floors** around channels with A ≥ 0.5 km² (floodplains, glacial U-floors). Half-width is `k·√A`, capped at 180 m.
 7. **Hillslope limiter.** Lower envelope: no node sits more than 1.15·Smax·d above any neighbour, which removes cliffs. Channels are included and re-routed into the lower ground; otherwise a small side stream left above a freshly carved valley floor stands as a one-node wall up to ~190 m high. Only channels beside a lake keep their course, so its inflows and outflow stay intact.
    - *Breached lakes:* floors and the limiter lower the land around lakes, never the lakes. A lake whose rim ends up more than 1 m below its level along at least 3 shore nodes and 10 % of its shore (one or two low nodes are just its outflow notch; the old single-node rule drained 70 % of lakes) is drained, its bed returned to the eroded ground (left at the level it stood as a dead-flat plateau), and the limiter runs again to lower its bed towards the breach. Otherwise it hangs above its surroundings: in hills and mountains most natural lakes did, by 8–360 m.
@@ -371,7 +375,7 @@ Motorways differ from the network's roads: they cross other ways without junctio
 
 - The retention set is about 350 chunks on a phone and about 550 on a desktop. The 4 m DEM takes 64 KB per chunk as Float32. Rasters are re-rendered on demand rather than all kept: only visible chunks plus one ring keep their bitmaps.
 - Heavy arrays use transferable buffers. Workers keep their own copies of neighbouring data so it isn't copied back and forth.
-- Workers cache what overlapping tasks share, keyed by the seeds it depends on: coarse tiles, coarse heights on the 128 m grid, meander costs per chunk (each in 49 window solves), and the net's vertex terrain, edge costs and corridor paths (neighbouring cells read much the same land; pruned to about 16 km around the latest cell). The net caches are dropped when a tile position turns up with other seeds (land forgotten and made anew; `test/netcache.test.ts`).
+- Workers cache what overlapping tasks share, keyed by the seeds it depends on: coarse tiles, coarse heights on the 128 m grid, meander costs per chunk (each in 25 window solves), and the net's vertex terrain, edge costs and corridor paths (neighbouring cells read much the same land; pruned to about 16 km around the latest cell). The net caches are dropped when a tile position turns up with other seeds (land forgotten and made anew; `test/netcache.test.ts`).
 - Coarse tiles are made once and shared: the manager sends a `tile` task for every tile within 62 km of the net and motorway cells it needs (a cell reads ~110–130 tiles out to ~61 km), nearest first, and hands each result to every worker, which adopts it under the same cache key (the key holds every seed the tile depends on; `test/tileshare.test.ts`). Those cells wait for their tiles. Any tile beyond the reach is made where it is read, as before: the reach only affects speed. Measured (seed 7, 4 workers): a cold net cell 4.8 → 3.3 s, start-up CPU −8 %, the first view 8.8 → 8.2 s.
 - Lattice vertex positions and neighbour lists are kept per worker in blocks of 32 × 32 vertices (they depend on no seed), pruned with the net caches; searches look neighbours and the way back up in flat tables.
 - A chunk keeps its field parcels' layout with the objects it was laid out from (its surface, the roads round it, plans, net and motorway cells, the solves under its fine nodes); a later render whose inputs are still those objects draws the kept layout instead of laying it out again (a zoom change redraws a chunk at about half the cost).
