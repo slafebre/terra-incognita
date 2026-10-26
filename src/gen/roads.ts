@@ -1,4 +1,4 @@
-import { COARSE_REACH, LAKE_REACH } from './hydro';
+import { COARSE_REACH, LAKE_REACH, NODE } from './hydro';
 import { LAKE_TILE } from './lakes';
 import { COARSE_KEEP_EXTRA } from './seeds';
 import type { Site } from './settle';
@@ -235,6 +235,20 @@ export interface RoadPatch {
   zE: Float32Array;
   A: Float32Array;
   lake: Float32Array;
+}
+
+/** Ground (m) at a world point, bilinear over a patch's nodes; NaN outside it. */
+export function zOnPatch(p: RoadPatch, x: number, y: number): number {
+  const u = x / NODE - p.gx;
+  const v = y / NODE - p.gy;
+  if (!(u >= 0 && v >= 0 && u <= p.w - 1.001 && v <= p.h - 1.001)) return NaN;
+  const i = Math.floor(u);
+  const j = Math.floor(v);
+  const k = j * p.w + i;
+  const fu = u - i;
+  const fv = v - j;
+  const z = p.zE;
+  return (z[k] * (1 - fu) + z[k + 1] * fu) * (1 - fv) + (z[k + p.w] * (1 - fu) + z[k + p.w + 1] * fu) * fv;
 }
 
 /** Fine-patch margin around a chunk (nodes): an edge drawn by the chunk, its neighbours, and the fitting band. */

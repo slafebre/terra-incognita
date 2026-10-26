@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { CoarseField } from '../src/gen/hydro';
-import { MW_CELL, MW_RMIN, MW_SPILL, Motorways, tightestRadius } from '../src/gen/motorway';
+import { MW_CELL, MW_RMIN, MW_SPILL, Motorways, motorwayEnd, tightestRadius, type MotorwayPiece } from '../src/gen/motorway';
 import { NET_REACH } from '../src/gen/roads';
 import { expand, SeedStore, SeedView } from '../src/gen/seeds';
 import { Settlements } from '../src/gen/settle';
@@ -111,6 +111,35 @@ describe('motorways', () => {
     // The joint (shared by both pieces) is classed alike in each.
     expect(ms[1].cls[30]).toBe(ms[0].cls[0]);
     expect(surfaceLines(ms).length).toBeGreaterThan(1);
+  });
+
+  it('ends on land it can reach, not inside a hill', () => {
+    // A motorway along +x ending at the origin, with two main roads starting ahead of it:
+    // the nearer one (150, 0) under a 40 m hill, the farther one (250, 150) on the flat
+    // and clear of it. Their other ends are out of reach, so they are the only candidates.
+    const n = 41;
+    const xy = new Float64Array(2 * n);
+    for (let i = 0; i < n; i++) xy[2 * i] = (i - n + 1) * 25;
+    const piece = { key: 'test', xy, endA: false, endB: true } as unknown as MotorwayPiece;
+    const roads = [
+      { xy: [150, 0, 150, 400], cls: 0 },
+      { xy: [250, 150, 250, 600], cls: 0 },
+    ];
+    const last = (r: { xy: Float64Array }) => [r.xy[r.xy.length - 2], r.xy[r.xy.length - 1]];
+    // A hill only over the nearer terminus: the line to the farther one passes 77 m off it.
+    const hill = (x: number, y: number) => (Math.hypot(x - 150, y) < 60 ? 40 : 0);
+
+    // Blind to the ground, it runs on to the nearest road end ahead — into the hill.
+    expect(last(motorwayEnd(piece, roads))).toEqual([150, 0]);
+    // Given the ground, that terminus is 40 m under it (over MW_END_RISE), so the
+    // farther one wins, though it is 141 m further on.
+    expect(last(motorwayEnd(piece, roads, hill))).toEqual([250, 150]);
+    // With nowhere it can reach, it stops where the piece does rather than tunnel to one.
+    expect(last(motorwayEnd(piece, roads, (x) => (x > 60 ? 40 : 0)))).toEqual([0, 0]);
+    // Ground raised as a whole is flat land, not a hill: the road lies on it and runs on.
+    expect(last(motorwayEnd(piece, roads, () => 40))).toEqual([150, 0]);
+    // Ground it cannot see leaves the end as it was.
+    expect(last(motorwayEnd(piece, roads, () => NaN))).toEqual([150, 0]);
   });
 
   it('keeps to wide curves', () => {

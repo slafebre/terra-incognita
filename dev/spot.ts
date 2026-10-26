@@ -99,7 +99,7 @@ if (process.env.SVG) {
   const lanes: string[] = [];
   for (const n of m.mws.values())
     for (const p of (n.data ?? []) as MotorwayPiece[]) {
-      const end = p.endA || p.endB ? motorwayEnd(p, [...byKey.values()]) : { xy: p.xy, lanes: [] as number[][] };
+      const end = p.endA || p.endB ? motorwayEnd(p, [...byKey.values()], m.endGround(p)) : { xy: p.xy, lanes: [] as number[][] };
       let d = '';
       for (let i = 0; i < end.xy.length; i += 2) d += `${i ? 'L' : 'M'}${f(end.xy[i])} ${f(end.xy[i + 1])}`;
       svg += `<path d="${d}" stroke="#d62c54" stroke-opacity="0.75" stroke-width="24" fill="none"/><path d="${d}" stroke="#463a34" stroke-width="0.7" fill="none"/>`;

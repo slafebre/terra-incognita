@@ -1297,14 +1297,29 @@ const MW_END_SPREAD = (40 * Math.PI) / 180;
 const MW_END_FLARE = (60 * Math.PI) / 180;
 
 /**
+ * A terminus must lie on land the carriageway can reach at grade: ground more than this
+ * far (m) above the motorway's approach would have to be tunnelled through, and a
+ * junction cannot sit inside a tunnel. Under the renderer's TUNNEL_H (render/motorway),
+ * so the run-on never classes as one, with slack for the two profiles differing.
+ */
+const MW_END_RISE = 20;
+/** The approach height is the ground along this much (m) of the motorway before its end. */
+export const MW_END_PROFILE = 500;
+
+/**
  * A piece's centre line, run on where the motorway ends (endA, endB) to its terminus as
  * drawn: towards the roundabout ahead, parting MW_END_SPLIT m before its ring into two
  * lanes (an island between, as ramps: `lanes`); else to the main road starting there
  * (its end). Cubic curves, leaving along the motorway.
+ *
+ * `ground` (m above sea level, NaN where unknown) keeps the terminus on land the
+ * carriageway can reach: see MW_END_RISE. Without it any terminus ahead is taken, as
+ * before.
  */
 export function motorwayEnd(
   p: MotorwayPiece,
   roads: { xy: ArrayLike<number>; ring?: boolean; ramp?: boolean; cls: number }[],
+  ground?: (x: number, y: number) => number,
 ): { xy: Float64Array; lanes: number[][] } {
   const xy = p.xy;
   const n = xy.length;
@@ -1323,13 +1338,51 @@ export function motorwayEnd(
     }
     return out;
   };
-  const runOn = (ex: number, ey: number, ux: number, uy: number): number[] | undefined => {
+  /**
+   * The motorway's height where it ends: the ground along its last MW_END_PROFILE m,
+   * averaged, as the renderer takes its profile — so a terminus is judged against the
+   * road's own level and not the one point it ends on. `step` walks into the piece.
+   * NaN without ground, or where none of it is known.
+   */
+  const approach = (from: number, step: number): number => {
+    if (!ground) return NaN;
+    let sum = 0;
+    let got = 0;
+    let run = 0;
+    for (let i = from; i >= 0 && i + 1 < n && run < MW_END_PROFILE; i += step) {
+      const z = ground(xy[i], xy[i + 1]);
+      if (Number.isFinite(z)) {
+        sum += z;
+        got++;
+      }
+      const j = i + step;
+      if (j < 0 || j + 1 >= n) break;
+      run += Math.hypot(xy[j] - xy[i], xy[j + 1] - xy[i + 1]);
+    }
+    return got ? sum / got : NaN;
+  };
+  const runOn = (ex: number, ey: number, ux: number, uy: number, z0: number): number[] | undefined => {
     const L = Math.hypot(ux, uy) || 1;
     ux /= L;
     uy /= L;
     const ahead = (x: number, y: number) => {
       const d = Math.hypot(x - ex, y - ey);
       return d > 1 && d < MW_END_REACH && ((x - ex) * ux + (y - ey) * uy) / d > 0.6;
+    };
+    /**
+     * Land the run-on can reach at grade: the ground on the way to a candidate terminus
+     * keeps within MW_END_RISE of the approach. Ground that is not known does not
+     * reject — a chunk that cannot yet see the land draws the end as it did before.
+     */
+    const reachable = (x: number, y: number): boolean => {
+      if (!ground || !Number.isFinite(z0)) return true;
+      const d = Math.hypot(x - ex, y - ey);
+      const steps = Math.max(1, Math.ceil(d / OUT_STEP));
+      for (let q = 1; q <= steps; q++) {
+        const z = ground(ex + ((x - ex) * q) / steps, ey + ((y - ey) * q) / steps);
+        if (Number.isFinite(z) && z - z0 > MW_END_RISE) return false;
+      }
+      return true;
     };
     // The nearest ring ahead; else the nearest main road's end, unless a ring lies within
     // 40 m beyond it (a ring wins over a road end beside it, whichever is seen first).
@@ -1342,12 +1395,12 @@ export function motorwayEnd(
       if (r.ring) {
         const [cx, cy, rad] = ringDisc(r.xy);
         const d = Math.hypot(cx - ex, cy - ey);
-        if (ahead(cx, cy) && d < dr) [dr, ring] = [d, [cx, cy, rad]];
+        if (ahead(cx, cy) && d < dr && reachable(cx, cy)) [dr, ring] = [d, [cx, cy, rad]];
       } else if (r.cls <= 1)
         for (const k of [0, r.xy.length - 2]) {
           const [x, y] = [r.xy[k], r.xy[k + 1]];
           const d = Math.hypot(x - ex, y - ey);
-          if (ahead(x, y) && d < de) [de, end] = [d, [x, y]];
+          if (ahead(x, y) && d < de && reachable(x, y)) [de, end] = [d, [x, y]];
         }
     }
     if (ring && dr < de + 40) end = undefined;
@@ -1393,7 +1446,7 @@ export function motorwayEnd(
   };
   let line = Array.from(xy);
   if (p.endA) {
-    const r = runOn(xy[0], xy[1], xy[0] - xy[2], xy[1] - xy[3]);
+    const r = runOn(xy[0], xy[1], xy[0] - xy[2], xy[1] - xy[3], approach(0, 2));
     if (r) {
       const rev: number[] = [];
       for (let q = r.length - 2; q >= 0; q -= 2) rev.push(r[q], r[q + 1]);
@@ -1401,7 +1454,7 @@ export function motorwayEnd(
     }
   }
   if (p.endB) {
-    const r = runOn(xy[n - 2], xy[n - 1], xy[n - 2] - xy[n - 4], xy[n - 1] - xy[n - 3]);
+    const r = runOn(xy[n - 2], xy[n - 1], xy[n - 2] - xy[n - 4], xy[n - 1] - xy[n - 3], approach(n - 2, -2));
     if (r) line = [...line, ...r];
   }
   return { xy: Float64Array.from(line), lanes };

@@ -16,10 +16,10 @@ import {
   type PreResult,
 } from '../gen/hydro';
 import { latticeSegments } from '../gen/lattice';
-import { motorwayEnd, MW_END_REACH, MW_SPILL, type MotorwayPiece } from '../gen/motorway';
+import { motorwayEnd, MW_END_PROFILE, MW_END_REACH, MW_SPILL, type MotorwayPiece } from '../gen/motorway';
 import { FIELD_PAD, FIELD_REACH, type Fields } from '../gen/fields';
 import { POI_PAD, type PoiPatch } from '../gen/poi';
-import { NET_CELL, NET_REACH, ROAD_C, ROAD_PAD, type NetCell, type RoadEdge, type RoadPatch, type SegmentPath } from '../gen/roads';
+import { NET_CELL, NET_REACH, ROAD_C, ROAD_PAD, zOnPatch, type NetCell, type RoadEdge, type RoadPatch, type SegmentPath } from '../gen/roads';
 import { expand, intersects, SeedStore, type Rect } from '../gen/seeds';
 import { TOWN, type Site } from '../gen/settle';
 import { PLAN_DRAW_PAD, PLAN_EXTENT, PLAN_MARGIN, type PlanInput, type TownPlan } from '../gen/town';
@@ -591,7 +591,7 @@ export class ChunkManager {
           if (intersects(pieceBox(p), q)) out.push(p.xy);
           continue;
         }
-        const end = motorwayEnd(p, roads);
+        const end = motorwayEnd(p, roads, this.endGround(p));
         const near = (xy: ArrayLike<number>) => {
           for (let k = 0; k < xy.length; k += 2) if (xy[k] >= q.x0 && xy[k] <= q.x1 && xy[k + 1] >= q.y0 && xy[k + 1] <= q.y1) return true;
           return false;
@@ -602,6 +602,38 @@ export class ChunkManager {
       }
     roads.push(...lanes);
     return out;
+  }
+
+  /**
+   * Ground for motorwayEnd's terminus check: the fine nodes about each end of a piece —
+   * its approach, and everything within reach of it. Each node comes from its own
+   * chunk's solve, so every chunk that draws this end reads the same land and chooses
+   * the same terminus. Undefined until those solves exist: the end is then run on
+   * without the check, as it was before. (Dev tools drawing ends use it too.)
+   */
+  endGround(p: MotorwayPiece): ((x: number, y: number) => number) | undefined {
+    const patches: RoadPatch[] = [];
+    for (const [has, i] of [
+      [p.endA, 0],
+      [p.endB, p.xy.length - 2],
+    ] as [boolean, number][]) {
+      if (!has) continue;
+      const r = expand({ x0: p.xy[i], y0: p.xy[i + 1], x1: p.xy[i], y1: p.xy[i + 1] }, MW_END_REACH + MW_END_PROFILE);
+      const gx0 = Math.floor(r.x0 / NODE);
+      const gy0 = Math.floor(r.y0 / NODE);
+      const q = this.nodePatch(gx0, gy0, Math.ceil(r.x1 / NODE) - gx0 + 1, Math.ceil(r.y1 / NODE) - gy0 + 1);
+      if (!q) return undefined;
+      patches.push(q);
+    }
+    return patches.length
+      ? (x, y) => {
+          for (const q of patches) {
+            const z = zOnPatch(q, x, y);
+            if (Number.isFinite(z)) return z;
+          }
+          return NaN;
+        }
+      : undefined;
   }
 
   /** Centre lines of the motorway pieces passing within `m` of `r`. */
