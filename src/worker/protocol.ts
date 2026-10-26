@@ -1,6 +1,6 @@
 import type { DemPatch, DemResult } from '../gen/dem';
 import type { Fields } from '../gen/fields';
-import type { HydroResult, HydroWindow, PreResult } from '../gen/hydro';
+import type { Coarse, HydroResult, HydroWindow, PreResult } from '../gen/hydro';
 import type { MotorwayPiece } from '../gen/motorway';
 import type { PoiPatch } from '../gen/poi';
 import type { NetCell, RoadPatch, SegmentPath, SegmentTask } from '../gen/roads';
@@ -13,6 +13,8 @@ export type TaskRequest =
   | { kind: 'hydro'; cx: number; cy: number; win: HydroWindow; seeds: SeedPayload }
   | { kind: 'net'; gx: number; gy: number; seeds: SeedPayload }
   | { kind: 'mw'; gx: number; gy: number; seeds: SeedPayload }
+  /** A coarse tile, made once and handed to every worker (see WorkerTiles). */
+  | { kind: 'tile'; tx: number; ty: number; seeds: SeedPayload }
   | { kind: 'roads'; cx: number; cy: number; segments: SegmentTask[]; patch: RoadPatch; motorways: Float64Array[] }
   | { kind: 'plan'; input: PlanInput }
   | { kind: 'dem'; cx: number; cy: number; patch: DemPatch; sites: Site[]; seeds: SeedPayload }
@@ -43,6 +45,7 @@ export type TaskResult =
   | { kind: 'hydro'; result: HydroResult; ms: number }
   | { kind: 'net'; result: NetCell; ms: number }
   | { kind: 'mw'; result: MotorwayPiece[]; ms: number }
+  | { kind: 'tile'; key: string; tile: Coarse; ms: number }
   | { kind: 'roads'; result: SegmentPath[]; ms: number }
   | { kind: 'plan'; result: TownPlan; ms: number }
   | { kind: 'dem'; result: DemResult; ms: number }
@@ -54,6 +57,11 @@ export type TaskKind = TaskRequest['kind'];
 export interface WorkerRequest {
   id: number;
   task: TaskRequest;
+}
+
+/** Coarse tiles another worker made, for this one's tile cache (by their cache keys). */
+export interface WorkerTiles {
+  tiles: { key: string; tile: Coarse }[];
 }
 
 /** Sent once to each worker before any task. */

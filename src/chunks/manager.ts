@@ -2,6 +2,7 @@ import { CHUNK, DPR_MAX, FORGET, GEN_MARGIN, M_PER_CSS_PX } from '../lib/constan
 import { DEM_PAD, DEM_PATCH, type DemPatch } from '../gen/dem';
 import {
   blendWeight,
+  COARSE,
   CORE,
   CORE_PAD,
   NODE,
@@ -9,6 +10,7 @@ import {
   WIN_CHUNKS,
   COARSE_REACH,
   LAKE_REACH,
+  TILE_STRIDE,
   type HydroCore,
   type HydroWindow,
   type PreResult,
@@ -81,6 +83,25 @@ export function forChunksIn(r: Rect, f: (cx: number, cy: number) => void): void 
 }
 
 const PRE_BATCH = 8;
+/** Coarse tile spacing (m): tile (tx, ty) is centred at ((tx + 1)·TILE_S, (ty + 1)·TILE_S). */
+const TILE_S = TILE_STRIDE * COARSE;
+/**
+ * Coarse tiles whose centres lie this near a net cell's centre (m) are made first, once,
+ * and handed to every worker (`tile` tasks): a cell reads ~110–130 tiles out to ~61 km.
+ * Any it reads beyond are made where needed, as before; only speed depends on this.
+ */
+const TILE_REACH = 62000;
+const tileKey = (tx: number, ty: number) => (tx + 32768) * 65536 + ty + 32768;
+/** The coarse tiles a net cell (and its motorway cell) reads, as made first. */
+function tilesOfCell(gx: number, gy: number): [number, number][] {
+  const cx = (gx + 0.5) * NET_CELL;
+  const cy = (gy + 0.5) * NET_CELL;
+  const out: [number, number][] = [];
+  for (let ty = Math.floor((cy - TILE_REACH) / TILE_S) - 1; ty <= Math.ceil((cy + TILE_REACH) / TILE_S); ty++)
+    for (let tx = Math.floor((cx - TILE_REACH) / TILE_S) - 1; tx <= Math.ceil((cx + TILE_REACH) / TILE_S); tx++)
+      if (Math.hypot((tx + 1) * TILE_S - cx, (ty + 1) * TILE_S - cy) <= TILE_REACH) out.push([tx, ty]);
+  return out;
+}
 /**
  * Net cells this far around a chunk (m) own edges it needs: those it draws (owned by
  * the cell holding their midpoint; lattice edges are short) and their neighbours,
@@ -180,6 +201,7 @@ export class ChunkManager {
     hydro: { ms: 0, n: 0 },
     net: { ms: 0, n: 0 },
     mw: { ms: 0, n: 0 },
+    tile: { ms: 0, n: 0 },
     roads: { ms: 0, n: 0 },
     plan: { ms: 0, n: 0 },
     dem: { ms: 0, n: 0 },
@@ -197,6 +219,8 @@ export class ChunkManager {
   readonly nets = new Map<string, NetState>();
   /** Motorway pieces by net cell: cheap, but needed much further out than the lattice. */
   readonly mws = new Map<string, MwState>();
+  /** Coarse tiles made and handed to every worker, by tileKey (see TILE_REACH). */
+  readonly tiles = new Map<number, CellState<true>>();
   /** Plans of settlements (street plans, farmsteads), by site id. */
   readonly plans = new Map<string, PlanState>();
   private lastPrune: Rect | undefined;
@@ -244,6 +268,7 @@ export class ChunkManager {
       render: mean('render', 25),
       net: mean('net', 5000),
       mw: mean('mw', 20),
+      tile: mean('tile', 25),
     };
     let done = 0;
     let total = 0;
@@ -271,6 +296,12 @@ export class ChunkManager {
     };
     cells(this.netRect, this.nets, w.net);
     cells(this.mwRect, this.mws, w.mw);
+    for (const k of this.tilesWanted().keys()) {
+      const t = this.tiles.get(k);
+      total += w.tile;
+      if (t?.data || t?.failed) done += w.tile;
+      else if (t?.busy) done += running(t.since, w.tile);
+    }
     return total > 0 ? done / total : 1;
   }
 
@@ -337,6 +368,12 @@ export class ChunkManager {
         const r = { x0: gx * NET_CELL, y0: gy * NET_CELL, x1: (gx + 1) * NET_CELL, y1: (gy + 1) * NET_CELL };
         if (!n.busy && !intersects(r, netKeep)) cells.delete(k);
       }
+    const coarseKeep = expand(netKeep, TILE_REACH);
+    for (const [k, t] of this.tiles) {
+      const tx = Math.floor(k / 65536) - 32768;
+      const ty = (k % 65536) - 32768;
+      if (!t.busy && !intersects({ x0: tx * TILE_S, y0: ty * TILE_S, x1: (tx + 2) * TILE_S, y1: (ty + 2) * TILE_S }, coarseKeep)) this.tiles.delete(k);
+    }
     // Pruning walks every seed; only bother once the view has moved a bit.
     const lp = this.lastPrune;
     if (!lp || Math.abs(lp.x0 - this.forgetRect.x0) + Math.abs(lp.y0 - this.forgetRect.y0) > 256 || Math.abs(lp.x1 - lp.x0 - (this.forgetRect.x1 - this.forgetRect.x0)) > 256) {
@@ -380,6 +417,7 @@ export class ChunkManager {
     this.mwRect = bounds([...roads.map((r) => expand(r, MW_SPILL + MOTORWAY_ROADS)), expand(drawn, MW_SPILL + MW_END_REACH)]);
     while (this.pool.idle > 0) {
       if (this.schedulePreFirst()) continue;
+      if (this.scheduleTile()) continue;
       if (this.scheduleCell('mw', this.mws, this.mwRect)) continue;
       if (this.scheduleCell('net', this.nets, this.netRect)) continue;
       if (this.schedulePlan()) continue;
@@ -425,6 +463,70 @@ export class ChunkManager {
     return true;
   }
 
+  private tilesReady(gx: number, gy: number): boolean {
+    return tilesOfCell(gx, gy).every(([tx, ty]) => {
+      const t = this.tiles.get(tileKey(tx, ty));
+      return t?.data || t?.failed;
+    });
+  }
+
+  /** The coarse tiles the net and motorway cells still to make read (see TILE_REACH). */
+  private tilesWanted(): Map<number, [number, number]> {
+    const out = new Map<number, [number, number]>();
+    for (const [rect, cells] of [
+      [this.netRect, this.nets],
+      [this.mwRect, this.mws],
+    ] as [Rect, Map<string, CellState<unknown>>][])
+      for (const [gx, gy] of this.netCells(rect)) {
+        if (cells.get(`${gx},${gy}`)?.data) continue;
+        for (const [tx, ty] of tilesOfCell(gx, gy)) out.set(tileKey(tx, ty), [tx, ty]);
+      }
+    return out;
+  }
+
+  /** Dispatches the nearest wanted coarse tile not made yet, if any; the result goes to every worker. */
+  private scheduleTile(): boolean {
+    const [fx, fy] = this.focus;
+    let best: [number, number] | undefined;
+    let bestD = Infinity;
+    for (const [k, [tx, ty]] of this.tilesWanted()) {
+      if (this.tiles.has(k)) continue;
+      const d = Math.hypot((tx + 1) * TILE_S - fx, (ty + 1) * TILE_S - fy);
+      if (d < bestD) {
+        bestD = d;
+        best = [tx, ty];
+      }
+    }
+    if (!best) return false;
+    const [tx, ty] = best;
+    const state: CellState<true> = { busy: true, since: performance.now() };
+    this.tiles.set(tileKey(tx, ty), state);
+    const c = { x: (tx + 1) * TILE_S, y: (ty + 1) * TILE_S };
+    this.pool
+      .run({
+        kind: 'tile',
+        tx,
+        ty,
+        // The tile spans two strides from (tx, ty)·TILE_S; its terrain reads coarse seeds round it.
+        seeds: this.seeds.payloadFor({ x0: c.x, y0: c.y, x1: c.x + 16, y1: c.y + 16 }, expand({ x0: tx * TILE_S, y0: ty * TILE_S, x1: (tx + 2) * TILE_S, y1: (ty + 2) * TILE_S }, 2000)),
+      })
+      .then((res) => {
+        state.busy = false;
+        this.stats.tile.ms += res.ms;
+        this.stats.tile.n++;
+        if (res.kind !== 'tile') return;
+        state.data = true;
+        this.pool.shareTiles?.({ tiles: [{ key: res.key, tile: res.tile }] });
+      })
+      .catch((err) => {
+        state.busy = false;
+        state.failed = true; // its cells make it themselves
+        this.stats.errors++;
+        console.error(`coarse tile ${tx},${ty} failed`, err);
+      });
+    return true;
+  }
+
   /** Dispatches the nearest missing cell of a kind in `rect`, if any. */
   private scheduleCell<T>(kind: 'net' | 'mw', cells: Map<string, CellState<T>>, rect: Rect): boolean {
     const [fx, fy] = this.focus;
@@ -433,6 +535,8 @@ export class ChunkManager {
     for (const [gx, gy] of this.netCells(rect)) {
       const n = cells.get(`${gx},${gy}`);
       if (n && (n.busy || n.data || n.failed)) continue;
+      // Not before its coarse tiles are made: each worker would make them all again.
+      if (!this.tilesReady(gx, gy)) continue;
       const d = Math.hypot((gx + 0.5) * NET_CELL - fx, (gy + 0.5) * NET_CELL - fy);
       if (d < bestD) {
         bestD = d;
@@ -705,6 +809,7 @@ export class ChunkManager {
       }
       case 'net':
       case 'mw':
+      case 'tile':
         throw new Error('net and motorway cells are scheduled by scheduleCell');
       case 'plan':
         throw new Error('plans are scheduled by schedulePlan');

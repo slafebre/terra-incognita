@@ -1,5 +1,5 @@
 import { generateDem } from '../gen/dem';
-import { CoarseField, generatePre, solveHydro } from '../gen/hydro';
+import { CoarseField, generatePre, shareCoarseTile, solveHydro } from '../gen/hydro';
 import { latticeCell, routeCurves } from '../gen/lattice';
 import { Motorways } from '../gen/motorway';
 import { FARM, Settlements } from '../gen/settle';
@@ -47,6 +47,11 @@ export function runTask(t: TaskRequest): { result: TaskResult; transfer: Transfe
       field.checkSeeds(); // before the shared caches are read
       const result = new Motorways(field, terrain, new Settlements(field, terrain, view), view).netCellPieces(t.gx, t.gy);
       return { result: { kind: 'mw', result, ms: ms() }, transfer: result.map((p) => p.xy.buffer) };
+    }
+    case 'tile': {
+      const { key, tile } = shareCoarseTile(new SeedView(t.seeds), t.tx, t.ty);
+      // Copied, not transferred: this worker's cache keeps the tile.
+      return { result: { kind: 'tile', key, tile, ms: ms() }, transfer: [] };
     }
     case 'roads': {
       const result = routeCurves(t.segments, t.patch, t.motorways);

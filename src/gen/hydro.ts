@@ -401,7 +401,23 @@ export const tileZForDebug = (c: Coarse, x: number, y: number) => tileZ(c, x, y)
 
 /** Coarse tiles survive across solves (per worker), keyed by tile + seed hash. */
 const tileCache = new Map<string, Coarse>();
-const TILE_CACHE_MAX = 128;
+/** (A net cell reads ~110–130 tiles; the manager hands workers those of every cell it needs.) */
+const TILE_CACHE_MAX = 256;
+
+/**
+ * Tiles are shared between workers (the manager's `tile` tasks): one worker makes a
+ * tile and returns it with its cache key, the others adopt it. The key holds every
+ * seed the tile depends on, so an adopted tile is the one the worker would make.
+ */
+export function shareCoarseTile(view: SeedView, tx: number, ty: number): { key: string; tile: Coarse } {
+  const tile = new CoarseField(new Terrain(view), view).tile(tx, ty);
+  return { key: tileKey(view, tx, ty), tile };
+}
+export function adoptCoarseTile(key: string, tile: Coarse): void {
+  if (tileCache.has(key)) return;
+  if (tileCache.size >= TILE_CACHE_MAX) tileCache.delete(tileCache.keys().next().value!);
+  tileCache.set(key, tile);
+}
 
 /** Hash of every coarse seed a tile's terrain can depend on. */
 function tileSignature(view: SeedView, tx: number, ty: number): number {

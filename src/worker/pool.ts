@@ -1,4 +1,4 @@
-import type { TaskRequest, TaskResult, WorkerConfig, WorkerRequest, WorkerResponse } from './protocol';
+import type { TaskRequest, TaskResult, WorkerConfig, WorkerRequest, WorkerResponse, WorkerTiles } from './protocol';
 
 interface Slot {
   worker: Worker;
@@ -10,6 +10,8 @@ export interface TaskRunner {
   readonly size: number;
   readonly idle: number;
   run(task: TaskRequest, transfer?: Transferable[]): Promise<TaskResult>;
+  /** Hands coarse tiles to every worker (pools running tasks in-process share one cache and need not). */
+  shareTiles?(msg: WorkerTiles): void;
 }
 
 /** Fixed-size pool; one task per worker at a time. The caller decides what to run next. */
@@ -35,6 +37,11 @@ export class WorkerPool implements TaskRunner {
 
   get size(): number {
     return this.slots.length;
+  }
+
+  shareTiles(msg: WorkerTiles): void {
+    // (The worker that made them has them already; it ignores the copy.)
+    for (const s of this.slots) s.worker.postMessage(msg);
   }
 
   get idle(): number {

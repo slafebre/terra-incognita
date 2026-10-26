@@ -47,6 +47,7 @@ const keyOf = (t: TaskRequest, p: number): string[] => {
     case 'plan':
       return [`${p}:plan:${t.input.site.id}`];
     case 'render':
+    case 'tile':
       return [];
     default:
       return [`${p}:${t.kind}:${t.cx},${t.cy}`];

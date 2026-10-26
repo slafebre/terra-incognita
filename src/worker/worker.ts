@@ -1,13 +1,18 @@
 /// <reference lib="webworker" />
+import { adoptCoarseTile } from '../gen/hydro';
 import { setRegionOverride } from '../gen/terrain';
-import type { WorkerConfig, WorkerRequest, WorkerResponse } from './protocol';
+import type { WorkerConfig, WorkerRequest, WorkerResponse, WorkerTiles } from './protocol';
 import { runTask } from './tasks';
 
 declare const self: DedicatedWorkerGlobalScope;
 
-self.onmessage = (e: MessageEvent<WorkerRequest | WorkerConfig>) => {
+self.onmessage = (e: MessageEvent<WorkerRequest | WorkerConfig | WorkerTiles>) => {
   if ('config' in e.data) {
     setRegionOverride(e.data.config.regionOverride);
+    return;
+  }
+  if ('tiles' in e.data) {
+    for (const { key, tile } of e.data.tiles) adoptCoarseTile(key, tile);
     return;
   }
   let msg: WorkerResponse;
