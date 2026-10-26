@@ -106,8 +106,11 @@ const same = (a: ViewState, b: ViewState) =>
 
 function approach(): boolean {
   if (same(actual, desired)) return false;
-  // Nothing on screen to protect (start-up, resize): go straight there.
-  if (ok(desired) || !ok(actual)) {
+  // The view never shows land not made yet. While it isn't all drawn (start-up, a
+  // resize, a jump) it holds still, as it holds at the edge of the land when panning,
+  // and moves on toward the desired view once there is land for it.
+  if (!ok(actual)) return false;
+  if (ok(desired)) {
     Object.assign(actual, desired);
     return true;
   }

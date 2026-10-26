@@ -49,6 +49,10 @@ body {
   letter-spacing: 0.06em;
   text-transform: uppercase;
 }
+#loading .caption {
+  font-weight: 500;
+  font-style: italic;
+}
 #loading[hidden] {
   display: none;
 }

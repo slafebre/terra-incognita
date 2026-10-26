@@ -4,10 +4,13 @@ import type { Lang } from './lang';
  * Loading progress as a paper map's scale bar: a true scale bar for the zoom (a left
  * part of one unit cut into SUB blocks, then two whole units, numbered in metres or
  * kilometres), whose blocks fill in from the left, dark and light in turn, as the land
- * the view needs is made. Full, it is an ordinary scale bar; then it fades out.
+ * the view needs is made, captioned "Loading…". Full, it is an ordinary scale bar; then
+ * it fades out.
  */
 
 const WORD: Record<Lang, string> = { en: 'Scale', nl: 'Schaal', fr: 'Échelle', de: 'Maßstab' };
+/** Caption under the bar, saying what its filling means. */
+const LOADING: Record<Lang, string> = { en: 'Loading…', nl: 'Laden…', fr: 'Chargement…', de: 'Wird geladen…' };
 /** Units the bar may count in (m): the largest whose bar fits is used. */
 const UNITS = [50, 100, 200, 250, 500, 1000, 2000, 5000];
 /** Blocks the left unit is cut into. */
@@ -24,7 +27,8 @@ const BAR_H = 6;
 const TITLE_Y = 9;
 const NUM_Y = 23;
 const BAR_Y = 27;
-const HEIGHT = BAR_Y + BAR_H + 1;
+const CAPTION_Y = BAR_Y + BAR_H + 13;
+const HEIGHT = CAPTION_Y + 3;
 
 /** "1:10,000" as the language writes it (French: 1/10 000). */
 function ratio(lang: Lang, n: number): string {
@@ -101,6 +105,7 @@ export class ScaleBar {
     // The outline and block divisions, over the fill.
     add('rect', { x: left + 0.5, y: BAR_Y + 0.5, width: this.width - 1, height: BAR_H - 1, fill: 'none', stroke: INK, 'stroke-width': 1 });
     for (const x of edges.slice(1, -1)) add('line', { x1: left + x, x2: left + x, y1: BAR_Y, y2: BAR_Y + BAR_H, stroke: INK, 'stroke-width': 1 });
+    add('text', { x: W / 2, y: CAPTION_Y, 'text-anchor': 'middle', fill: INK, class: 'caption' }, LOADING[this.lang]);
     this.el.replaceChildren(svg);
   }
 }
