@@ -875,8 +875,10 @@ const LAKE_MIN_NODES = 25;
  * blend weight matters near such a lake then sees the whole basin and agrees about
  * it; bigger basins would be a lake in one window and drained in the next, giving
  * straight, chunk-aligned shores. They stay as filled flats (wetland) instead.
+ * Half a chunk with ±2-chunk windows: a whole chunk (as with ±3) dropped about half
+ * the lakes of lowland and hills, and straight shores along chunk lines were no rarer.
  */
-const LAKE_EDGE_MARGIN = NODES;
+const LAKE_EDGE_MARGIN = NODES / 2;
 /** Chance that a chunk has one dammed lake, by region. */
 const LAKES_PER_CHUNK = (R: number) => (R > 0.8 ? 0.12 : R > 0.52 ? 0.05 : R > 0.25 ? 0.06 : 0.07);
 /**
