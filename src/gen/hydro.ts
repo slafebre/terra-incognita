@@ -32,7 +32,7 @@ export const NODE = 16;
 export const NODES = CHUNK / NODE; // nodes per chunk edge
 export const NODE_AREA = (NODE * NODE) / 1e6; // km²
 /** Window radius of a hydro solve, in chunks. */
-export const WIN_CHUNKS = 3;
+export const WIN_CHUNKS = 2;
 /** Nodes kept around the solved chunk: the support of its blend weight. */
 export const CORE_PAD = NODES / 2;
 export const CORE = NODES + 2 * CORE_PAD;
