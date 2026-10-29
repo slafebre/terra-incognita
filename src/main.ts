@@ -266,8 +266,16 @@ function showProgress(isLoading: boolean, now: number, dt: number): void {
   const target = isLoading ? manager.progress() : 1;
   if (target > progressShown) progressShown += (target - progressShown) * Math.min(1, dt * 6);
   if (!isLoading && progressShown > 0.99) progressShown = 1;
-  const face = vp.w - MARGIN - legend.right(vp.w);
-  scaleBar.draw(1 / vp.mPerPx(actual.zoom), actual.zoom, Math.min(SCALE_BAR_MAX, face * 0.6), progressShown);
+  // At the foot of the legend while it is out (over the map, it would cover the pane on a
+  // phone); else under the middle of the window.
+  const inLegend = legend.shown();
+  const home = inLegend ? legend.foot : document.body;
+  if (loading.parentElement !== home) {
+    if (inLegend) home.append(loading);
+    else canvas.after(loading);
+  }
+  const room = inLegend ? legend.innerW(vp.w) : (vp.w - MARGIN - legend.right(vp.w)) * 0.6;
+  scaleBar.draw(1 / vp.mPerPx(actual.zoom), actual.zoom, Math.min(SCALE_BAR_MAX, room), progressShown);
   if (progressShown === 1 && !doneAt) {
     doneAt = now;
     loading.classList.add('done');

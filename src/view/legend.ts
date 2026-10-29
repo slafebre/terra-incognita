@@ -19,6 +19,8 @@ const FACE_MIN = 96;
 const TAB_H = 58;
 const TAB_GAP = 12;
 const SLIDE_S = 0.22;
+/** The pane's padding left and right (#legend in style.css). */
+const PAD_X = 18;
 /** Swatch size (CSS px); symbols are drawn at their size at zoom 1. */
 const SW = 34;
 const SH = 14;
@@ -32,6 +34,8 @@ const PX_PER_M = 1 / M_PER_CSS_PX;
  */
 export class Legend {
   open = false;
+  /** Foot of the pane: holds the scale bar while the legend is out (main.ts). */
+  readonly foot = document.createElement('footer');
   /** How far out it is, 0…1. */
   private p = 0;
   private readonly el = document.createElement('aside');
@@ -70,7 +74,7 @@ export class Legend {
     const note = document.createElement('p');
     note.className = 'note';
     note.textContent = touch ? t.note : `${t.note} ${t.noteKeys}`;
-    el.append(note);
+    el.append(note, this.foot);
     el.addEventListener('click', (e) => {
       if ((e.target as HTMLElement).closest('[data-act="close"]')) this.toggle(false);
     });
@@ -108,6 +112,16 @@ export class Legend {
   right(w: number): number {
     const e = this.p * this.p * (3 - 2 * this.p);
     return MARGIN + e * this.paneW(w);
+  }
+
+  /** True while any of it is out. */
+  shown(): boolean {
+    return this.p > 0;
+  }
+
+  /** Width inside the pane (CSS px) in a window `w` wide. */
+  innerW(w: number): number {
+    return Math.max(0, this.paneW(w) - PAD_X);
   }
 
   /** The span of the right margin the tab covers, in a window `h` high. */
