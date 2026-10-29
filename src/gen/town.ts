@@ -1,11 +1,12 @@
 import { hash1, hash3, rng } from '../lib/hash';
+import { MinHeap } from '../lib/heap';
 import { lerp, smoothstep } from '../lib/noise';
-import { placeBuildings, segPointDist, segQuadDist, type Way } from './buildings';
+import { placeBuildings, quadsOverlap, segPointDist, segQuadDist, wayClearance, type Way } from './buildings';
 import { NODE } from './hydro';
 import { lineDistance, MW_BUILD_CLEAR, MW_PLAN_CLEAR } from './motorway';
 import { RESERVOIR, TOWER, type Poi } from './poi';
 import { nearestVertex, vertexPos } from './lattice';
-import { outsideCircle, ROAD_C, ROAD_P, ROAD_T, ringDisc, ringLine, type RoadPatch, type SegmentPath } from './roads';
+import { outsideCircle, ROAD_C, ROAD_D, ROAD_P, ROAD_T, ringDisc, ringLine, type RoadPatch, type SegmentPath } from './roads';
 import { HAMLET, TOWN, VILLAGE, type Rank, type Site } from './settle';
 
 /**
@@ -72,6 +73,10 @@ export interface TownPlan {
   industrial: Uint8Array;
   /** Its points of interest (a water tower, a reservoir). */
   pois: Poi[];
+  /** Its churches: the middles of their footprints (among `buildings`), where the symbol goes. */
+  churches: { x: number; y: number }[];
+  /** Its squares: open, paved places, as polygons [x0, y0, …] (the streets round them on their edges). */
+  squares: Float32Array[];
 }
 
 /** Everything a plan draws lies within this distance of its site (m), per rank (farms: farm.ts). */
@@ -132,8 +137,66 @@ const MAIN_DENSE = 1.25;
 export const BUILD_STEEP = [0.55, 0.8];
 /** Hamlets' houses stand further apart. */
 const HAMLET_GAPS = 1.8;
-/** No building this close to the church at a village's or town's centre (m). */
-const CHURCH_CLEAR = 10;
+/** Towns, and villages whose core is wider than this (m), are large: D-road links round the core, more squares and churches. */
+const BIG_VILLAGE = 160;
+/**
+ * D-road links (a tiered network): between neighbouring N and D roads (and C roads,
+ * where fewer than three N and D roads leave the centre) LINK_GAP rad apart, round
+ * the core at LINK_R × its radius (across a wide gap, an arc of an inner ring road); at most
+ * LINK_MAX per (town, large village), each with LINK_CHANCE. Steeper than LINK_GRADE
+ * (m/m) at more than one step, refused.
+ */
+const LINK_R = [
+  [0.5, 0.8],
+  [0.6, 0.9],
+];
+const LINK_GAP = [(50 * Math.PI) / 180, (215 * Math.PI) / 180];
+const LINK_MAX = [3, 1];
+const LINK_CHANCE = [0.7, 0.6];
+const LINK_GRADE = 0.16;
+/** Radii a link is tried at, as fractions of its first (routed over the ground only at the first two). */
+const LINK_TRY = [1, 0.8, 1.25, 0.65, 1.5];
+/** A routed link stays within LINK_BAND × its radius of the centre, costs length × (1 + (grade / LINK_ROUTE_GRADE)²) and LINK_BRIDGE m more per river node. */
+const LINK_BAND = [0.4, 1.7];
+const LINK_ROUTE_GRADE = 0.07;
+const LINK_BRIDGE = 150;
+/**
+ * Squares: chance per (town, large village, village); beside a main road SQUARE_D
+ * m from the centre (towns × SQUARE_TOWN), W × D m (along × back from the road; towns
+ * × SQUARE_TOWN), framed by streets on its other three sides; flat (under
+ * SQUARE_STEEP m/m) and dry.
+ */
+const SQUARE_CHANCE = [0.6, 0.6, 0.4];
+const SQUARE_D = [30, 110];
+const SQUARE_W = [28, 44];
+const SQUARE_DEPTH = [22, 34];
+const SQUARE_TOWN = 1.3;
+const SQUARE_STEEP = 0.12;
+/**
+ * Churches: a nave W × D m (the first in a town larger); further ones in villages
+ * whose streets reach CHURCH2_BUILT m (with CHURCH2_CHANCE), in towns 2–4 by their
+ * streets; each at least CHURCH_APART m (village, town) from the others and within
+ * CHURCH_REACH × the core's radius. Set back CHURCH_SETBACK m from the way it faces,
+ * on ground under CHURCH_STEEP m/m; oriented east–west (± CHURCH_TURN rad) where it
+ * can be, else square to the way.
+ */
+const CHURCH_W = [
+  [32, 44],
+  [20, 28],
+];
+const CHURCH_D = [
+  [14, 18],
+  [9, 12],
+];
+const CHURCH2_W = [18, 26];
+const CHURCH2_D = [9, 12];
+const CHURCH2_BUILT = 2200;
+const CHURCH2_CHANCE = 0.7;
+const CHURCH_APART = [180, 260];
+const CHURCH_REACH = [1.3, 1.2];
+const CHURCH_SETBACK = 2;
+const CHURCH_STEEP = 0.35;
+const CHURCH_TURN = 0.18;
 /** Water towers: chance per (town, village), on the highest free ground from the old core out to the reach, TOWER_CLEAR m from ways and buildings and within TOWER_ACCESS m of a way. In the mountains (from R = TOWER_MOUNTAIN), a reservoir uphill instead, with RESERVOIR_CHANCE. */
 const TOWER_CHANCE = [1, 0.75];
 const TOWER_MOUNTAIN = 0.52;
@@ -223,6 +286,8 @@ interface Line {
 
 /** Debugging: why branches ended or were refused, summed over plans. */
 export const planStats: Record<string, number> = {};
+/** Debugging: road links tried, as polylines, and whether they were made. */
+export const linkTries: { xy: number[]; made: boolean }[] = [];
 
 export function planTown({ site, roads, patch: p, motorways = [] }: PlanInput): TownPlan {
   const rank = site.rank;
@@ -713,28 +778,86 @@ export function planTown({ site, roads, patch: p, motorways = [] }: PlanInput): 
   const streets: { li: number; cls: StreetClass; parent: number; target: number; stop: string; len: number }[] = [];
   const no = (k: string) => (planStats[k] = (planStats[k] ?? 0) + 1);
 
+  /** Squares: open places (polygons), streets never across them. */
+  const squares: Float32Array[] = [];
+  const squarePolys: number[][] = [];
+  const inConvexAny = (x: number, y: number) => squarePolys.some((q) => inConvex(q, x, y));
+  /** Is (x, y) on a square (within m of it)? */
+  const onSquare = (x: number, y: number, m: number) =>
+    squarePolys.some((q) => {
+      if (inConvex(q, x, y)) return true;
+      for (let k = 0; k < 8; k += 2) if (segPointDist(q[k], q[k + 1], q[(k + 2) % 8], q[(k + 3) % 8], x, y) < m) return true;
+      return false;
+    });
+
+  /**
+   * Splits the track or path of the network (or the plan's redrawn piece of one)
+   * passing through (x, y) there, so a road link crossing it meets it at a junction:
+   * both pieces end at the crossing and are drawn by the plan instead.
+   */
+  const splitMinor = (x: number, y: number) => {
+    for (let qi = 0; qi < net.length; qi++) {
+      const q = net[qi];
+      if (q.cls <= ROAD_C || q.ring) continue;
+      for (let k = 2; k < q.xy.length; k += 2) {
+        if (segPointDist(q.xy[k - 2], q.xy[k - 1], q.xy[k], q.xy[k + 1], x, y) > 0.5) continue;
+        const a = Float32Array.from([...q.xy.subarray(0, k), x, y]);
+        const b = Float32Array.from([x, y, ...q.xy.subarray(k)]);
+        const pa = { ...q, xy: a };
+        const pb = { ...q, xy: b };
+        net = [...net.slice(0, qi), pa, pb, ...net.slice(qi + 1)];
+        const own = redrawn.indexOf(q);
+        if (own >= 0) redrawn.splice(own, 1);
+        redrawn.push(pa, pb);
+        return;
+      }
+    }
+  };
+
   /**
    * Checks a proposed street (free of the network except at its two ends) against
    * water, steepness and the network; adds it if fit.
    */
-  const tryStreet = (xs: number[], ys: number[], st: Style, gen: number): boolean => {
+  const tryStreet = (xs: number[], ys: number[], st: Style, gen: number, roadCls = -1, key = ''): boolean => {
     const n = xs.length;
+    const limit = roadCls >= 0 ? LINK_GRADE : HARD * grade;
+    /** Tracks and paths a road link crosses: split there afterwards (junctions). */
+    const crossed: { x: number; y: number }[] = [];
+    const minorLine = (li: number) => roadCls >= 0 && lines[li].road && lines[li].cls > ROAD_C && !lines[li].ring;
     const nearEnd = (_li: number, _s: number, x: number, y: number) =>
       Math.hypot(x - xs[0], y - ys[0]) < 30 || Math.hypot(x - xs[n - 1], y - ys[n - 1]) < 30;
     let steep = 0;
     for (let i = 1; i < n; i++) {
-      if (wet(xs[i], ys[i]) || areaAt(xs[i], ys[i]) > RIVER_A) return no('link: water'), false;
+      // (A road of the plan's own bridges a river; a street doesn't. Neither crosses a lake.)
+      if (wet(xs[i], ys[i]) || (roadCls < 0 && areaAt(xs[i], ys[i]) > RIVER_A)) return no((roadCls >= 0 ? 'dlink: ' : 'link: ') + 'water'), false;
       const L = Math.hypot(xs[i] - xs[i - 1], ys[i] - ys[i - 1]);
-      if (Math.abs(zAt(xs[i], ys[i]) - zAt(xs[i - 1], ys[i - 1])) > HARD * grade * L) steep++;
-      if (crossing(xs[i - 1], ys[i - 1], xs[i], ys[i], nearEnd)) return no('link: crosses'), false;
+      if (Math.abs(zAt(xs[i], ys[i]) - zAt(xs[i - 1], ys[i - 1])) > limit * L) steep++;
+      if (crossing(xs[i - 1], ys[i - 1], xs[i], ys[i], (li, s0, x, y) => nearEnd(li, s0, x, y) || (minorLine(li) && (crossed.push({ x, y }), true))))
+        return no((roadCls >= 0 ? 'dlink: ' : 'link: ') + 'crosses'), false;
       // Not into a roundabout, not even at its ends.
-      if (nearRing(xs[i], ys[i], 2) || crossing(xs[i - 1], ys[i - 1], xs[i], ys[i], (li) => !lines[li].ring)) return no('link: roundabout'), false;
-      if (i < n - 1 && nearest(xs[i], ys[i], GAP, nearEnd)) return no('link: alongside'), false;
-      if (i < n - 1 && inEstate(xs[i], ys[i], IND_STREET_KEEP - IND_FRONT)) return no('link: estate'), false;
+      if (nearRing(xs[i], ys[i], 2) || crossing(xs[i - 1], ys[i - 1], xs[i], ys[i], (li) => !lines[li].ring)) return no((roadCls >= 0 ? 'dlink: ' : 'link: ') + 'roundabout'), false;
+      // (A road may run beside a track or a path.)
+      const minor = (li: number) => roadCls >= 0 && lines[li].road && lines[li].cls > ROAD_C;
+      if (i < n - 1 && nearest(xs[i], ys[i], GAP, (li, s0, x, y) => nearEnd(li, s0, x, y) || minor(li))) return no((roadCls >= 0 ? 'dlink: ' : 'link: ') + 'alongside'), false;
+      if (i < n - 1 && inEstate(xs[i], ys[i], IND_STREET_KEEP - IND_FRONT)) return no((roadCls >= 0 ? 'dlink: ' : 'link: ') + 'estate'), false;
+      if (onSquare((xs[i - 1] + xs[i]) / 2, (ys[i - 1] + ys[i]) / 2, -0.5) || (i < n - 1 && onSquare(xs[i], ys[i], -0.5))) return no('link: square'), false;
     }
-    if (steep > 1) return no('link: steep'), false;
+    if (steep > 1) return no((roadCls >= 0 ? 'dlink: ' : 'link: ') + 'steep'), false;
     let len = 0;
     for (let i = 1; i < n; i++) len += Math.hypot(xs[i] - xs[i - 1], ys[i] - ys[i - 1]);
+    if (roadCls >= 0) {
+      // A road of the plan's own: drawn as one, and grown from like the network's.
+      addLine(xs, ys, true, 0, null, roadCls);
+      const xy = new Float32Array(2 * n);
+      for (let i = 0; i < n; i++) {
+        xy[2 * i] = xs[i];
+        xy[2 * i + 1] = ys[i];
+      }
+      redrawn.push({ key, cls: roadCls as SegmentPath['cls'], xy });
+      for (const c of crossed) splitMinor(c.x, c.y);
+      no('ROAD LINK');
+      return true;
+    }
     const li = addLine(xs, ys, false, gen, st);
     streets.push({ li, cls: st.cls, parent: -2, target: -2, stop: 'link', len });
     built += len;
@@ -1158,6 +1281,283 @@ export function planTown({ site, roads, patch: p, motorways = [] }: PlanInput): 
     }
   }
 
+  // --- D-road links (a tiered network) ---------------------------------------------
+  // In towns and large villages, the N and D roads leaving the centre (and C roads,
+  // where those are few) are linked round the core by D roads of the plan's own,
+  // before any street: neighbouring roads, a link leaving each square on and bulging
+  // outward (across a wide gap, an arc of an inner ring road). Streets then grow from
+  // them as from the network's roads.
+  const big = rank === TOWN || (rank === VILLAGE && core > BIG_VILLAGE);
+  if (big) {
+    const t = rank === TOWN ? 0 : 1;
+    const r0 = core * lerp(LINK_R[t][0], LINK_R[t][1], rand());
+    /** Where N, D (and, where those are few, C) roads cross the circle of radius r, by angle. */
+    const armsAt = (r: number) => {
+      const hits: { a: number; x: number; y: number; tx: number; ty: number; li: number; cls: number }[] = [];
+      lines.forEach((L, li) => {
+        if (!L.road || L.cls > ROAD_C || L.ring) return;
+        for (let k = 0; k + 1 < L.xs.length; k++) {
+          const d0 = Math.hypot(L.xs[k] - cx, L.ys[k] - cy) - r;
+          const d1 = Math.hypot(L.xs[k + 1] - cx, L.ys[k + 1] - cy) - r;
+          if (d0 * d1 > 0 || d0 === d1) continue;
+          const u = d0 / (d0 - d1);
+          const [tx, ty] = dirAt(li, k);
+          hits.push({ a: Math.atan2(L.ys[k] + u * (L.ys[k + 1] - L.ys[k]) - cy, L.xs[k] + u * (L.xs[k + 1] - L.xs[k]) - cx), x: L.xs[k] + u * (L.xs[k + 1] - L.xs[k]), y: L.ys[k] + u * (L.ys[k + 1] - L.ys[k]), tx, ty, li, cls: L.cls });
+        }
+      });
+      const main = hits.filter((hh) => hh.cls <= ROAD_D);
+      return (main.length >= 3 ? main : hits).sort((h1, h2) => h1.a - h2.a);
+    };
+    /** A link across the gap from arm A to arm B: leaving each square on, bulging outward. */
+    const link = (A: ReturnType<typeof armsAt>[number], B: ReturnType<typeof armsAt>[number]) => {
+      const into = (hh: typeof A, ox: number, oy: number): [number, number] => {
+        const sd = -hh.ty * (ox - hh.x) + hh.tx * (oy - hh.y) > 0 ? 1 : -1;
+        return [-hh.ty * sd, hh.tx * sd];
+      };
+      const [nax, nay] = into(A, B.x, B.y);
+      const [nbx, nby] = into(B, A.x, A.y);
+      const d = Math.hypot(B.x - A.x, B.y - A.y);
+      const k = 0.45 * d;
+      const steps = Math.max(4, Math.ceil((1.3 * d) / STEP));
+      const xs: number[] = [];
+      const ys: number[] = [];
+      for (let j = 0; j <= steps; j++) {
+        const u = j / steps;
+        const b0 = (1 - u) ** 3;
+        const b1 = 3 * u * (1 - u) ** 2;
+        const b2 = 3 * u * u * (1 - u);
+        const b3 = u ** 3;
+        xs.push(b0 * A.x + b1 * (A.x + nax * k) + b2 * (B.x + nbx * k) + b3 * B.x);
+        ys.push(b0 * A.y + b1 * (A.y + nay * k) + b2 * (B.y + nby * k) + b3 * B.y);
+      }
+      return [xs, ys];
+    };
+    /**
+     * A link routed over the fine nodes (cheapest path: length, more on slopes, much
+     * more across a river; never over a lake or near another way but at its ends;
+     * kept to a band round the core), then smoothed and resampled. Empty if none.
+     */
+    const route = (A: ReturnType<typeof armsAt>[number], B: ReturnType<typeof armsAt>[number], r: number): [number[], number[]] => {
+      const i0 = Math.max(1, Math.floor((cx - LINK_BAND[1] * r) / NODE) - p.gx);
+      const j0 = Math.max(1, Math.floor((cy - LINK_BAND[1] * r) / NODE) - p.gy);
+      const i1 = Math.min(w - 2, Math.ceil((cx + LINK_BAND[1] * r) / NODE) - p.gx);
+      const j1 = Math.min(h - 2, Math.ceil((cy + LINK_BAND[1] * r) / NODE) - p.gy);
+      const bw = i1 - i0 + 1;
+      const bh = j1 - j0 + 1;
+      if (bw < 3 || bh < 3) return [[], []];
+      const id = (i: number, j: number) => (j - j0) * bw + (i - i0);
+      const posOf = (k: number): [number, number] => [(i0 + (k % bw) + p.gx) * NODE, (j0 + Math.floor(k / bw) + p.gy) * NODE];
+      const free = new Uint8Array(bw * bh);
+      for (let j = j0; j <= j1; j++)
+        for (let i = i0; i <= i1; i++) {
+          const [x, y] = [(i + p.gx) * NODE, (j + p.gy) * NODE];
+          const d = Math.hypot(x - cx, y - cy);
+          if (d < LINK_BAND[0] * r || d > LINK_BAND[1] * r || d > hardReach || wet(x, y)) continue;
+          // Off other ways (as the link's checks want: GAP from roads and streets, less
+          // from tracks, which it may cross), but at its ends.
+          const nearEnds = Math.hypot(x - A.x, y - A.y) < 40 || Math.hypot(x - B.x, y - B.y) < 40;
+          if (!nearEnds && nearest(x, y, GAP + 2, (li) => lines[li].road && lines[li].cls > ROAD_C)) continue;
+          if (!nearEnds && nearest(x, y, 12)) continue;
+          free[id(i, j)] = 1;
+        }
+      const start = id(Math.round(A.x / NODE) - p.gx, Math.round(A.y / NODE) - p.gy);
+      const goal = id(Math.round(B.x / NODE) - p.gx, Math.round(B.y / NODE) - p.gy);
+      if (start < 0 || goal < 0 || start >= free.length || goal >= free.length) return [[], []];
+      free[start] = free[goal] = 1;
+      const cost = new Float64Array(bw * bh).fill(Infinity);
+      const from = new Int32Array(bw * bh).fill(-1);
+      const open = new MinHeap(256);
+      const ids: number[] = [start];
+      open.push(0, 0);
+      cost[start] = 0;
+      while (open.size) {
+        const c0 = open.peekKey();
+        const k = ids[open.pop()];
+        if (c0 > cost[k]) continue;
+        if (k === goal) break;
+        const ki = k % bw;
+        const kj = Math.floor(k / bw);
+        const [kx, ky] = posOf(k);
+        for (let dj = -1; dj <= 1; dj++)
+          for (let di = -1; di <= 1; di++) {
+            if (!di && !dj) continue;
+            const ni = ki + di;
+            const nj = kj + dj;
+            if (ni < 0 || nj < 0 || ni >= bw || nj >= bh) continue;
+            const nk = nj * bw + ni;
+            if (!free[nk]) continue;
+            const [nx2, ny2] = posOf(nk);
+            const len = NODE * Math.hypot(di, dj);
+            const g = Math.abs(zAt(nx2, ny2) - zAt(kx, ky)) / len;
+            if (g > LINK_GRADE) continue;
+            let c = len * (1 + (g / LINK_ROUTE_GRADE) ** 2);
+            if (areaAt(nx2, ny2) > RIVER_A) c += LINK_BRIDGE;
+            if (cost[k] + c < cost[nk]) {
+              cost[nk] = cost[k] + c;
+              from[nk] = k;
+              ids.push(nk);
+              open.push(ids.length - 1, cost[nk]);
+            }
+          }
+      }
+      if (from[goal] < 0) return [[], []];
+      const pts: [number, number][] = [[B.x, B.y]];
+      for (let k = from[goal]; k >= 0 && k !== start; k = from[k]) pts.push(posOf(k));
+      pts.push([A.x, A.y]);
+      pts.reverse();
+      // Smoothed (Chaikin, ends fixed) and resampled every STEP m.
+      let sm = pts;
+      for (let pass = 0; pass < 3; pass++) {
+        const nx3: [number, number][] = [sm[0]];
+        for (let q = 0; q + 1 < sm.length; q++) {
+          const [ax2, ay2] = sm[q];
+          const [bx2, by2] = sm[q + 1];
+          if (q > 0) nx3.push([0.75 * ax2 + 0.25 * bx2, 0.75 * ay2 + 0.25 * by2]);
+          if (q + 2 < sm.length) nx3.push([0.25 * ax2 + 0.75 * bx2, 0.25 * ay2 + 0.75 * by2]);
+        }
+        nx3.push(sm[sm.length - 1]);
+        sm = nx3;
+      }
+      const xs: number[] = [sm[0][0]];
+      const ys: number[] = [sm[0][1]];
+      let carry = 0;
+      for (let q = 1; q < sm.length; q++) {
+        const [ax2, ay2] = sm[q - 1];
+        const [bx2, by2] = sm[q];
+        const l = Math.hypot(bx2 - ax2, by2 - ay2);
+        let t = STEP - carry;
+        while (t < l) {
+          xs.push(ax2 + ((bx2 - ax2) * t) / l);
+          ys.push(ay2 + ((by2 - ay2) * t) / l);
+          t += STEP;
+        }
+        carry = l - (t - STEP);
+      }
+      xs.push(B.x);
+      ys.push(B.y);
+      return [xs, ys];
+    };
+    // Each gap between neighbouring arms (as seen at r0), tried at r0 and, failing
+    // that, a little inside and outside it.
+    const arms = armsAt(r0);
+    let made = 0;
+    for (let i = 0; i < arms.length && arms.length > 1 && made < LINK_MAX[t]; i++) {
+      let gap = arms[(i + 1) % arms.length].a - arms[i].a;
+      if (gap <= 0) gap += 2 * Math.PI;
+      if (gap < LINK_GAP[0] || gap > LINK_GAP[1] || rand() > LINK_CHANCE[t]) continue;
+      const mid = arms[i].a + gap / 2;
+      for (const f of LINK_TRY) {
+        // The same two arms at this radius: the hits either side of the gap's middle.
+        const at = armsAt(r0 * f);
+        const after = at.findIndex((hh) => angDiff(hh.a, mid) > 0);
+        if (at.length < 2) continue;
+        const B = at[after < 0 ? 0 : after];
+        const A = at[((after < 0 ? 0 : after) - 1 + at.length) % at.length];
+        if (A.li !== arms[i].li || B.li !== arms[(i + 1) % arms.length].li) continue;
+        // A smooth curve first; where that fails, a route over the ground.
+        let ok = false;
+        for (const [xs, ys] of [link(A, B), f >= LINK_TRY[1] ? route(A, B, r0 * f) : [[], []]]) {
+          if (!xs.length) continue;
+          ok = tryStreet(xs, ys, organic, 0, ROAD_D, `${site.id}#d${made}`);
+          linkTries.push({ xy: xs.flatMap((x, q) => [x, ys[q]]), made: ok });
+          if (ok) break;
+        }
+        if (ok) {
+          made++;
+          break;
+        }
+      }
+    }
+  }
+
+  // --- A square ----------------------------------------------------------------
+  // Some villages (more of the large ones, and towns besides their market square)
+  // have a square: an open place beside a main road near the centre, framed by
+  // streets on its other three sides, flat and dry. Houses line it from outside, and
+  // the church may face it.
+  if (rank !== HAMLET && rand() < SQUARE_CHANCE[rank === TOWN ? 0 : big ? 1 : 2]) {
+    const sc = rank === TOWN ? SQUARE_TOWN : 1;
+    const W = lerp(SQUARE_W[0], SQUARE_W[1], rand()) * sc;
+    const D = lerp(SQUARE_DEPTH[0], SQUARE_DEPTH[1], rand()) * sc;
+    const cands: { li: number; s: number; side: number; d: number }[] = [];
+    lines.forEach((L, li) => {
+      if (!L.road || L.cls > ROAD_C || L.ring) return;
+      const total = L.s[L.s.length - 1];
+      for (let s0 = W / 2 + 5; s0 < total - W / 2 - 5; s0 += 8) {
+        const P = pointAt(li, s0);
+        const d = Math.hypot(P.x - cx, P.y - cy);
+        if (d < SQUARE_D[0] * sc || d > SQUARE_D[1] * sc || nearRing(P.x, P.y, 30)) continue;
+        // Not on a junction: its whole front along the road is free of other ways.
+        if (nearest(P.x, P.y, W / 2 + 6, (l2) => l2 === li)) continue;
+        for (const side of [1, -1]) cands.push({ li, s: s0, side, d: d + 15 * rand() });
+      }
+    });
+    cands.sort((c1, c2) => c1.d - c2.d);
+    no(`square: tried`);
+    if (!cands.length) no('square: no spot');
+    for (const c of cands) {
+      const L = lines[c.li];
+      const P0 = pointAt(c.li, c.s - W / 2);
+      const P1 = pointAt(c.li, c.s + W / 2);
+      const tl = Math.hypot(P1.x - P0.x, P1.y - P0.y) || 1;
+      const tx = (P1.x - P0.x) / tl;
+      const ty = (P1.y - P0.y) / tl;
+      const nx = -ty * c.side;
+      const ny = tx * c.side;
+      const b = ROAD_CLEAR[L.cls];
+      // Its ground: flat, dry, nothing else on it.
+      let fits = true;
+      for (let u = 0; u <= 1 && fits; u += 0.25)
+        for (let v = 0; v <= 1 && fits; v += 0.25) {
+          const x = P0.x + tx * W * u + nx * (b + D * v);
+          const y = P0.y + ty * W * u + ny * (b + D * v);
+          const g = Math.hypot(zAt(x + 8, y) - zAt(x - 8, y), zAt(x, y + 8) - zAt(x, y - 8)) / 16;
+          if (wet(x, y) || areaAt(x, y) > STREAM_A || g > SQUARE_STEEP || nearest(x, y, 8, (li) => li === c.li)) fits = false;
+        }
+      if (!fits) {
+        no('square: ground');
+        continue;
+      }
+      // The streets round it: out from the road, along the back, back to the road.
+      const corners = [
+        [P0.x, P0.y],
+        [P0.x + nx * (b + D), P0.y + ny * (b + D)],
+        [P1.x + nx * (b + D), P1.y + ny * (b + D)],
+        [P1.x, P1.y],
+      ];
+      const xs: number[] = [];
+      const ys: number[] = [];
+      for (let q = 1; q < corners.length; q++) {
+        const [x0, y0] = corners[q - 1];
+        const [x1, y1] = corners[q];
+        const m = Math.max(1, Math.round(Math.hypot(x1 - x0, y1 - y0) / STEP));
+        for (let t = q === 1 ? 0 : 1; t <= m; t++) {
+          xs.push(x0 + ((x1 - x0) * t) / m);
+          ys.push(y0 + ((y1 - y0) * t) / m);
+        }
+      }
+      let clear = true;
+      for (let i = 1; i < xs.length && clear; i++) {
+        if (crossing(xs[i - 1], ys[i - 1], xs[i], ys[i], (li, _s, x, y) => li === c.li && (Math.hypot(x - P0.x, y - P0.y) < 2 || Math.hypot(x - P1.x, y - P1.y) < 2))) clear = false;
+        if (i < xs.length - 1 && nearest(xs[i], ys[i], 12, (li) => li === c.li)) clear = false;
+      }
+      if (!clear) {
+        no('square: ways');
+        continue;
+      }
+      const li = addLine(xs, ys, false, 1, old);
+      let len = 0;
+      for (let i = 1; i < xs.length; i++) len += Math.hypot(xs[i] - xs[i - 1], ys[i] - ys[i - 1]);
+      streets.push({ li, cls: STREET, parent: -2, target: -2, stop: 'square', len });
+      built += len;
+      const poly = [P0.x + nx * b, P0.y + ny * b, corners[1][0], corners[1][1], corners[2][0], corners[2][1], P1.x + nx * b, P1.y + ny * b];
+      squarePolys.push(poly);
+      squares.push(Float32Array.from(poly));
+      no('SQUARE');
+      break;
+    }
+  }
+
   if (rank === TOWN) {
     ring(core, 0.9, { ...organic, cls: STREET });
     ring(core * 0.55, 0.6, organic);
@@ -1337,6 +1737,11 @@ export function planTown({ site, roads, patch: p, motorways = [] }: PlanInput): 
           break;
         }
       }
+      // Never into a square (its own street is on its edge).
+      if (inConvexAny(nx, ny)) {
+        failed = 'square';
+        break;
+      }
       // Alongside another street without meeting it: stop short.
       if (nearest(nx, ny, st.gap, home)) {
         stop = 'alongside';
@@ -1471,6 +1876,9 @@ export function planTown({ site, roads, patch: p, motorways = [] }: PlanInput): 
     }
     if (!inside.some(Boolean)) continue;
     replaced.add(q.key);
+    // A piece the plan already redraws (a track split where a road link crosses it) is redrawn as below instead.
+    const own = roadsOut.indexOf(q);
+    if (own >= 0) roadsOut.splice(own, 1);
     // Split into runs sharing their boundary points, so the pieces still meet.
     let start = 0;
     for (let i = 1; i <= n; i++) {
@@ -1545,7 +1953,111 @@ export function planTown({ site, roads, patch: p, motorways = [] }: PlanInput): 
     const k = 2 * Math.floor(xy.length / 4);
     return Math.hypot(xy[k] - cx, xy[k + 1] - cy);
   };
+  // --- Churches -----------------------------------------------------------------
+  // Placed before any other building, next to a way, never on one: the first on the
+  // crossroads green if there is one, else facing the square, else beside a main
+  // road nearest the centre; further ones (large villages, towns) beside a main road
+  // or a street, well apart. East–west where they fit, else square to the way.
+  const { clashesWay } = wayClearance(ways);
+  const churchQuads: number[][] = [];
+  const churches: { x: number; y: number }[] = [];
+  const nChurches =
+    rank === TOWN ? 2 + (built > 12000 ? 1 : 0) + (built > 18000 && rand() < 0.5 ? 1 : 0) : rank === VILLAGE ? (built > CHURCH2_BUILT && rand() < CHURCH2_CHANCE ? 2 : 1) : 0;
+  const tw = rank === TOWN ? 0 : 1;
+  const churchFits = (q: number[]) => {
+    const pts: [number, number][] = [];
+    for (let k = 0; k < 8; k += 2) pts.push([q[k], q[k + 1]], [(q[k] + q[(k + 2) % 8]) / 2, (q[k + 1] + q[(k + 3) % 8]) / 2]);
+    pts.push([(q[0] + q[4]) / 2, (q[1] + q[5]) / 2]);
+    for (const [x, y] of pts) {
+      if (wet(x, y) || areaAt(x, y) > STREAM_A || inEstate(x, y, IND_KEEP) || nearRing(x, y, 0) || onSquare(x, y, 0)) return false;
+      if (Math.hypot(x - cx, y - cy) > extent - 5) return false;
+      const g = Math.hypot(zAt(x + 4, y) - zAt(x - 4, y), zAt(x, y + 4) - zAt(x, y - 4)) / 8;
+      if (g > CHURCH_STEEP) return false;
+    }
+    return !clashesWay(q) && !churchQuads.some((o) => quadsOverlap(q, o, 0));
+  };
+  /** A nave w × d centred on (x, y), its length at angle a. */
+  const nave = (x: number, y: number, a: number, w: number, d: number) => {
+    const ux = Math.cos(a);
+    const uy = Math.sin(a);
+    const hw = w / 2;
+    const hd = d / 2;
+    return [x - ux * hw + uy * hd, y - uy * hw - ux * hd, x + ux * hw + uy * hd, y + uy * hw - ux * hd, x + ux * hw - uy * hd, y + uy * hw + ux * hd, x - ux * hw - uy * hd, y - uy * hw + ux * hd].map(Math.fround);
+  };
+  for (let k = 0; k < nChurches; k++) {
+    const w = k === 0 ? lerp(CHURCH_W[tw][0], CHURCH_W[tw][1], rand()) : lerp(CHURCH2_W[0], CHURCH2_W[1], rand());
+    const d = k === 0 ? lerp(CHURCH_D[tw][0], CHURCH_D[tw][1], rand()) : lerp(CHURCH2_D[0], CHURCH2_D[1], rand());
+    const east = (rand() - 0.5) * 2 * CHURCH_TURN;
+    /** Spots to try, best first: [x, y, angle along the way]. */
+    const spots: [number, number, number][] = [];
+    if (k === 0 && redrawn.some((q) => q.key.startsWith(`${site.id}#sq`))) spots.push([cx, cy, east]);
+    if (k === 0)
+      for (const q of squarePolys) {
+        // Facing the square across the street round it: its back side first, then its ends.
+        for (const [e0, e1] of [
+          [2, 4],
+          [0, 2],
+          [4, 6],
+        ]) {
+          const ax = q[e0];
+          const ay = q[e0 + 1];
+          const bx = q[(e1 % 8) || 0];
+          const by = q[((e1 % 8) || 0) + 1];
+          const ex = bx - ax;
+          const ey = by - ay;
+          const el = Math.hypot(ex, ey) || 1;
+          // Outward: away from the square's middle.
+          const mx = (q[0] + q[4]) / 2;
+          const my = (q[1] + q[5]) / 2;
+          let ox = -ey / el;
+          let oy = ex / el;
+          if (ox * ((ax + bx) / 2 - mx) + oy * ((ay + by) / 2 - my) < 0) {
+            ox = -ox;
+            oy = -oy;
+          }
+          for (const f of [0.5, 0.3, 0.7]) {
+            const off = STREET_CLEAR[0] + CHURCH_SETBACK + d / 2;
+            spots.push([ax + ex * f + ox * off, ay + ey * f + oy * off, Math.atan2(ey, ex)]);
+          }
+        }
+      }
+    // Beside a main road, then a street, nearest the centre first (further ones: far
+    // enough from the others, within the core).
+    const along: [number, number, number, number][] = [];
+    lines.forEach((L, li) => {
+      if (L.pruned || L.ind || L.ring) return;
+      const clear = L.road ? ROAD_CLEAR[L.cls] : STREET_CLEAR[0];
+      if (L.road && L.cls > ROAD_C) return;
+      const total = L.s[L.s.length - 1];
+      for (let s0 = 0; s0 <= total; s0 += 4) {
+        const P = pointAt(li, s0);
+        const dc = Math.hypot(P.x - cx, P.y - cy);
+        if (dc > core * CHURCH_REACH[tw]) continue;
+        const [tx, ty] = dirAt(li, P.k);
+        for (const side of [1, -1]) {
+          const off = clear + CHURCH_SETBACK + d / 2;
+          // The first church on a main road near the centre; further ones on streets too.
+          along.push([P.x - ty * side * off, P.y + tx * side * off, Math.atan2(ty, tx), dc + (L.road || k > 0 ? 0 : 60)]);
+        }
+      }
+    });
+    along.sort((a1, a2) => a1[3] - a2[3]);
+    for (const [x, y, a] of along) spots.push([x, y, a]);
+    for (const [x, y, a] of spots) {
+      if (churches.some((c) => Math.hypot(c.x - x, c.y - y) < CHURCH_APART[tw])) continue;
+      // East–west first (the old way), else square to its way.
+      let q = nave(x, y, east, w, d);
+      if (!churchFits(q)) q = nave(x, y, a, w, d);
+      if (!churchFits(q)) continue;
+      churchQuads.push(q);
+      churches.push({ x: Math.fround(x), y: Math.fround(y) });
+      no('CHURCH');
+      break;
+    }
+  }
+
   const { buildings, industrial } = placeBuildings({
+    preset: churchQuads,
     fronts: fronts.sort((a, b) => a.order - b.order || mid(a.xy) - mid(b.xy)),
     ways,
     // Main roads keep their terraces a little further out (the faubourgs).
@@ -1559,7 +2071,7 @@ export function planTown({ site, roads, patch: p, motorways = [] }: PlanInput): 
       // Not on a roundabout's island.
       if (nearRing(x, y, 0)) return no('ground: roundabout'), false;
       if (r > extent - 5) return no('ground: extent'), false;
-      if (rank !== HAMLET && r < CHURCH_CLEAR) return no('ground: church'), false;
+      if (onSquare(x, y, 0)) return no('ground: square'), false;
       const g = Math.hypot(zAt(x + 4, y) - zAt(x - 4, y), zAt(x, y + 4) - zAt(x, y - 4)) / 8;
       if (g >= steep) return no('ground: steep'), false;
       return true;
@@ -1613,7 +2125,27 @@ export function planTown({ site, roads, patch: p, motorways = [] }: PlanInput): 
     buildings,
     industrial,
     pois,
+    churches,
+    squares,
   };
+}
+
+/** Is (x, y) inside convex polygon q [x0, y0, …]? */
+function inConvex(q: number[], x: number, y: number): boolean {
+  const n = q.length / 2;
+  let sign = 0;
+  for (let i = 0; i < n; i++) {
+    const ax = q[2 * i];
+    const ay = q[2 * i + 1];
+    const bx = q[(2 * i + 2) % q.length];
+    const by = q[(2 * i + 3) % q.length];
+    const c = (bx - ax) * (y - ay) - (by - ay) * (x - ax);
+    if (c !== 0) {
+      if (sign && Math.sign(c) !== sign) return false;
+      sign = Math.sign(c);
+    }
+  }
+  return true;
 }
 
 function angDiff(a: number, b: number): number {

@@ -7,7 +7,7 @@ import { placePois, type PoiPatch } from '../gen/poi';
 import type { SegmentPath } from '../gen/roads';
 import type { TownPlan } from '../gen/town';
 import { cellCoverage, drawCoverSymbols, FILLS } from './landcover';
-import { drawBuildings } from './buildings';
+import { drawBuildings, drawSquares } from './buildings';
 import { clearUnderBuiltUp, drawChurches, drawRoads } from './roads';
 import { lineDistance, MW_VERGE } from '../gen/motorway';
 import { classifyMotorways, MW_LEVEL, runsOf } from './motorway';
@@ -265,6 +265,7 @@ export function renderChunk({ cx, cy, dem, cover, water, streams, roads, motorwa
 
   drawStreams(ctx, streams, pxPerM, dpr);
   drawBuildings(ctx, plans, cx, cy, pxPerM, dpr);
+  drawSquares(ctx, plans, cx, cy, pxPerM);
   drawRoads(ctx, drawn, plans.flatMap((p) => p.streets), mws, cx, cy, pxPerM, dpr, water);
   drawChurches(ctx, plans, cx, cy, pxPerM, dpr);
   // Points of interest: the chunk's own (hilltops, wayside crosses, springs) and the plans' (water towers).

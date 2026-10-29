@@ -2,7 +2,8 @@
 //   npx vite-node dev/towns.ts [per region] [R,R,...]
 // Finds villages (TOWNS=1: towns, HAMLETS=1: hamlets, FARMS=1: farmsteads) with a world seed (SEED=n), runs the whole
 // pipeline in-process around each and writes its plan over the fine terrain:
-// contours, water, roads, streets and built-up frontage. INPUTS=<file> caches the
+// contours, water, roads, streets, squares, churches and built-up frontage, and the
+// D-road links the plan tried (made: green; refused: magenta dashes). INPUTS=<file> caches the
 // pipeline's output (the plans' inputs), so plans can be tuned without rerunning it. OUT=<prefix> names the
 // files (default towns), one per settlement, plus <prefix>-sheet.svg of all (COLS per row).
 // SNAP=<file> (a snapshot from the app's info panel) plans the settlement nearest its view instead.
@@ -11,10 +12,10 @@ import { CoarseField, NODE } from '../src/gen/hydro';
 import { SeedStore, SeedView } from '../src/gen/seeds';
 import { FARM, HAMLET, Settlements, TOWN, VILLAGE, type Site } from '../src/gen/settle';
 import { setRegionOverride, Terrain } from '../src/gen/terrain';
-import { NET_REACH } from '../src/gen/roads';
+import { NET_REACH, type SegmentPath } from '../src/gen/roads';
 import { buildingStats } from '../src/gen/buildings';
 import { farmStats, planFarm } from '../src/gen/farm';
-import { LANE, PLAN_EXTENT, planStats, planTown, type TownPlan, type PlanInput } from '../src/gen/town';
+import { LANE, linkTries, PLAN_EXTENT, planStats, planTown, type TownPlan, type PlanInput } from '../src/gen/town';
 import { marchingSquares } from '../src/lib/contours';
 import { quadArea } from '../src/render/buildings';
 import { STYLE } from '../src/render/style';
@@ -144,6 +145,10 @@ function svg({ input, plan: p }: { input: PlanInput; plan: TownPlan }): string {
       d += `M${(x0 + xy[i] * NODE).toFixed(1)} ${(y0 + xy[i + 1] * NODE).toFixed(1)}L${(x0 + xy[i + 2] * NODE).toFixed(1)} ${(y0 + xy[i + 3] * NODE).toFixed(1)}`;
     s += `<path d="${d}" fill="none" stroke="rgba(190,120,60,${lev % 25 ? 0.35 : 0.6})" stroke-width="${lev % 25 ? 1.2 : 2.4}"/>`;
   }
+  // Road links tried (debugging): magenta dashes, refused; green, made.
+  for (const t of linkTries.splice(0)) s += `<path d="${poly(t.xy)}" fill="none" stroke="${t.made ? '#0a0' : '#e0e'}" stroke-width="3" stroke-dasharray="${t.made ? '' : '8 6'}"/>`;
+  // Squares, paved like the streets.
+  for (const q of p.squares) s += `<path d="${poly(q)}Z" fill="#fff" stroke="#bbb" stroke-width="1"/>`;
   // Roads (the plan's replacing the network's): casings, then fills.
   const redrawn = new Set(p.replaced);
   const all = [...input.roads.filter((r) => !redrawn.has(r.key)), ...p.roads];
@@ -154,21 +159,24 @@ function svg({ input, plan: p }: { input: PlanInput; plan: TownPlan }): string {
   for (const r of roads) s += `<path d="${poly(r.xy)}" fill="none" stroke="#463a34" stroke-width="${ROAD_W[r.cls] + 3}" stroke-linecap="round" stroke-linejoin="round"/>`;
   for (const st of p.streets) s += `<path d="${poly(st.xy)}" fill="none" stroke="#fff" stroke-width="${st.cls === LANE ? 2.5 : 4}" stroke-linecap="round" stroke-linejoin="round"/>`;
   for (const r of roads) s += `<path d="${poly(r.xy)}" fill="none" stroke="${ROAD[r.cls]}" stroke-width="${ROAD_W[r.cls]}" stroke-linecap="round" stroke-linejoin="round"/>`;
-  // Centre and the site point.
-  s += `<circle cx="${p.x}" cy="${p.y}" r="7" fill="#2d2826"/>`;
+  // Churches (a ring and a cross), the centre (the crossroads, a small dot) and the site point.
+  for (const c of p.churches)
+    s += `<circle cx="${c.x}" cy="${c.y}" r="6" fill="#fff" stroke="#111" stroke-width="2.5"/><path d="M${c.x} ${c.y - 14}V${c.y - 6}M${c.x - 4} ${c.y - 11}H${c.x + 4}" stroke="#111" stroke-width="2"/>`;
+  s += `<circle cx="${p.x}" cy="${p.y}" r="7" fill="none" stroke="#2d2826" stroke-width="1.5"/>`;
   s += `<circle cx="${input.site.x}" cy="${input.site.y}" r="10" fill="none" stroke="#c0f" stroke-width="2"/>`;
   s += `<circle cx="${input.site.x}" cy="${input.site.y}" r="${PLAN_EXTENT[p.rank]}" fill="none" stroke="#c0f" stroke-width="2" stroke-dasharray="10 10"/>`;
   return s + '</svg>';
 }
 
 const svgs: string[] = [];
-type Saved = { site: Site; roads: { key: string; cls: number; xy: number[] }[]; patch: Omit<PlanInput['patch'], 'zE' | 'A' | 'lake'> & { zE: number[]; A: number[]; lake: (number | null)[] } };
+type Saved = { site: Site; roads: (Omit<SegmentPath, 'xy'> & { xy: number[] })[]; patch: Omit<PlanInput['patch'], 'zE' | 'A' | 'lake'> & { zE: number[]; A: number[]; lake: (number | null)[] } };
 let inputs: PlanInput[] = [];
 if (process.env.INPUTS && existsSync(process.env.INPUTS)) {
   const saved = JSON.parse(readFileSync(process.env.INPUTS, 'utf8')) as Saved[];
   inputs = saved.map((v) => ({
     site: v.site,
-    roads: v.roads.map((r) => ({ key: r.key, cls: r.cls as 0, xy: Float32Array.from(r.xy) })),
+    // Every field (a roundabout's `ring`, a serpentine's `micro`), not just the points.
+    roads: v.roads.map((r) => ({ ...r, xy: Float32Array.from(r.xy) })),
     patch: { ...v.patch, zE: Float32Array.from(v.patch.zE), A: Float32Array.from(v.patch.A), lake: Float32Array.from(v.patch.lake, (l) => l ?? NaN) },
   }));
 } else {
@@ -191,7 +199,7 @@ if (process.env.INPUTS && existsSync(process.env.INPUTS)) {
   if (process.env.INPUTS) {
     const saved: Saved[] = inputs.map((v) => ({
       site: v.site,
-      roads: v.roads.map((r) => ({ key: r.key, cls: r.cls, xy: [...r.xy] })),
+      roads: v.roads.map((r) => ({ ...r, xy: [...r.xy] })),
       patch: { ...v.patch, zE: [...v.patch.zE], A: [...v.patch.A], lake: [...v.patch.lake].map((l) => (Number.isNaN(l) ? null : l)) },
     }));
     writeFileSync(process.env.INPUTS, JSON.stringify(saved));
@@ -274,7 +282,7 @@ for (const input of inputs) {
   writeFileSync(f, svgs[svgs.length - 1]);
   console.log(
     `R=${site.R.toFixed(2)} ${site.id} at ${site.x.toFixed(0)},${site.y.toFixed(0)}: ${p.streets.length} streets, ${km.toFixed(2)} km, ` +
-      `${p.buildings.length / 8} buildings (${large} large, largest outside estates ${biggest.toFixed(0)} m²), ${p.industrial.reduce((t, v) => t + v, 0)} industrial, ${((100 * bare) / Math.max(1, sides)).toFixed(0)} % bare (main roads near the centre: ${((100 * mainBare) / Math.max(1, mainSides)).toFixed(0)} % bare, ${((100 * mainLined) / Math.max(1, mainSides)).toFixed(0)} % lined), plan ${ms.toFixed(0)} ms → ${f}`,
+      `${p.churches.length} church(es), ${p.squares.length} square(s), ${p.roads.filter((r) => r.key.includes('#d')).length} D link(s), ${p.buildings.length / 8} buildings (${large} large, largest outside estates ${biggest.toFixed(0)} m²), ${p.industrial.reduce((t, v) => t + v, 0)} industrial, ${((100 * bare) / Math.max(1, sides)).toFixed(0)} % bare (main roads near the centre: ${((100 * mainBare) / Math.max(1, mainSides)).toFixed(0)} % bare, ${((100 * mainLined) / Math.max(1, mainSides)).toFixed(0)} % lined), plan ${ms.toFixed(0)} ms → ${f}`,
   );
 }
 // One SVG of them all, nested in a grid (square, so thumbnailers show it whole).

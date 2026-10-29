@@ -402,4 +402,102 @@ describe('street plans', () => {
     console.log(`water towers: ${towers} in ${settlements} villages and towns`);
     expect(towers).toBeGreaterThan(settlements / 2);
   });
+
+  it('stand churches beside a way, never on one, and apart', () => {
+    let two = 0;
+    for (const { name, inp, plan } of plans) {
+      if (name.startsWith('hamlet')) {
+        expect(plan.churches.length, name).toBe(0);
+        continue;
+      }
+      expect(plan.churches.length, name).toBeGreaterThanOrEqual(name.startsWith('town') ? 2 : 1);
+      if (plan.churches.length > 1) two++;
+      const replaced = new Set(plan.replaced);
+      const ways = [
+        ...[...inp.roads.filter((r) => !replaced.has(r.key)), ...plan.roads].map((r) => ({ xy: r.xy, clear: ROAD_CLEAR[r.cls] })),
+        ...plan.streets.map((s) => ({ xy: s.xy, clear: STREET_CLEAR[s.cls] })),
+      ];
+      for (const c of plan.churches) {
+        // Its footprint is one of the buildings: the one under the symbol.
+        const b = plan.buildings;
+        let q: number[] | null = null;
+        for (let i = 0; i < b.length && !q; i += 8)
+          if (Math.abs((b[i] + b[i + 4]) / 2 - c.x) < 0.01 && Math.abs((b[i + 1] + b[i + 5]) / 2 - c.y) < 0.01) q = Array.from(b.subarray(i, i + 8));
+        expect(q, `${name} church footprint`).not.toBeNull();
+        // Clear of every way by its clearance, and next to one (within 6 m beyond it).
+        let nearestGap = Infinity;
+        for (const w of ways)
+          for (let k = 2; k < w.xy.length; k += 2) {
+            const d = segQuadDist(w.xy[k - 2], w.xy[k - 1], w.xy[k], w.xy[k + 1], q!);
+            expect(d, `${name} church on a way`).toBeGreaterThanOrEqual(w.clear - 1e-3);
+            nearestGap = Math.min(nearestGap, d - w.clear);
+          }
+        expect(nearestGap, `${name} church next to a way`).toBeLessThan(6);
+      }
+      for (let i = 0; i < plan.churches.length; i++)
+        for (let j = 0; j < i; j++)
+          expect(Math.hypot(plan.churches[i].x - plan.churches[j].x, plan.churches[i].y - plan.churches[j].y), name).toBeGreaterThan(150);
+    }
+    expect(two).toBeGreaterThan(0);
+  });
+
+  it('keep squares open: no building or way across them', () => {
+    let n = 0;
+    for (const { name, plan } of plans) {
+      for (const sq of plan.squares) {
+        n++;
+        const poly = Array.from(sq);
+        const inside = (x: number, y: number) => {
+          let sign = 0;
+          for (let k = 0; k < 8; k += 2) {
+            const c = (poly[(k + 2) % 8] - poly[k]) * (y - poly[k + 1]) - (poly[(k + 3) % 8] - poly[k + 1]) * (x - poly[k]);
+            if (c !== 0) {
+              if (sign && Math.sign(c) !== sign) return false;
+              sign = Math.sign(c);
+            }
+          }
+          return true;
+        };
+        const b = plan.buildings;
+        for (let i = 0; i < b.length; i += 8) expect(quadsOverlap(poly, b.subarray(i, i + 8), 0.3), `${name} building on its square`).toBe(false);
+        // No way through it (sampled every metre, a metre inside its edge).
+        const [mx, my] = [(poly[0] + poly[4]) / 2, (poly[1] + poly[5]) / 2];
+        for (const xy of [...plan.streets.map((s) => s.xy), ...plan.roads.map((r) => r.xy)])
+          for (let k = 2; k < xy.length; k += 2)
+            for (let t = 0; t <= 1; t += 0.05) {
+              const x = xy[k - 2] + t * (xy[k] - xy[k - 2]);
+              const y = xy[k - 1] + t * (xy[k + 1] - xy[k - 1]);
+              // Shrink toward the middle by a metre.
+              const sx = x + ((mx - x) / (Math.hypot(mx - x, my - y) || 1)) * -1;
+              const sy = y + ((my - y) / (Math.hypot(mx - x, my - y) || 1)) * -1;
+              expect(inside(sx, sy) && inside(x, y), `${name} way across its square`).toBe(false);
+            }
+      }
+    }
+    expect(n).toBeGreaterThan(0);
+  });
+
+  it('link the main roads round the core of towns and large villages with D roads', () => {
+    let links = 0;
+    for (const { name, plan } of plans) {
+      const own = plan.roads.filter((r) => r.key.includes('#d'));
+      if (!name.startsWith('town') && !name.startsWith('village')) expect(own.length, name).toBe(0);
+      for (const r of own) {
+        links++;
+        expect(r.cls, name).toBe(ROAD_D);
+        // Both ends on another road (a junction).
+        for (const [x, y] of [
+          [r.xy[0], r.xy[1]],
+          [r.xy[r.xy.length - 2], r.xy[r.xy.length - 1]],
+        ])
+          expect(
+            plan.roads.some((o) => o !== r && distTo(o.xy, x, y) < 0.5) ||
+              cases.find((c) => c.name === name)!.inp.roads.some((o) => !plan.replaced.includes(o.key) && distTo(o.xy, x, y) < 0.5),
+            `${name} link end on a road`,
+          ).toBe(true);
+      }
+    }
+    console.log(`D links: ${links}`);
+    expect(links).toBeGreaterThan(0);
+  });
 });

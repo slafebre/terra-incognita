@@ -43,3 +43,18 @@ export function drawBuildings(ctx: Ctx, plans: TownPlan[], cx: number, cy: numbe
 export function quadArea(b: ArrayLike<number>, i: number): number {
   return Math.abs((b[i + 4] - b[i]) * (b[i + 7] - b[i + 3]) - (b[i + 6] - b[i + 2]) * (b[i + 5] - b[i + 1])) / 2;
 }
+
+/** Squares: open, paved places, filled like the streets round them (drawn before the ways, which edge them). */
+export function drawSquares(ctx: Ctx, plans: TownPlan[], cx: number, cy: number, pxPerM: number): void {
+  const p = new Path2D();
+  const ox = cx * CHUNK;
+  const oy = cy * CHUNK;
+  for (const pl of plans)
+    for (const q of pl.squares) {
+      p.moveTo((q[0] - ox) * pxPerM, (q[1] - oy) * pxPerM);
+      for (let k = 2; k < q.length; k += 2) p.lineTo((q[k] - ox) * pxPerM, (q[k + 1] - oy) * pxPerM);
+      p.closePath();
+    }
+  ctx.fillStyle = STYLE.square;
+  ctx.fill(p);
+}

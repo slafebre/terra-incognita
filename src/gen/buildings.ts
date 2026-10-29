@@ -44,6 +44,8 @@ export interface BuildingInput {
   gapScale?: number;
   /** Ground buildings other than large ones may stand on (m/m): steeper in the mountains. */
   steep?: number;
+  /** Footprints placed beforehand (churches), as four corners each: the others keep clear of them. */
+  preset?: number[][];
 }
 
 /** Footprint sizes (m): along the street × back from it, and the gap to the next. */
@@ -74,10 +76,13 @@ const CELL = 16;
 export const buildingStats: Record<string, number> = {};
 const note = (k: string) => (buildingStats[k] = (buildingStats[k] ?? 0) + 1);
 
-export function placeBuildings({ fronts, ways, dense, ok, large, rand, gapScale = 1, steep: STEEP = 0.55 }: BuildingInput): { buildings: Float32Array; industrial: Uint8Array } {
-  // Way pieces in a grid, for clearance tests.
+/**
+ * Clearance tests against drawn ways: the clearance of the way through a point, and
+ * whether a footprint comes closer to any way than its clearance.
+ */
+export function wayClearance(ways: Way[]): { clearAt: (x: number, y: number) => number; clashesWay: (q: number[]) => boolean } {
+  // Way pieces in a grid.
   const wayGrid = new Map<number, number[]>();
-  const key = (i: number, j: number) => (i + 32768) * 65536 + (j + 32768);
   const pieces: { ax: number; ay: number; bx: number; by: number; clear: number }[] = [];
   for (const w of ways) {
     for (let k = 2; k < w.xy.length; k += 2) {
@@ -116,6 +121,13 @@ export function placeBuildings({ fronts, ways, dense, ok, large, rand, gapScale 
         }
     return false;
   };
+  return { clearAt, clashesWay };
+}
+
+const key = (i: number, j: number) => (i + 32768) * 65536 + (j + 32768);
+
+export function placeBuildings({ fronts, ways, dense, ok, large, rand, gapScale = 1, steep: STEEP = 0.55, preset = [] }: BuildingInput): { buildings: Float32Array; industrial: Uint8Array } {
+  const { clearAt, clashesWay } = wayClearance(ways);
 
   // Buildings placed so far, in a grid by bounding box.
   const out: number[] = [];
@@ -146,6 +158,7 @@ export function placeBuildings({ fronts, ways, dense, ok, large, rand, gapScale 
         a.push(b);
       }
   };
+  for (const q of preset) add(q.map(Math.fround), false);
 
   for (const { xy, main, ind = false } of fronts) {
     const n = xy.length / 2;

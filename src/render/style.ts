@@ -73,6 +73,8 @@ export const STYLE = {
     bridge: { color: 'rgb(40, 34, 30)', deck: 'rgb(255, 255, 255)', gap: 0.8, line: 0.7 },
   },
   church: 'rgb(45, 40, 38)',
+  /** Squares: paved, like the streets. */
+  square: 'rgb(255, 255, 255)',
   /** Field parcels: unhedged edges faint and thin; hedges as rows of green dots (CSS px). */
   fields: {
     edge: 'rgba(120, 104, 80, 0.32)',

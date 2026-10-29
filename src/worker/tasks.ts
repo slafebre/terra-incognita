@@ -67,6 +67,7 @@ export function runTask(t: TaskRequest): { result: TaskResult; transfer: Transfe
           ...result.roads.map((r) => r.xy.buffer),
           result.buildings.buffer,
           result.industrial.buffer,
+          ...result.squares.map((q) => q.buffer),
         ],
       };
     }

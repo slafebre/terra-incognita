@@ -4,7 +4,6 @@ import { smoothPolyline } from '../lib/polyline';
 import { lineDistance, MW_RAMP_WIDTH, MW_VERGE, MW_WIDTH } from '../gen/motorway';
 import { drawEarthworks, type MotorwayDraw, MW_LEVEL, runsOf, surfaceLines, viaductLines } from './motorway';
 import { ringDisc, ROAD_C, ROAD_D, ROAD_N, ROAD_P, ROAD_T, type SegmentPath } from '../gen/roads';
-import { VILLAGE } from '../gen/settle';
 import { LANE, type Street, type TownPlan } from '../gen/town';
 import { STYLE } from './style';
 
@@ -86,15 +85,14 @@ function trace(p: Path2D, xy: Float32Array, cx: number, cy: number, pxPerM: numb
   p.lineTo(xs[n - 1], ys[n - 1]);
 }
 
-/** Church symbols at the centres of villages and towns. */
+/** Church symbols, on the churches' footprints. */
 export function drawChurches(ctx: Ctx, plans: TownPlan[], cx: number, cy: number, pxPerM: number, dpr: number): void {
   ctx.strokeStyle = STYLE.church;
   ctx.fillStyle = STYLE.church;
   ctx.lineWidth = 0.9 * dpr;
-  for (const s of plans) {
-    if (s.rank > VILLAGE) continue; // hamlets have none
-    const x = (s.x - cx * CHUNK) * pxPerM;
-    const y = (s.y - cy * CHUNK) * pxPerM;
+  for (const c of plans.flatMap((p) => p.churches)) {
+    const x = (c.x - cx * CHUNK) * pxPerM;
+    const y = (c.y - cy * CHUNK) * pxPerM;
     const r = 2.2 * dpr;
     ctx.beginPath();
     ctx.arc(x, y, r, 0, Math.PI * 2);
