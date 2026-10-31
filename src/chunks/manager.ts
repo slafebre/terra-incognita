@@ -185,6 +185,20 @@ const PLAN_REACH = PLAN_EXTENT[TOWN] + PLAN_DRAW_PAD;
  * and the coarse lakes' tiles its nodes lie in (CoarseLakes).
  */
 const COARSE_RADIUS_M = COARSE_REACH + (WIN_CHUNKS + 1) * CHUNK + LAKE_TILE + LAKE_REACH + 512;
+/**
+ * Farthest beyond the generation rectangle (m) its chunks are made for it: the street plan
+ * of a town drawing into it, the roads that plan reads, the solves under those roads and
+ * the pre data of their windows.
+ */
+const GEN_REACH = PLAN_REACH + PLAN_EXTENT[TOWN] + PLAN_MARGIN + PLAN_EDGE + CHUNK + WIN_CHUNKS * CHUNK;
+/**
+ * How far generation follows the desired view ahead of the actual one (m; 860). The
+ * desired view may lead by a screen (main.ts, leash), but forget() drops every chunk
+ * beyond FORGET of the actual view (and one ring): land made further out was dropped the
+ * next frame and made again, every frame, and as pre tasks go first nothing else ran, so
+ * the view never moved on. Within this lead everything generation makes is kept.
+ */
+const GEN_LEAD = FORGET + CHUNK - GEN_MARGIN - GEN_REACH;
 
 /**
  * Owns chunk state and schedules the generation pipeline:
@@ -326,7 +340,12 @@ export class ChunkManager {
       x1: Math.max(actual.x1, desired.x1),
       y1: Math.max(actual.y1, desired.y1),
     };
-    this.genRect = expand(union, GEN_MARGIN);
+    // Toward the desired view, but only as far as what it makes is kept (GEN_LEAD).
+    const lead = expand(actual, GEN_LEAD);
+    this.genRect = expand(
+      { x0: Math.max(union.x0, lead.x0), y0: Math.max(union.y0, lead.y0), x1: Math.min(union.x1, lead.x1), y1: Math.min(union.y1, lead.y1) },
+      GEN_MARGIN,
+    );
     this.roadsRect = expand(this.genRect, CHUNK);
     this.hydroRect = expand(this.roadsRect, CHUNK);
     this.preRect = expand(this.hydroRect, WIN_CHUNKS * CHUNK);
