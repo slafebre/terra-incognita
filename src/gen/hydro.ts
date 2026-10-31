@@ -626,8 +626,10 @@ export interface CoarseBasins {
  * below it, falling gently all the way, and every pocket of the basin floor carved
  * to drain into it. Channels step between edge-sharing cells only: interpolated
  * across a diagonal step, a cut would leave a dam halfway.
+ *
+ * With `lakesOnly`, the other basins are left alone (kind 0, no cut).
  */
-export function coarseBasins(field: CoarseField, x0: number, y0: number, x1: number, y1: number): CoarseBasins {
+export function coarseBasins(field: CoarseField, x0: number, y0: number, x1: number, y1: number, lakesOnly = false): CoarseBasins {
   const g0x = Math.floor((x0 - LAKE_REACH) / COARSE);
   const g0y = Math.floor((y0 - LAKE_REACH) / COARSE);
   const gw = Math.ceil((x1 + LAKE_REACH) / COARSE) - g0x + 1;
@@ -713,6 +715,7 @@ export function coarseBasins(field: CoarseField, x0: number, y0: number, x1: num
       }
       continue;
     }
+    if (lakesOnly) continue;
     // Breach. Saddle: the lowest cell beside the basin (4-neighbours).
     let saddle = -1;
     for (const c of cells) {
@@ -892,6 +895,13 @@ export class CoarseLakes {
     return !Number.isNaN(this.level(x, y));
   }
 
+  /** Whether any lake may lie within the rectangle (any of its tiles has one). */
+  anyIn(x0: number, y0: number, x1: number, y1: number): boolean {
+    for (let ty = Math.floor(Math.round(y0 / COARSE) / LAKE_TC); ty <= Math.floor(Math.round(y1 / COARSE) / LAKE_TC); ty++)
+      for (let tx = Math.floor(Math.round(x0 / COARSE) / LAKE_TC); tx <= Math.floor(Math.round(x1 / COARSE) / LAKE_TC); tx++) if (this.tile(tx, ty)) return true;
+    return false;
+  }
+
   private tile(tx: number, ty: number): Float32Array | null {
     const lk = (tx + 32768) * 65536 + ty + 32768;
     const hit = this.local.get(lk);
@@ -911,7 +921,7 @@ export class CoarseLakes {
     if (t !== undefined) {
       lakeTiles.delete(key); // refresh LRU position
     } else {
-      const bs = coarseBasins(this.field, x0, y0, x1, y1);
+      const bs = coarseBasins(this.field, x0, y0, x1, y1, true);
       const lv = new Float32Array(LAKE_TW * LAKE_TW);
       let any = false;
       for (let lj = 0; lj < LAKE_TW; lj++)
@@ -1471,7 +1481,9 @@ export function solveHydro(win: HydroWindow, cx: number, cy: number, view: SeedV
   // bridges.)
   const coarseLake = new Uint8Array(N);
   const coarseLakes = lakesOf(field);
-  for (let k = 0; k < N; k++) {
+  // (Most windows have none.)
+  const anyCoarseLake = coarseLakes.anyIn(worldX(0), worldY(0), worldX(w - 1), worldY(h - 1));
+  for (let k = 0; anyCoarseLake && k < N; k++) {
     if (!Number.isNaN(lake[k])) continue;
     const x = worldX(k % w);
     const y = worldY(Math.floor(k / w));
