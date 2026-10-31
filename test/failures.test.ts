@@ -114,6 +114,19 @@ describe('failed tasks', { timeout: 60_000 }, () => {
     expect(drawn).toBeLessThan(all);
   });
 
+  // A chunk's failures added up over its stages and its life, success or not: four
+  // passing failures, one per stage, gave it up and passed over the land round it.
+  it('count only the failures since the last success', async () => {
+    const failed = new Set<string>();
+    const { m, covered, drawn, all } = await run(
+      (t) => t.kind !== 'pre' && 'cx' in t && t.cx === MID[0] && t.cy === MID[1] && !failed.has(t.kind) && !!failed.add(t.kind),
+    );
+    expect([...failed].sort()).toEqual(['dem', 'hydro', 'render', 'roads']);
+    expect(covered).toBe(true);
+    expect(m.get(MID[0], MID[1])?.failed).toBeUndefined();
+    expect(drawn).toBe(all);
+  });
+
   it('give up on a net cell that keeps failing without holding the view', async () => {
     const { covered, drawn, all } = await run((t) => t.kind === 'net');
     expect(covered).toBe(true);

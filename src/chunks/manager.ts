@@ -207,7 +207,7 @@ const GEN_LEAD = FORGET + CHUNK - GEN_MARGIN - GEN_REACH;
  * worker that died or memory run short pass; a fault in the generator doesn't.
  */
 const RETRY_MS = [500, 2000, 8000];
-/** Anything a task makes: how often its task failed, when to try again, whether given up on. */
+/** Anything a task makes: how often its task failed since it last succeeded, when to try again, whether given up on. */
 interface Tried {
   tries?: number;
   retryAt?: number;
@@ -215,6 +215,10 @@ interface Tried {
 }
 /** Waiting to be tried again. */
 const resting = (s: Tried, now: number) => s.retryAt !== undefined && now < s.retryAt;
+/** After a task that succeeded: failures before it don't count against the next (another stage, a re-render). */
+const succeeded = (s: Tried) => {
+  s.tries = s.retryAt = undefined;
+};
 /** Chunks a town's plan reaches across: it reads the roads of chunks this far from those it draws into. */
 const PLAN_CHUNKS = Math.ceil((PLAN_REACH + PLAN_EXTENT[TOWN] + PLAN_MARGIN + PLAN_EDGE) / CHUNK);
 /**
@@ -649,6 +653,7 @@ export class ChunkManager {
       })
       .then((res) => {
         state.busy = false;
+        succeeded(state);
         this.stats[kind].ms += res.ms;
         this.stats[kind].n++;
         if ((res.kind === 'net' || res.kind === 'mw') && cells.get(key) === state) state.data = res.result as T;
@@ -774,6 +779,7 @@ export class ChunkManager {
         .run({ kind: 'plan', input })
         .then((res) => {
           state.busy = false;
+          succeeded(state);
           this.stats.plan.ms += res.ms;
           this.stats.plan.n++;
           if (res.kind === 'plan' && this.plans.get(site.id) === state) state.data = res.result;
@@ -916,7 +922,10 @@ export class ChunkManager {
     this.pool
       .run(task, transfer)
       .then((res) => {
-        for (const k of cands) k.chunk.busy = false;
+        for (const k of cands) {
+          k.chunk.busy = false;
+          succeeded(k.chunk);
+        }
         this.stats[res.kind].ms += res.ms;
         this.stats[res.kind].n++;
         this.receive(cands, res, bucket, fieldInputs);
