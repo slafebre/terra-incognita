@@ -4,6 +4,7 @@ import { lerp, smoothstep } from '../lib/noise';
 import { segPointDist, segQuadDist } from './buildings';
 import { streamThreshold } from './dem';
 import { DX, DY, NODE } from './hydro';
+import { lineDistance, MW_PLAN_CLEAR } from './motorway';
 import { ROAD_C, type RoadPatch, type SegmentPath } from './roads';
 import type { TownPlan } from './town';
 
@@ -89,9 +90,11 @@ export interface PoiInput {
   roads: SegmentPath[];
   /** Plans drawing into the chunk. */
   plans: TownPlan[];
+  /** Motorway centre lines and their ramps: no symbol stands on one. */
+  motorways?: ArrayLike<number>[];
 }
 
-export function placePois({ cx, cy, patch: p, roads, plans }: PoiInput): Poi[] {
+export function placePois({ cx, cy, patch: p, roads, plans, motorways = [] }: PoiInput): Poi[] {
   const out: Poi[] = [];
   const { w, h } = p;
   const x0 = cx * CHUNK - POI_MARGIN;
@@ -255,5 +258,9 @@ export function placePois({ cx, cy, patch: p, roads, plans }: PoiInput): Poi[] {
     if (!Number.isNaN(p.lake[k]) || built(x, y)) continue;
     out.push({ kind: CROSS, x, y });
   }
-  return out;
+  // Nothing stands on a motorway or its ramps. They are not ways to the network (no
+  // junction on one, nothing beside it), so the rules above cannot see them: a junction
+  // beside one took its wayside cross into the carriageway. Plans keep the same clearance.
+  const mwDist = lineDistance(motorways, MW_PLAN_CLEAR);
+  return motorways.length ? out.filter((q) => mwDist(q.x, q.y) >= MW_PLAN_CLEAR) : out;
 }

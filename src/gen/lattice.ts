@@ -1631,11 +1631,18 @@ export function routeCurves(tasks: SegmentTask[], p: RoadPatch, motorways: Array
           if ((R === SHORE_SNAP && d > R) || i < 1 || j < 1 || i >= w - 1 || j >= h - 1) continue;
           const k = j * w + i;
           if (isLake(k)) continue;
+          const wx = (p.gx + i) * NODE;
+          const wy = (p.gy + j) * NODE;
+          // Never onto a motorway: MW_VERTEX keeps the lattice position 50 m clear, but
+          // the snap is free to cross that, and a vertex that landed on the carriageway
+          // put a junction (and its wayside cross) in the middle of it. The unsnapped
+          // position is always 50 m clear, so it remains the fallback.
+          if (mwDist(wx, wy) < FIT_MOTORWAY) continue;
           const slope = Math.hypot(p.zE[k + 1] - p.zE[k - 1], p.zE[k + w] - p.zE[k - w]) / (2 * NODE);
           const s = 10 * slope + (p.A[k] > 0.3 ? 2 : 0) + wd * d + (onShore(i, j) ? SNAP_SHORE : 0);
           if (s < bs) {
             bs = s;
-            best = [(p.gx + i) * NODE, (p.gy + j) * NODE];
+            best = [wx, wy];
           }
         }
       if (bs < Infinity) break;

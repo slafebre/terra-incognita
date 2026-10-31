@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { CoarseField } from '../src/gen/hydro';
-import { LATTICE, latticeCell, MAX_EDGE, nearestVertex, neighbours, vertexPos, verticesIn } from '../src/gen/lattice';
-import { NET_CELL, NET_REACH } from '../src/gen/roads';
+import { LATTICE, latticeCell, MAX_EDGE, nearestVertex, neighbours, routeCurves, vertexPos, verticesIn } from '../src/gen/lattice';
+import { NET_CELL, NET_REACH, ROAD_C } from '../src/gen/roads';
 import { SeedStore, SeedView } from '../src/gen/seeds';
 import { Settlements } from '../src/gen/settle';
 import { Terrain } from '../src/gen/terrain';
@@ -109,4 +109,43 @@ describe('settlements and road network', () => {
     console.log(`village suitability deciles: ${hist.join(' ')}  meanR ${(Rsum / 1600).toFixed(2)}`);
     expect(cell.sites.length).toBeGreaterThan(0);
   }, 120_000);
+});
+
+describe('vertex snapping', () => {
+  // A patch 40 × 40 nodes from the origin. Flat south of a motorway along y = 300, rising
+  // north of it, so the gentlest ground near a vertex lies on or beyond the carriageway.
+  const W = 40;
+  const patch = {
+    gx: 0,
+    gy: 0,
+    w: W,
+    h: W,
+    zE: new Float32Array(W * W),
+    A: new Float32Array(W * W),
+    lake: new Float32Array(W * W).fill(NaN),
+  };
+  for (let j = 0; j < W; j++) for (let i = 0; i < W; i++) patch.zE[j * W + i] = j > 20 ? 2 * (j - 20) : 0;
+  const mw = Float64Array.from([-200, 300, 900, 300]);
+  /** The ends of the drawn way, which are its snapped vertices. */
+  const ends = (motorways: Float64Array[]) => {
+    const [seg] = routeCurves(
+      [{ key: 'e', cls: ROAD_C, ax: 192, ay: 352, bx: 400, by: 352, obstacles: [], wedges: [], rivals: [] }],
+      patch,
+      motorways,
+    );
+    const n = seg.xy.length;
+    return [
+      [seg.xy[0], seg.xy[1]],
+      [seg.xy[n - 2], seg.xy[n - 1]],
+    ];
+  };
+
+  it('does not snap a vertex onto a motorway', () => {
+    // Blind to it, the snap takes the flat ground 20 m from the centre line.
+    const blind = ends([]);
+    expect(Math.min(...blind.map(([, y]) => Math.abs(y - 300)))).toBeLessThan(28);
+    // Given the motorway, every end keeps clear of it: MW_VERTEX holds the unsnapped
+    // position 50 m away, and the snap may no longer cross that.
+    for (const [, y] of ends([mw])) expect(Math.abs(y - 300)).toBeGreaterThanOrEqual(28);
+  });
 });

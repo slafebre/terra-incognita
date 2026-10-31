@@ -271,7 +271,8 @@ export function renderChunk({ cx, cy, dem, cover, water, streams, roads, motorwa
   drawRoads(ctx, drawn, plans.flatMap((p) => p.streets), mws, cx, cy, pxPerM, dpr, water);
   drawChurches(ctx, plans, cx, cy, pxPerM, dpr);
   // Points of interest: the chunk's own (hilltops, wayside crosses, springs) and the plans' (water towers).
-  const pois = [...(poi ? placePois({ cx, cy, patch: poi, roads: drawn, plans }) : []), ...plans.flatMap((p) => p.pois)];
+  const mwAndRamps = [...lines, ...drawn.filter((r) => r.ramp).map((r) => Float64Array.from(r.xy))];
+  const pois = [...(poi ? placePois({ cx, cy, patch: poi, roads: drawn, plans, motorways: mwAndRamps }) : []), ...plans.flatMap((p) => p.pois)];
   drawPois(ctx, pois, cx, cy, pxPerM, dpr);
   return { canvas, fields };
 }

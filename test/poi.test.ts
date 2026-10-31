@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { segPointDist } from '../src/gen/buildings';
 import { DX, DY, NODE, NODES } from '../src/gen/hydro';
 import { CHAPEL, CROSS, placePois, POI_MARGIN, POI_PAD, SPRING, TRIG, type Poi, type PoiPatch } from '../src/gen/poi';
+import { MW_PLAN_CLEAR } from '../src/gen/motorway';
 import { ROAD_C, ROAD_D, ROAD_T, type SegmentPath } from '../src/gen/roads';
 import { streamThreshold } from '../src/gen/dem';
 import { CHUNK } from '../src/lib/constants';
@@ -122,6 +123,27 @@ describe('points of interest', () => {
         }
       }
     }
+  });
+
+  it('keep off a motorway, and leave the rest where they were', () => {
+    // A motorway straight across the same land. Nothing may stand on it: the network has
+    // no junction on one, so the rules that place symbols cannot see it by themselves.
+    // Laid through a wayside cross, as the one on the map ran through a junction's.
+    const hit = all.find((q) => q.kind === CROSS && !z0(q)) ?? all[0];
+    const line: number[] = [];
+    for (let t = -700; t <= 700; t += 25) line.push(hit.x + t * 0.92, hit.y + t * 0.39);
+    const mw = Float64Array.from(line);
+    const off = (q: Poi) => {
+      let best = Infinity;
+      for (let i = 2; i < mw.length; i += 2) best = Math.min(best, segPointDist(mw[i - 2], mw[i - 1], mw[i], mw[i + 1], q.x, q.y));
+      return best;
+    };
+    const kept = chunks.flatMap((c) => placePois({ cx: c.cx, cy: c.cy, patch: patchFor(c.cx, c.cy), roads: near(roads, c.cx, c.cy), plans: [], motorways: [mw] }));
+    // The motorway crosses enough of the land to have caught some.
+    expect(all.filter((q) => off(q) < MW_PLAN_CLEAR).length).toBeGreaterThan(0);
+    for (const q of kept) expect(off(q)).toBeGreaterThanOrEqual(MW_PLAN_CLEAR);
+    // Everything clear of it is untouched.
+    expect(new Set(kept.map(key))).toEqual(new Set(all.filter((q) => off(q) >= MW_PLAN_CLEAR).map(key)));
   });
 
   it('set wayside crosses clear of the ways, at junctions with a road', () => {
