@@ -113,8 +113,25 @@ interface Style {
   deadEnd: number;
   /** Frontage depth (m). */
   depth: number;
+  /** How far streets keep to the grain (0–1): their headings at junctions and kinks pulled that share of the way to it, their jitter cut by GRAIN_CALM of it. */
+  grain: number;
   cls: StreetClass;
 }
+
+/**
+ * The grain: streets run (a little off) parallel or square to the main roads near them.
+ * Its direction blends the roads' (N to C) within GRAIN_CELL m cells, each piece weighted
+ * by length / (d² + GRAIN_SOFT²), so the nearest road counts most; it sways by up to
+ * GRAIN_SWAY rad over GRAIN_WAVE m. A branch turns to it (at its junction, and at each kink) only from within GRAIN_TURN rad.
+ */
+const GRAIN_CELL = 20;
+const GRAIN_SOFT = 30;
+const GRAIN_SWAY = 0.12;
+const GRAIN_WAVE = 180;
+const GRAIN_TURN = 0.6;
+const GRAIN_CALM = 0.75;
+/** The roads are taken in pieces about this long (m) for it. */
+const GRAIN_PIECE = 36;
 
 const STEP = 12;
 /** A branch ending this close to another street joins it (m). */
@@ -409,6 +426,7 @@ export function planTown({ site, roads, patch: p, motorways = [] }: PlanInput): 
     gens: rank === TOWN ? 4 : strung > 0.6 ? 1 : 2,
     deadEnd: rank === TOWN ? 0.55 : 0.6,
     depth: rank === TOWN ? 24 : 22,
+    grain: 0.85,
     cls: STREET,
   };
   const suburb: Style = {
@@ -425,6 +443,7 @@ export function planTown({ site, roads, patch: p, motorways = [] }: PlanInput): 
     gens: 3,
     deadEnd: 0.5,
     depth: 20,
+    grain: 0.9,
     cls: STREET,
   };
   const outer: Style = { ...organic, density: 0.35, ring: 0.15, gens: 1, deadEnd: 0.8, depth: 18, cls: LANE };
@@ -446,6 +465,7 @@ export function planTown({ site, roads, patch: p, motorways = [] }: PlanInput): 
     gens: 5,
     deadEnd: 0.25,
     depth: rank === TOWN ? 20 : 18,
+    grain: 0.75,
     cls: STREET,
   };
   if (rank !== HAMLET) budget += OLD_DENSITY[rank] * Math.PI * oldCore * oldCore;
@@ -1711,6 +1731,57 @@ export function planTown({ site, roads, patch: p, motorways = [] }: PlanInput): 
     ring(core * lerp(0.5, 0.85, rand()), lerp(0.8, 0.25, strung), organic);
   }
 
+  // --- The grain ------------------------------------------------------------------
+  // Streets keep to the main roads' lines: parallel to the nearest, or square to it.
+  const grainPieces: number[] = [];
+  lines.forEach((L) => {
+    if (!L.road || L.ring || L.cls > ROAD_C) return;
+    let k0 = 0;
+    for (let k = 1; k < L.xs.length; k++)
+      if (k === L.xs.length - 1 || L.s[k] - L.s[k0] >= GRAIN_PIECE) {
+        grainPieces.push(L.xs[k0], L.ys[k0], L.xs[k], L.ys[k]);
+        k0 = k;
+      }
+  });
+  const grainPh = [rand() * 2 * Math.PI, rand() * 2 * Math.PI];
+  const grainMemo = new Map<number, number>();
+  /** The grain's direction at (x, y) (rad, mod π/2 in effect). */
+  const grainAt = (x: number, y: number): number => {
+    const i = Math.round((x - cx) / GRAIN_CELL);
+    const j = Math.round((y - cy) / GRAIN_CELL);
+    const key = (i + 2048) * 4096 + (j + 2048);
+    let g = grainMemo.get(key);
+    if (g === undefined) {
+      const gx = cx + i * GRAIN_CELL;
+      const gy = cy + j * GRAIN_CELL;
+      let c = 0;
+      let sn = 0;
+      for (let q = 0; q < grainPieces.length; q += 4) {
+        const [x0, y0, x1, y1] = [grainPieces[q], grainPieces[q + 1], grainPieces[q + 2], grainPieces[q + 3]];
+        const d = segPointDist(x0, y0, x1, y1, gx, gy);
+        const w = Math.hypot(x1 - x0, y1 - y0) / (d * d + GRAIN_SOFT * GRAIN_SOFT);
+        // Doubled angles: a road's two directions count alike.
+        const a2 = 2 * Math.atan2(y1 - y0, x1 - x0);
+        c += w * Math.cos(a2);
+        sn += w * Math.sin(a2);
+      }
+      g = Math.atan2(sn, c) / 2 + GRAIN_SWAY * Math.sin(gx / GRAIN_WAVE + grainPh[0]) * Math.sin(gy / GRAIN_WAVE + grainPh[1]);
+      grainMemo.set(key, g);
+    }
+    return g;
+  };
+  /** Heading a pulled `share` of the way to the grain's nearest heading at (x, y), if that is within max rad of it. */
+  const toGrain = (x: number, y: number, a: number, share: number, max = Math.PI): number => {
+    if (!share || !grainPieces.length) return a;
+    const g = grainAt(x, y);
+    let d = Infinity;
+    for (let q = 0; q < 4; q++) {
+      const e = angDiff(g + (q * Math.PI) / 2, a);
+      if (Math.abs(e) < Math.abs(d)) d = e;
+    }
+    return Math.abs(d) <= max ? a + share * d : a;
+  };
+
   // --- Wards (towns) -------------------------------------------------------------
   // Faubourgs grew along the roads out of town, later quarters off them: districts
   // with fields between, not a web of streets spun evenly round the core.
@@ -1813,7 +1884,7 @@ export function planTown({ site, roads, patch: p, motorways = [] }: PlanInput): 
       no('junction');
       continue;
     }
-    let a = Math.atan2(ny0, nx0) + (rand() * 2 - 1) * st.jitter;
+    let a = toGrain(P.x, P.y, Math.atan2(ny0, nx0), st.grain, GRAIN_TURN) + (rand() * 2 - 1) * st.jitter * (1 - GRAIN_CALM * st.grain);
     // Room ahead.
     const ahead0 = Math.min(22, st.gap + 6);
     if (nearest(P.x + Math.cos(a) * ahead0, P.y + Math.sin(a) * ahead0, st.gap * 0.8, (li) => li === c.li)) {
@@ -1836,7 +1907,7 @@ export function planTown({ site, roads, patch: p, motorways = [] }: PlanInput): 
     let runLeft = lerp(st.run[0], st.run[1], rand());
     while (len < maxLen) {
       if (runLeft <= 0) {
-        base += (rand() < 0.5 ? -1 : 1) * st.kink * (0.3 + 0.7 * rand());
+        base = toGrain(xs[xs.length - 1], ys[ys.length - 1], base, st.grain, GRAIN_TURN) + (rand() < 0.5 ? -1 : 1) * st.kink * (1 - GRAIN_CALM * st.grain) * (0.3 + 0.7 * rand());
         runLeft = lerp(st.run[0], st.run[1], rand());
       }
       runLeft -= STEP;
