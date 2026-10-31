@@ -1574,8 +1574,10 @@ export function planTown({ site, roads, patch: p, motorways = [] }: PlanInput): 
       }
     }
     // A bypass: where the links join every N and D road leaving the centre into one,
-    // they take over as the main route (the higher class of the roads they join) and
-    // the old roads in from them to the centre drop a class (D to C, N to D).
+    // they take over as the main route (the lesser class of the two roads each joins:
+    // a through route is no better than its weaker end) and the old roads in from them
+    // to the centre drop a class (D to C, N to D) where a bypass as good takes over
+    // from them. (An N road ending in town meeting a D bypass still runs in as N.)
     const main = arms.map((a, i) => (a.cls <= ROAD_D ? i : -1)).filter((i) => i >= 0);
     const between = madeLinks.filter((l) => arms[l.i].cls <= ROAD_D && arms[l.j].cls <= ROAD_D);
     const comp = new Map(main.map((i) => [i, i]));
@@ -1583,7 +1585,7 @@ export function planTown({ site, roads, patch: p, motorways = [] }: PlanInput): 
     for (const l of between) comp.set(find(l.i), find(l.j));
     if (main.length >= 2 && between.length && new Set(main.map(find)).size === 1) {
       for (const l of between) {
-        const cls = Math.min(l.A.cls, l.B.cls) as SegmentPath['cls'];
+        const cls = Math.max(l.A.cls, l.B.cls) as SegmentPath['cls'];
         const k = redrawn.indexOf(l.piece);
         redrawn[k] = { ...l.piece, cls };
         lines[l.li].cls = cls;
@@ -1591,7 +1593,8 @@ export function planTown({ site, roads, patch: p, motorways = [] }: PlanInput): 
       // Each main arm, from its junction with a bypass in to the centre.
       for (const ai of main) {
         const arm = arms[ai];
-        const ends = between.flatMap((l) => [...(l.i === ai ? [l.A] : []), ...(l.j === ai ? [l.B] : [])]);
+        const over = between.filter((l) => Math.max(l.A.cls, l.B.cls) <= arm.cls);
+        const ends = over.flatMap((l) => [...(l.i === ai ? [l.A] : []), ...(l.j === ai ? [l.B] : [])]);
         const L = lines[arm.li];
         const sOn = (x: number, y: number) => nearest(x, y, 1, (li) => li !== arm.li)?.s ?? NaN;
         // Nearest the centre along the line: its point nearest the centre.
@@ -1604,10 +1607,19 @@ export function planTown({ site, roads, patch: p, motorways = [] }: PlanInput): 
             sc = L.s[k];
           }
         }
-        for (const J of ends) {
+        // In from the junction nearest the centre: beyond it the arm still carries the
+        // through route of a bypass meeting it further out.
+        let J: (typeof ends)[number] | null = null;
+        let sj = NaN;
+        for (const e of ends) {
+          const se = sOn(e.x, e.y);
+          if (!Number.isNaN(se) && (J === null || Math.abs(se - sc) < Math.abs(sj - sc))) {
+            J = e;
+            sj = se;
+          }
+        }
+        if (J) {
           splitAt(J.x, J.y, (q) => q.cls === arm.cls);
-          const sj = sOn(J.x, J.y);
-          if (Number.isNaN(sj)) continue;
           const [lo, hi] = [Math.min(sj, sc), Math.max(sj, sc)];
           net = net.map((q) => {
             if (q.cls !== arm.cls || q.ring || q.key.startsWith(`${site.id}#`)) return q;

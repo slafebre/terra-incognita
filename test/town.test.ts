@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { NODE } from '../src/gen/hydro';
 import { nearestVertex, vertexPos } from '../src/gen/lattice';
-import { ROAD_C, ROAD_D, ROAD_T, ringDisc, type RoadClass, type RoadPatch, type SegmentPath } from '../src/gen/roads';
+import { ROAD_C, ROAD_D, ROAD_N, ROAD_T, ringDisc, type RoadClass, type RoadPatch, type SegmentPath } from '../src/gen/roads';
 import { HAMLET, TOWN, VILLAGE, type Rank, type Site } from '../src/gen/settle';
 import { PLAN_EXTENT, PLAN_MARGIN, planTown, ROAD_CLEAR, STREET_CLEAR, type PlanInput, type TownPlan } from '../src/gen/town';
 import { quadsOverlap, segPointDist, segQuadDist } from '../src/gen/buildings';
@@ -14,9 +14,9 @@ import { clearUnderBuiltUp } from '../src/render/roads';
 /**
  * Street plans on synthetic land: gently tilted, bumpy ground with a stream and a
  * small lake, and four roads meeting at the settlement's lattice vertex — a through
- * D road, a C road and a track.
+ * road (D, or `through`: its two halves' classes), a C road and a track.
  */
-function input(rank: Rank, i: number, relief = 1): PlanInput {
+function input(rank: Rank, i: number, relief = 1, through: [RoadClass, RoadClass] = [ROAD_D, ROAD_D]): PlanInput {
   const [vx, vy] = vertexPos(nearestVertex(4000 + 2000 * i, 3000));
   const site: Site = { id: `${rank}:${i},0`, rank, x: vx + 20, y: vy - 12, z: 100, R: 0.2 + 0.05 * i };
   const r = PLAN_EXTENT[rank] + PLAN_MARGIN;
@@ -37,9 +37,9 @@ function input(rank: Rank, i: number, relief = 1): PlanInput {
   const roads: SegmentPath[] = [];
   const L = PLAN_EXTENT[rank] + 300;
   const arms: [number, RoadClass][] = [
-    [0.15, ROAD_D],
+    [0.15, through[0]],
     [1.75, ROAD_C],
-    [0.15 + Math.PI, ROAD_D],
+    [0.15 + Math.PI, through[1]],
     [4.4, ROAD_T],
   ];
   arms.forEach(([a, cls], n) => {
@@ -85,6 +85,8 @@ const cases = [
   ...[0, 1, 2].map((i) => ({ name: `town ${i}`, inp: input(TOWN, i) })),
   // Flatter land, where towns lay out industrial estates.
   ...[0, 1, 2].map((i) => ({ name: `town ${i} (flat)`, inp: input(TOWN, i, 0.3) })),
+  // An N road ending in town, going on as a D road.
+  ...[0, 1, 2].map((i) => ({ name: `town ${i} (N–D)`, inp: input(TOWN, i, 0.3, [ROAD_N, ROAD_D]) })),
   ...[0, 1, 2, 3, 4, 5, 6, 7].map((i) => ({ name: `hamlet ${i}`, inp: input(HAMLET, i) })),
 ];
 const plans = cases.map((c) => ({ ...c, plan: planTown(c.inp) }));
@@ -504,12 +506,12 @@ describe('street plans', () => {
             `${name} ${r.key} (class ${r.cls}) ends on no road as high`,
           ).toBe(true);
       }
-      // A bypass: a link carrying a D road, the old road in to the centre a C road now.
+      // A bypass: a link as good as the old road in to the centre, which drops a class.
       const byKey = new Map(inp.roads.map((r) => [r.key, r.cls]));
       const down = plan.roads.filter((r) => byKey.has(r.key) && r.cls > byKey.get(r.key)! && r.cls <= ROAD_C);
       if (down.length) {
         bypasses++;
-        expect(own.some((r) => r.cls === ROAD_D), name).toBe(true);
+        for (const r of down) expect(own.some((l) => l.cls <= byKey.get(r.key)!), `${name} ${r.key} dropped with no bypass as good`).toBe(true);
         // Downgraded pieces lie within the core: inside the bypass.
         for (const r of down) for (let k = 0; k < r.xy.length; k += 2) expect(Math.hypot(r.xy[k] - plan.x, r.xy[k + 1] - plan.y), name).toBeLessThan(400);
       }
