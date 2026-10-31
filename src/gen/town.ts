@@ -140,13 +140,15 @@ const HAMLET_GAPS = 1.8;
 /**
  * Wards: beyond its core a town grows in WARD_N districts (× its size), not evenly all
  * round. Each is a lobe of radius WARD_R m (× size), most on a main road out of town
- * (WARD_ON_ROAD of them), the rest against the core between the roads; WARD_APART ×
+ * (WARD_ON_ROAD of them; nearer the core more often: the place along the roads is picked
+ * at rank u^WARD_NEAR by distance, u uniform), the rest against the core between the roads; WARD_APART ×
  * their radii apart, fields between. A town that fills them with street length to spare
  * starts another, up to WARD_MORE more, allowed closer (WARD_APART_MORE: quarters grow together).
  */
 const WARD_N = [5, 8];
 const WARD_R = [120, 210];
 const WARD_ON_ROAD = 0.7;
+const WARD_NEAR = 2;
 const WARD_APART = 0.9;
 const WARD_MORE = 8;
 const WARD_APART_MORE = 0.6;
@@ -1714,16 +1716,17 @@ export function planTown({ site, roads, patch: p, motorways = [] }: PlanInput): 
   // with fields between, not a web of streets spun evenly round the core.
   type Ward = { x: number; y: number; r: number; p: number[] };
   const wards: Ward[] = [];
-  // Places along the main roads beyond the core.
-  const along: { x: number; y: number }[] = [];
+  // Places along the main roads beyond the core, nearest first.
+  const along: { x: number; y: number; d: number }[] = [];
   if (rank === TOWN)
     lines.forEach((L) => {
       if (!L.road || L.ring || L.cls > ROAD_C) return;
       for (let k = 0; k < L.xs.length; k += 2) {
         const d = zoneDist(L.xs[k], L.ys[k], false);
-        if (d > core * 0.9 && d < reach * 0.85 && !wet(L.xs[k], L.ys[k])) along.push({ x: L.xs[k], y: L.ys[k] });
+        if (d > core * 0.9 && d < reach * 0.85 && !wet(L.xs[k], L.ys[k])) along.push({ x: L.xs[k], y: L.ys[k], d });
       }
     });
+  along.sort((a, b) => a.d - b.d || a.x - b.x || a.y - b.y);
   /** A ward clear of the others, if one is found in a few tries. */
   const addWard = (apart: number): boolean => {
     for (let tries = 0; tries < 16; tries++) {
@@ -1732,7 +1735,7 @@ export function planTown({ site, roads, patch: p, motorways = [] }: PlanInput): 
       let y: number;
       if (along.length && rand() < WARD_ON_ROAD) {
         // Astride the road, or to one side of it.
-        const q = along[Math.floor(rand() * along.length)];
+        const q = along[Math.floor(rand() ** WARD_NEAR * along.length)];
         const a = rand() * 2 * Math.PI;
         const o = rand() * 0.6 * r;
         x = q.x + Math.cos(a) * o;
