@@ -137,6 +137,19 @@ const MAIN_DENSE = 1.25;
 export const BUILD_STEEP = [0.55, 0.8];
 /** Hamlets' houses stand further apart. */
 const HAMLET_GAPS = 1.8;
+/**
+ * Wards: beyond its core a town grows in WARD_N districts (× its size), not evenly all
+ * round. Each is a lobe of radius WARD_R m (× size), most on a main road out of town
+ * (WARD_ON_ROAD of them), the rest against the core between the roads; WARD_APART ×
+ * their radii apart, fields between. A town that fills them with street length to spare
+ * starts another, up to WARD_MORE more, allowed closer (WARD_APART_MORE: quarters grow together).
+ */
+const WARD_N = [5, 8];
+const WARD_R = [120, 210];
+const WARD_ON_ROAD = 0.7;
+const WARD_APART = 0.9;
+const WARD_MORE = 8;
+const WARD_APART_MORE = 0.6;
 /** Towns, and villages whose core is wider than this (m), are large: D-road links round the core, more squares and churches. */
 const BIG_VILLAGE = 160;
 /**
@@ -397,9 +410,9 @@ export function planTown({ site, roads, patch: p, motorways = [] }: PlanInput): 
     cls: STREET,
   };
   const suburb: Style = {
-    spacing: lerp(80, 105, rand()),
-    density: 0.8,
-    len: [90, 260],
+    spacing: lerp(60, 80, rand()),
+    density: 0.9,
+    len: [70, 200],
     jitter: 0.05,
     steer: [-0.6, -0.15, 0, 0.15, 0.6],
     run: [60, 160],
@@ -821,7 +834,7 @@ export function planTown({ site, roads, patch: p, motorways = [] }: PlanInput): 
       while (s < total - 15) {
         const { x, y } = pointAt(li, s);
         const d = zoneDist(x, y, L.road);
-        const st = Math.hypot(x - cx, y - cy) < hardReach && !nearRing(x, y, RING_CLEAR) ? styleAt(d) : null;
+        const st = Math.hypot(x - cx, y - cy) < hardReach && !nearRing(x, y, RING_CLEAR) && !open(x, y, L.road) ? styleAt(d) : null;
         if (!st) {
           s += 30;
           continue;
@@ -1696,14 +1709,70 @@ export function planTown({ site, roads, patch: p, motorways = [] }: PlanInput): 
     ring(core * lerp(0.5, 0.85, rand()), lerp(0.8, 0.25, strung), organic);
   }
 
+  // --- Wards (towns) -------------------------------------------------------------
+  // Faubourgs grew along the roads out of town, later quarters off them: districts
+  // with fields between, not a web of streets spun evenly round the core.
+  type Ward = { x: number; y: number; r: number; p: number[] };
+  const wards: Ward[] = [];
+  // Places along the main roads beyond the core.
+  const along: { x: number; y: number }[] = [];
+  if (rank === TOWN)
+    lines.forEach((L) => {
+      if (!L.road || L.ring || L.cls > ROAD_C) return;
+      for (let k = 0; k < L.xs.length; k += 2) {
+        const d = zoneDist(L.xs[k], L.ys[k], false);
+        if (d > core * 0.9 && d < reach * 0.85 && !wet(L.xs[k], L.ys[k])) along.push({ x: L.xs[k], y: L.ys[k] });
+      }
+    });
+  /** A ward clear of the others, if one is found in a few tries. */
+  const addWard = (apart: number): boolean => {
+    for (let tries = 0; tries < 16; tries++) {
+      const r = lerp(WARD_R[0], WARD_R[1], rand()) * size;
+      let x: number;
+      let y: number;
+      if (along.length && rand() < WARD_ON_ROAD) {
+        // Astride the road, or to one side of it.
+        const q = along[Math.floor(rand() * along.length)];
+        const a = rand() * 2 * Math.PI;
+        const o = rand() * 0.6 * r;
+        x = q.x + Math.cos(a) * o;
+        y = q.y + Math.sin(a) * o;
+      } else {
+        const a = rand() * 2 * Math.PI;
+        const d = core + r * lerp(0.3, 0.7, rand());
+        x = cx + Math.cos(a) * d;
+        y = cy + Math.sin(a) * d;
+      }
+      if (wet(x, y) || areaAt(x, y) > STREAM_A || Math.hypot(x - cx, y - cy) > hardReach - r * 0.5) continue;
+      if (wards.some((w) => Math.hypot(w.x - x, w.y - y) < apart * (w.r + r))) continue;
+      wards.push({ x, y, r, p: [rand() * 2 * Math.PI, rand() * 2 * Math.PI] });
+      no('WARD');
+      return true;
+    }
+    return false;
+  };
+  if (rank === TOWN) {
+    const n = Math.round(lerp(WARD_N[0], WARD_N[1], rand()) * Math.min(1, size));
+    while (wards.length < n && addWard(WARD_APART));
+  }
+  /** Is (x, y) in a ward (a lobe, not a circle), within m of it? */
+  const inWard = (x: number, y: number, m = 0) =>
+    wards.some((w) => {
+      const a = Math.atan2(y - w.y, x - w.x);
+      return Math.hypot(x - w.x, y - w.y) < w.r * (1 + 0.22 * Math.sin(2 * a + w.p[0]) + 0.12 * Math.sin(3 * a + w.p[1])) + m;
+    });
+  /** Open land: a town's fields beyond its core, between the wards. */
+  const open = (x: number, y: number, road: boolean) => rank === TOWN && zoneDist(x, y, road) >= core && !inWard(x, y);
+
   for (let li = 0; li < lines.length; li++) offer(li);
 
   let rounds = 0;
+  let more = 0;
   while (built < budget && streets.length < lanes) {
     // Out of branch points with budget left: offer every street again, at fresh
-    // places (towns fill in their blocks this way).
+    // places (towns fill in their blocks this way), then (towns) in a new ward.
     if (!heap.length) {
-      if (rounds++ >= REFILL) break;
+      if (rounds++ >= REFILL && !(rank === TOWN && more++ < WARD_MORE && addWard(WARD_APART_MORE))) break;
       for (let li = 0; li < lines.length; li++) offer(li);
       if (!heap.length) break;
     }
@@ -1711,7 +1780,7 @@ export function planTown({ site, roads, patch: p, motorways = [] }: PlanInput): 
     const parent = lines[c.li];
     const P = pointAt(c.li, c.s);
     const d0 = Math.hypot(P.x - cx, P.y - cy);
-    const st = styleAt(zoneDist(P.x, P.y, parent.road));
+    const st = open(P.x, P.y, parent.road) ? null : styleAt(zoneDist(P.x, P.y, parent.road));
     if (!st) {
       no('outside');
       continue;
@@ -1810,7 +1879,7 @@ export function planTown({ site, roads, patch: p, motorways = [] }: PlanInput): 
       a = ba;
       let nx = x + Math.cos(a) * STEP;
       let ny = y + Math.sin(a) * STEP;
-      if (zoneDist(nx, ny, false) > reach || Math.hypot(nx - cx, ny - cy) > hardReach) {
+      if (zoneDist(nx, ny, false) > reach || Math.hypot(nx - cx, ny - cy) > hardReach || open(nx, ny, false)) {
         stop = 'reach';
         break;
       }

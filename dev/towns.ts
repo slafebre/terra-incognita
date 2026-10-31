@@ -6,11 +6,12 @@
 // D-road links the plan tried (made: green; refused: magenta dashes). INPUTS=<file> caches the
 // pipeline's output (the plans' inputs), so plans can be tuned without rerunning it. OUT=<prefix> names the
 // files (default towns), one per settlement, plus <prefix>-sheet.svg of all (COLS per row).
-// SNAP=<file> (a snapshot from the app's info panel) plans the settlement nearest its view instead.
+// SNAP=<file> (a snapshot from the app's info panel) plans the settlement nearest its view instead
+// (TOWNS=1 / HAMLETS=1: the nearest of that rank).
 import { ChunkManager } from '../src/chunks/manager';
 import { CoarseField, NODE } from '../src/gen/hydro';
 import { SeedStore, SeedView } from '../src/gen/seeds';
-import { FARM, HAMLET, Settlements, TOWN, VILLAGE, type Site } from '../src/gen/settle';
+import { FARM, HAMLET, Settlements, TOWN, VILLAGE, type Rank, type Site } from '../src/gen/settle';
 import { setRegionOverride, Terrain } from '../src/gen/terrain';
 import { NET_REACH, type SegmentPath } from '../src/gen/roads';
 import { buildingStats } from '../src/gen/buildings';
@@ -61,7 +62,8 @@ function snapSite(s: NonNullable<typeof snap>): Site | undefined {
   const view = new SeedView(store.payloadFor({ x0: x, y0: y, x1: x + 16, y1: y + 16 }, { x0: x - D - NET_REACH, y0: y - D - NET_REACH, x1: x + D + NET_REACH, y1: y + D + NET_REACH }));
   const t = new Terrain(view);
   const set = new Settlements(new CoarseField(t, view), t, view);
-  const sites = ([TOWN, VILLAGE, HAMLET] as const).flatMap((rank) => set.sitesIn(rank, x - D, y - D, x + D, y + D));
+  const ranks: Rank[] = process.env.TOWNS || process.env.HAMLETS ? [RANK] : [TOWN, VILLAGE, HAMLET];
+  const sites = ranks.flatMap((rank) => set.sitesIn(rank, x - D, y - D, x + D, y + D));
   return sites.sort((a, b) => Math.hypot(a.x - x, a.y - y) - Math.hypot(b.x - x, b.y - y))[0];
 }
 
