@@ -10,6 +10,7 @@ import {
   WIN_CHUNKS,
   COARSE_REACH,
   LAKE_REACH,
+  LAKE_TILE,
   TILE_STRIDE,
   type HydroCore,
   type HydroWindow,
@@ -179,8 +180,11 @@ const planRoadsRect = (s: Site) => expand(point(s), PLAN_EXTENT[s.rank] + PLAN_M
 const PLAN_EDGE = 200;
 /** Furthest a plan's drawing reaches from its site. */
 const PLAN_REACH = PLAN_EXTENT[TOWN] + PLAN_DRAW_PAD;
-/** Coarse reach of a window solve: the coarse surface around the window and its lake grid. */
-const COARSE_RADIUS_M = COARSE_REACH + (WIN_CHUNKS + 1) * CHUNK + LAKE_REACH + 512;
+/**
+ * Coarse reach of a window solve: the coarse surface around the window, its basin grid
+ * and the coarse lakes' tiles its nodes lie in (CoarseLakes).
+ */
+const COARSE_RADIUS_M = COARSE_REACH + (WIN_CHUNKS + 1) * CHUNK + LAKE_TILE + LAKE_REACH + 512;
 
 /**
  * Owns chunk state and schedules the generation pipeline:

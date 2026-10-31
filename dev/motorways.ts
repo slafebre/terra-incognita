@@ -1,7 +1,7 @@
 // Dev tool: motorways over a large area of the coarse surface, to judge their density and line.
 // Query: ?size=48000&x=..&y=..&seed=n&raw=1&R=0.2 (raw: also the line where the gate is closed; R: region forced)
 import { COARSE, CoarseField } from '../src/gen/hydro';
-import { lakesOf } from '../src/gen/lakes';
+import { lakesOf } from '../src/gen/hydro';
 import { MW_CELL, MW_GRADE, MW_RMIN, Motorways, tightestRadius } from '../src/gen/motorway';
 import { NET_REACH } from '../src/gen/roads';
 import { expand, SeedStore, SeedView } from '../src/gen/seeds';

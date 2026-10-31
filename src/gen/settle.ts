@@ -1,7 +1,6 @@
 import { hash3 } from '../lib/hash';
 import { lerp, smoothstep } from '../lib/noise';
-import type { CoarseField } from './hydro';
-import { lakesOf } from './lakes';
+import { type CoarseField, lakesOf } from './hydro';
 import type { Lattice, SeedView } from './seeds';
 import type { Terrain } from './terrain';
 

@@ -1,7 +1,6 @@
 import { gnoise, ND, smoothstep } from '../lib/noise';
 import { hash3 } from '../lib/hash';
-import { coarseEpochNow, type CoarseField } from './hydro';
-import { lakesOf } from './lakes';
+import { coarseEpochNow, type CoarseField, lakesOf } from './hydro';
 import { NET_CELL, ringDisc } from './roads';
 import type { Lattice, SeedView } from './seeds';
 import { HAMLET, type Rank, type Settlements, type Site, TOWN, VILLAGE } from './settle';

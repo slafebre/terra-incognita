@@ -841,6 +841,105 @@ function basinAt(b: CoarseBasins, a: Float32Array, x: number, y: number): number
 }
 
 // ---------------------------------------------------------------------------
+// Coarse lakes
+
+/**
+ * Lakes of closed coarse basins, as the window solves, the network and settlements
+ * all see them. A place is lake where a lake cell at or next to its nearest 128 m
+ * cell has a level clearly above the coarse surface there. (The solves also require
+ * the level to be above the node's starting surface, whose fine detail the network
+ * can't see.)
+ *
+ * Basins are found per fixed world tile of LAKE_TILE m (coarseBasins reaching LAKE_REACH
+ * beyond it), so a test at (x, y) reads the coarse surface up to LAKE_TILE + LAKE_REACH
+ * away (NET_REACH allows for it). They are a pure function of the coarse surface for every lake that
+ * touches the tile, so every tile, cell and worker agrees. Tiles are about a window's
+ * size: a basin nested in a much bigger one is closed on a grid that cuts the bigger
+ * one open and merged into it on one that doesn't, so 8 km tiles, their grids reaching
+ * further than a window's, missed lakes the windows found.
+ */
+export const LAKE_TILE = 2048;
+/** Cells per tile edge. */
+const LAKE_TC = LAKE_TILE / COARSE;
+/** Lake levels kept per tile: its cells plus one around (for the neighbour rule). */
+const LAKE_TW = LAKE_TC + 2;
+
+/** Per worker: lake levels by tile and the coarse tiles they were built from (null: no lake in the tile). */
+const lakeTiles = new Map<string, Float32Array | null>();
+const LAKE_TILES_MAX = 4096;
+
+export class CoarseLakes {
+  private readonly local = new Map<number, Float32Array | null>();
+  constructor(private readonly field: CoarseField) {}
+
+  /** Level of the coarse lake at (x, y), or NaN where there is none. */
+  level(x: number, y: number): number {
+    const gi = Math.round(x / COARSE);
+    const gj = Math.round(y / COARSE);
+    const tx = Math.floor(gi / LAKE_TC);
+    const ty = Math.floor(gj / LAKE_TC);
+    const t = this.tile(tx, ty);
+    if (!t) return NaN;
+    const li = gi - tx * LAKE_TC + 1;
+    const lj = gj - ty * LAKE_TC + 1;
+    let L = NaN;
+    // The same order as the solves, so the same level where two lakes meet.
+    for (let d = -1; d < 8 && Number.isNaN(L); d++) L = t[d < 0 ? lj * LAKE_TW + li : (lj + DY[d]) * LAKE_TW + li + DX[d]];
+    return Number.isNaN(L) || this.field.z(x, y) >= L - LAKE_SHORE_DROP ? NaN : L;
+  }
+
+  wet(x: number, y: number): boolean {
+    return !Number.isNaN(this.level(x, y));
+  }
+
+  private tile(tx: number, ty: number): Float32Array | null {
+    const lk = (tx + 32768) * 65536 + ty + 32768;
+    const hit = this.local.get(lk);
+    if (hit !== undefined) return hit;
+    // World rectangle of the kept cells, and the coarse tiles the basin grid reads.
+    const x0 = (tx * LAKE_TC - 1) * COARSE;
+    const y0 = (ty * LAKE_TC - 1) * COARSE;
+    const x1 = ((tx + 1) * LAKE_TC) * COARSE;
+    const y1 = ((ty + 1) * LAKE_TC) * COARSE;
+    const s = TILE_STRIDE * COARSE;
+    let sig = '';
+    for (let b = Math.floor((y0 - LAKE_REACH - COARSE) / s) - 1; b <= Math.floor((y1 + LAKE_REACH + COARSE) / s); b++)
+      for (let a = Math.floor((x0 - LAKE_REACH - COARSE) / s) - 1; a <= Math.floor((x1 + LAKE_REACH + COARSE) / s); a++)
+        sig += `${tileId(this.field.tile(a, b))},`;
+    const key = `${tx},${ty}:${sig}`;
+    let t = lakeTiles.get(key);
+    if (t !== undefined) {
+      lakeTiles.delete(key); // refresh LRU position
+    } else {
+      const bs = coarseBasins(this.field, x0, y0, x1, y1);
+      const lv = new Float32Array(LAKE_TW * LAKE_TW);
+      let any = false;
+      for (let lj = 0; lj < LAKE_TW; lj++)
+        for (let li = 0; li < LAKE_TW; li++) {
+          const gi = tx * LAKE_TC - 1 + li;
+          const gj = ty * LAKE_TC - 1 + lj;
+          const L = bs.level[(gj - bs.g0y) * bs.gw + gi - bs.g0x];
+          lv[lj * LAKE_TW + li] = L;
+          if (!Number.isNaN(L)) any = true;
+        }
+      t = any ? lv : null;
+      if (lakeTiles.size >= LAKE_TILES_MAX) lakeTiles.delete(lakeTiles.keys().next().value!);
+    }
+    lakeTiles.set(key, t);
+    this.local.set(lk, t);
+    return t;
+  }
+}
+
+const perField = new WeakMap<CoarseField, CoarseLakes>();
+/** The coarse lakes of a field (one per field, so its tiles are shared by every user). */
+export function lakesOf(field: CoarseField): CoarseLakes {
+  let l = perField.get(field);
+  if (!l) perField.set(field, (l = new CoarseLakes(field)));
+  return l;
+}
+
+// ---------------------------------------------------------------------------
 // Window solve
 
 export interface HydroWindow {
@@ -1361,24 +1460,23 @@ export function solveHydro(win: HydroWindow, cx: number, cy: number, view: SeedV
     }
 
   // --- Coarse lakes ------------------------------------------------------------------
-  // Deep, compact basins of the coarse surface (see coarseBasins). A node is lake
-  // where a lake cell at or next to it has a level above both the node's starting
-  // surface and, clearly, the coarse surface (beyond the basin the fine detail can
-  // dip below the level, and past the spill the coarse floor is graded within
-  // centimetres of it). Per node, without connectivity, so no window sees it
-  // differently. These lakes are never drained (that is decided per window).
+  // Deep, compact basins of the coarse surface, as the network sees them (CoarseLakes:
+  // a lake cell at or next to the node, its level clearly above the coarse surface
+  // there; beyond the basin the fine detail can dip below the level, and past the
+  // spill the coarse floor is graded within centimetres of it), where the level is
+  // also above the node's starting surface. Per node, without connectivity, so no
+  // window sees it differently. These lakes are never drained (that is decided per
+  // window). (Taken from this window's own basins, a basin nested in a much bigger
+  // one could be a lake here and not on the network's tiles: roads crossed it on long
+  // bridges.)
   const coarseLake = new Uint8Array(N);
-  // (Most windows have none.)
-  const anyCoarseLake = basins.level.some((L) => !Number.isNaN(L));
-  for (let k = 0; anyCoarseLake && k < N; k++) {
+  const coarseLakes = lakesOf(field);
+  for (let k = 0; k < N; k++) {
     if (!Number.isNaN(lake[k])) continue;
     const x = worldX(k % w);
     const y = worldY(Math.floor(k / w));
-    const gi = Math.round(x / COARSE) - basins.g0x;
-    const gj = Math.round(y / COARSE) - basins.g0y;
-    let L = NaN;
-    for (let d = -1; d < 8 && Number.isNaN(L); d++) L = basins.level[d < 0 ? gj * basins.gw + gi : (gj + DY[d]) * basins.gw + gi + DX[d]];
-    if (Number.isNaN(L) || zPre[k] >= L || field.z(x, y) >= L - LAKE_SHORE_DROP) continue;
+    const L = coarseLakes.level(x, y);
+    if (Number.isNaN(L) || zPre[k] >= L) continue;
     preLake[k] = zE[k];
     zE[k] = L;
     lake[k] = L;

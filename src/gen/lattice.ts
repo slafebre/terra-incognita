@@ -2,8 +2,7 @@ import { CHUNK } from '../lib/constants';
 import { hash3 } from '../lib/hash';
 import { MinHeap } from '../lib/heap';
 import { lerp, smoothstep } from '../lib/noise';
-import { coarseEpochNow, type CoarseField, NODE } from './hydro';
-import { lakesOf } from './lakes';
+import { coarseEpochNow, type CoarseField, lakesOf, NODE } from './hydro';
 import { diamondRamps, lineCrossings, lineDistance, MotorwayLookup, type Motorways } from './motorway';
 import {
   MAX_GRADE,
@@ -41,7 +40,7 @@ import { PLAN_EXTENT } from './town';
  *     class's limit (judged on the coarse surface over 500 m: at the scale of one
  *     edge it does not predict the map's slopes), cheaper on valley floors, a small
  *     bridge charge across streams, dear across the lakes of closed coarse basins
- *     (lakes.ts), plus a fixed tie-break so best paths are unique.
+ *     (CoarseLakes, hydro.ts), plus a fixed tie-break so best paths are unique.
  *  2. Main roads: for each town pair (N) and village pair (D) of the relative-
  *     neighbourhood graphs, the cheapest path inside a fixed corridor around the
  *     pair, turns costing a little. The corridor makes it the same in every cell.

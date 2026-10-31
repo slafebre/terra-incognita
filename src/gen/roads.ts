@@ -1,5 +1,4 @@
-import { COARSE_REACH, LAKE_REACH, NODE } from './hydro';
-import { LAKE_TILE } from './lakes';
+import { COARSE_REACH, LAKE_REACH, LAKE_TILE, NODE } from './hydro';
 import { COARSE_KEEP_EXTRA } from './seeds';
 import type { Site } from './settle';
 
@@ -16,8 +15,8 @@ export const NET_CELL = 8192;
  * corridors that reach the cell's stages and the sites deciding them (SITE_REACH);
  * coarse lakes are tested within LAKE_TEST_REACH (main-road corridors, and the
  * villages deciding the cell's D roads; towns ignore lakes), and each test reads
- * the surface up to LAKE_TILE + LAKE_REACH further (lakes.ts); plus the coarse
- * surface's own reach. Coarse seeds are kept accordingly (COARSE_KEEP_EXTRA).
+ * the surface up to LAKE_TILE + LAKE_REACH further (CoarseLakes, hydro.ts); plus
+ * the coarse surface's own reach. Coarse seeds are kept accordingly (COARSE_KEEP_EXTRA).
  */
 const SITE_REACH = 35500;
 const LAKE_TEST_REACH = 30000;
