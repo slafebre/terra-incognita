@@ -5,17 +5,25 @@
 // SEED=n picks the areas, as roadstats (the same n gives the same land, so versions
 // compare); HASHSEED=n seeds the world from position instead, so a violation opens in
 // the browser at ?at=x,y&seed=n. LOG=1 prints every violation, not just the counts.
+// SNAP=<file> checks one snapshot's own land where it was taken, instead of seeded
+// areas: what you saw on the map, put to the same rules.
 // Exits non-zero where a count is over its budget: BUDGETS holds what is tolerated
 // today, and lowering them is the work.
 import { ChunkManager } from '../src/chunks/manager';
-import { MW_PLAN_CLEAR, MW_WIDTH, lineDistance } from '../src/gen/motorway';
+import { MW_PLAN_CLEAR, MW_WIDTH, Motorways, lineDistance } from '../src/gen/motorway';
+import { CoarseField } from '../src/gen/hydro';
+import { nearestVertex, vertexPos } from '../src/gen/lattice';
+import { NET_REACH } from '../src/gen/roads';
+import { expand, SeedStore, SeedView } from '../src/gen/seeds';
+import { Settlements } from '../src/gen/settle';
+import { setRegionOverride, Terrain } from '../src/gen/terrain';
 import { placePois } from '../src/gen/poi';
-import { setRegionOverride } from '../src/gen/terrain';
 import { classifyMotorways, MW_LEVEL, MW_TUNNEL } from '../src/render/motorway';
 import { CHUNK } from '../src/lib/constants';
 import { rng } from '../src/lib/hash';
 import type { TaskRequest, TaskResult } from '../src/worker/protocol';
 import { runTask } from '../src/worker/tasks';
+import { applySnap, snap } from './snap';
 
 declare const process: { argv: string[]; env: Record<string, string | undefined>; exit(code: number): void };
 
@@ -28,9 +36,34 @@ const LOG = !!process.env.LOG;
 /** The spec's distances, by the rule each belongs to (SPEC §3.5.1). */
 const MW_VERTEX = 50;
 const MW_EDGE = 30;
+/** What the snap guarantees a drawn junction (FIT_MOTORWAY in lattice.ts). */
+const MW_SNAP_CLEAR = 28;
 const MW_CROSS_ANGLE = (35 * Math.PI) / 180;
 /** A way counts as crossing (rather than running alongside) within this far of a crossing. */
 const CROSS_NEAR = 60;
+/** How far around a random point to look for a motorway to stand the area on (m). */
+const FIND = Number(process.env.FIND ?? 24000);
+
+/**
+ * A motorway near a random point, from the same seeds the pipeline will use (the store
+ * hands out each seed once and keeps it). Areas are stood on one: at ~1.4 km of motorway
+ * per 100 km² a 3 km area picked at random holds none, and the run checks nothing.
+ */
+function motorwayNear(seeds: SeedStore, x: number, y: number): [number, number] | undefined {
+  const r = { x0: x - FIND, y0: y - FIND, x1: x + FIND, y1: y + FIND };
+  const view = new SeedView(seeds.payloadFor(r, expand(r, NET_REACH)));
+  const t = new Terrain(view);
+  const field = new CoarseField(t, view);
+  const mw = new Motorways(field, t, new Settlements(field, t, view), view);
+  let best: [number, number] | undefined;
+  let bd = Infinity;
+  for (const p of mw.piecesIn(r.x0, r.y0, r.x1 - 1, r.y1 - 1))
+    for (let i = 0; i < p.xy.length; i += 2) {
+      const d = Math.hypot(p.xy[i] - x, p.xy[i + 1] - y);
+      if (d < bd) [bd, best] = [d, [p.xy[i], p.xy[i + 1]]];
+    }
+  return best;
+}
 
 /**
  * What each count is allowed to be over the whole run, and why. Zero means the invariant
@@ -39,7 +72,8 @@ const CROSS_NEAR = 60;
  */
 const BUDGETS: Record<string, number> = {
   'mw-end-tunnel': 0, // a motorway ending inside a tunnel: the drawing stops at the portal
-  'mw-vertex': 0, // a junction within MW_VERTEX of a motorway
+  'mw-vertex': 0, // the lattice vertex of a junction within MW_VERTEX: the network's own rule
+  'mw-junction': 0, // the junction as drawn within MW_SNAP_CLEAR: what the snap guarantees
   'poi-on-mw': 0, // a symbol on the carriageway or a ramp
   'ramp-merge': Infinity, // merging on a viaduct or in a tunnel: ramps are not fitted to the terrain
   'ramp-crossing': Infinity, // a ramp crossed without a junction: the network cannot see ramps
@@ -88,7 +122,7 @@ function crossings(way: ArrayLike<number>, lines: Float64Array[]) {
 
 /** One area: builds the land, then checks every chunk's drawn world as the renderer sees it. */
 async function checkArea(R: number, areaNo: number): Promise<number> {
-  setRegionOverride(R);
+  if (!snap) setRegionOverride(R);
   Math.random = rng(SEED * 7919 + areaNo * 104729 + Math.round(R * 1000));
   const pool = {
     size: 4,
@@ -108,9 +142,21 @@ async function checkArea(R: number, areaNo: number): Promise<number> {
       );
     },
   };
-  const m = new ChunkManager(pool, () => {}, process.env.HASHSEED === undefined ? undefined : Number(process.env.HASHSEED) >>> 0);
-  const x = Math.round((Math.random() - 0.5) * 2e6);
-  const y = Math.round((Math.random() - 0.5) * 2e6);
+  const m = new ChunkManager(pool, () => {}, snap ? (snap.seed ?? undefined) : process.env.HASHSEED === undefined ? undefined : Number(process.env.HASHSEED) >>> 0);
+  if (snap) applySnap(m.seeds);
+  let on: [number, number] | undefined;
+  if (snap) on = [snap.at[0], snap.at[1]];
+  else {
+    const rx = Math.round((Math.random() - 0.5) * 2e6);
+    const ry = Math.round((Math.random() - 0.5) * 2e6);
+    on = motorwayNear(m.seeds, rx, ry);
+    if (!on) {
+      console.log(`  R=${R} area ${areaNo}: no motorway within ${FIND / 1000} km of ${rx},${ry} — skipped`);
+      return 0;
+    }
+  }
+  const x = Math.round(on[0] - SIZE / 2);
+  const y = Math.round(on[1] - SIZE / 2);
   const view = { x0: x, y0: y, x1: x + SIZE, y1: y + SIZE };
   for (let i = 0; i < 40000 && !m.covered(view); i++) {
     m.update(view, view, [x + SIZE / 2, y + SIZE / 2]);
@@ -189,8 +235,15 @@ async function checkArea(R: number, areaNo: number): Promise<number> {
     }
     for (const e of ends.values()) {
       if (e.n < 3 || !inChunk(e.x, e.y)) continue;
+      // Two rules, because they are kept in two places. The network holds the lattice
+      // vertex MW_VERTEX clear; the drawing snaps that vertex onto gentler ground and
+      // only keeps it MW_SNAP_CLEAR out, so a drawn junction may sit between the two.
+      // That gap is real: closing it would push vertices back onto wet or steep ground.
+      const [vx, vy] = vertexPos(nearestVertex(e.x, e.y));
+      const lat = Math.min(...mwLines.map((xy) => toLine(xy, vx, vy)));
       const off = Math.min(...mwLines.map((xy) => toLine(xy, e.x, e.y)));
-      if (off < MW_VERTEX) add('mw-vertex', e.x, e.y, `a junction of ${e.n} ways, ${off.toFixed(0)} m from the motorway`);
+      if (lat < MW_VERTEX) add('mw-vertex', e.x, e.y, `a junction of ${e.n} ways on a vertex ${lat.toFixed(0)} m from the motorway`);
+      if (off < MW_SNAP_CLEAR) add('mw-junction', e.x, e.y, `a junction of ${e.n} ways drawn ${off.toFixed(0)} m from the motorway (vertex ${lat.toFixed(0)} m)`);
     }
     for (const o of ways) {
       const cross = crossings(o.xy, mwLines);
@@ -218,18 +271,20 @@ async function checkArea(R: number, areaNo: number): Promise<number> {
 }
 
 let km = 0;
-for (const R of REGIONS) for (let a = 0; a < AREAS; a++) km += await checkArea(R, a);
+if (snap) km = await checkArea(0, 0);
+else for (const R of REGIONS) for (let a = 0; a < AREAS; a++) km += await checkArea(R, a);
 
 const counts = new Map<string, number>();
 for (const h of hits.values()) counts.set(h.check, (counts.get(h.check) ?? 0) + 1);
 if (LOG) for (const h of [...hits.values()].sort((a, b) => a.check.localeCompare(b.check))) console.log(`  ${h.check} at ?at=${Math.round(h.x)},${Math.round(h.y)}  ${h.note}`);
-console.log(`\nMOTORWAY INVARIANTS: ${REGIONS.length * AREAS} areas of ${SIZE / 1000} km, ${km.toFixed(1)} km of motorway drawn`);
+console.log(`\nMOTORWAY INVARIANTS: ${snap ? `the snapshot's land` : `${REGIONS.length * AREAS} areas`} of ${SIZE / 1000} km, ${km.toFixed(1)} km of motorway drawn`);
 let over = 0;
 for (const check of Object.keys(BUDGETS)) {
   const n = counts.get(check) ?? 0;
   const b = BUDGETS[check];
   if (n > b) over++;
-  console.log(`  ${check.padEnd(16)} ${String(n).padStart(4)}   budget ${b === Infinity ? '—' : b}${n > b ? '   OVER' : ''}`);
+  const per = km > 0 ? ((10 * n) / km).toFixed(2) : '—';
+  console.log(`  ${check.padEnd(16)} ${String(n).padStart(4)}   ${per.padStart(6)} per 10 km   budget ${b === Infinity ? '—' : b}${n > b ? '   OVER' : ''}`);
 }
 console.log(over ? `\n${over} check(s) over budget.` : '\nAll checks within budget.');
 process.exit(over ? 1 : 0);
