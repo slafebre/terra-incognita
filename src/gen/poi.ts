@@ -74,13 +74,13 @@ const JUNCTION_OFF = 5;
 /** …at most this far from the junction (m). */
 const JUNCTION_REACH = 30;
 /** Clearance from a way's centre line (m), per class (N, D, C, track, path). */
-const WAY_CLEAR = [6, 5, 4, 2.5, 1.5];
+export const WAY_CLEAR = [6, 5, 4, 2.5, 1.5];
 /** Springs: chance per stream head, from R = 0.25 (hills) to 0.8 (alpine); none below SPRING_MIN_R. */
 const SPRING_CHANCE = [0.25, 0.5];
 const SPRING_MIN_R = 0.25;
 /** No symbol this close to a building (hilltops, crosses: built-up land), or to a street (m). */
-const BUILT_CLEAR = 20;
-const STREET_CLEAR = 12;
+export const BUILT_CLEAR = 20;
+export const STREET_CLEAR = 12;
 
 export interface PoiInput {
   cx: number;
