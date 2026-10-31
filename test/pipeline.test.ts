@@ -7,6 +7,9 @@ import type { TaskRequest, TaskResult } from '../src/worker/protocol';
 import type { TaskRunner } from '../src/worker/pool';
 import { runTask } from '../src/worker/tasks';
 import type { Rect } from '../src/gen/seeds';
+import { testSeed } from './seed';
+
+const SEED = testSeed('pipeline');
 
 /** Runs tasks in-process, `size` at a time, asynchronously (like real workers). */
 class FakePool implements TaskRunner {
@@ -48,7 +51,7 @@ class FakePool implements TaskRunner {
 
 async function generate(view: Rect, workers = 3) {
   const pool = new FakePool(workers);
-  const m = new ChunkManager(pool, () => {});
+  const m = new ChunkManager(pool, () => {}, SEED);
   pool.onIdle = () => m.schedule();
   const focus: [number, number] = [(view.x0 + view.x1) / 2, (view.y0 + view.y1) / 2];
   for (let i = 0; i < 20000 && !m.covered(view); i++) {

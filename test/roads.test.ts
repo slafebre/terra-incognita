@@ -5,6 +5,7 @@ import { NET_CELL, NET_REACH } from '../src/gen/roads';
 import { SeedStore, SeedView } from '../src/gen/seeds';
 import { Settlements } from '../src/gen/settle';
 import { Terrain } from '../src/gen/terrain';
+import { testSeed } from './seed';
 
 describe('lattice', () => {
   it('is a triangulation: neighbours agree, edges never cross, every vertex is surrounded', () => {
@@ -61,7 +62,7 @@ describe('lattice', () => {
 
 describe('settlements and road network', () => {
   it('places sites and connects them', () => {
-    const store = new SeedStore();
+    const store = new SeedStore(testSeed('roads'));
     const c = { x0: -NET_REACH, y0: -NET_REACH, x1: 2 * NET_CELL + NET_REACH, y1: NET_CELL + NET_REACH };
     const view = new SeedView(store.payloadFor({ x0: 0, y0: 0, x1: 16, y1: 16 }, c));
     const t = new Terrain(view);
