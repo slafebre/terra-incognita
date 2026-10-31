@@ -1306,6 +1306,15 @@ const MW_END_RISE = 20;
 export const MW_END_PROFILE = 500;
 
 /**
+ * Which extremities of a drawn centre line are a motorway's end (`motorwaysToDraw`), so
+ * the renderer can stop the drawing at a portal where one lies in a tunnel.
+ */
+export const MW_END_HEAD = 1;
+export const MW_END_TAIL = 2;
+/** Ground this far above the road (m): a tunnel, which the renderer draws as one. */
+export const MW_TUNNEL_H = 25;
+
+/**
  * A piece's centre line, run on where the motorway ends (endA, endB) to its terminus as
  * drawn: towards the roundabout ahead, parting MW_END_SPLIT m before its ring into two
  * lanes (an island between, as ramps: `lanes`); else to the main road starting there
@@ -1444,8 +1453,20 @@ export function motorwayEnd(
     return line;
   };
   let line = Array.from(xy);
+  /**
+   * What to judge a terminus against at an end: the approach height, or NaN where the end
+   * is itself buried — ground MW_TUNNEL_H above the road means the motorway ends inside a
+   * hill, and then the approach says nothing about where the carriageway can get to. The
+   * renderer cuts such an end back to its portal, so the terminus is left to the geometry,
+   * as it was before. (Refusing one here instead stopped the motorway in the rock.)
+   */
+  const reach = (from: number, step: number): number => {
+    const z0 = approach(from, step);
+    const z = ground ? ground(xy[from], xy[from + 1]) : NaN;
+    return Number.isFinite(z) && z - z0 > MW_TUNNEL_H ? NaN : z0;
+  };
   if (p.endA) {
-    const r = runOn(xy[0], xy[1], xy[0] - xy[2], xy[1] - xy[3], approach(0, 2));
+    const r = runOn(xy[0], xy[1], xy[0] - xy[2], xy[1] - xy[3], reach(0, 2));
     if (r) {
       const rev: number[] = [];
       for (let q = r.length - 2; q >= 0; q -= 2) rev.push(r[q], r[q + 1]);
@@ -1453,7 +1474,7 @@ export function motorwayEnd(
     }
   }
   if (p.endB) {
-    const r = runOn(xy[n - 2], xy[n - 1], xy[n - 2] - xy[n - 4], xy[n - 1] - xy[n - 3], approach(n - 2, -2));
+    const r = runOn(xy[n - 2], xy[n - 1], xy[n - 2] - xy[n - 4], xy[n - 1] - xy[n - 3], reach(n - 2, -2));
     if (r) line = [...line, ...r];
   }
   return { xy: Float64Array.from(line), lanes };

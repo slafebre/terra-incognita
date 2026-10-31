@@ -28,6 +28,8 @@ export type TaskRequest =
       roads: SegmentPath[];
       /** Centre lines of the motorways passing near the chunk (world metres). */
       motorways: Float64Array[];
+      /** Per line: which of its extremities are a motorway's end (MW_END_HEAD, MW_END_TAIL). */
+      motorwayEnds: Uint8Array;
       plans: TownPlan[];
       /** Fine nodes round the chunk for its points of interest (none if a solve was missing). */
       poi?: PoiPatch;

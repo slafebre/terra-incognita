@@ -1,4 +1,5 @@
 import { NODE } from '../gen/hydro';
+import { MW_END_HEAD, MW_END_TAIL, MW_TUNNEL_H } from '../gen/motorway';
 import type { RoadPatch } from '../gen/roads';
 import { CHUNK } from '../lib/constants';
 import { STYLE } from './style';
@@ -22,9 +23,8 @@ export interface MotorwayDraw {
   d: Float32Array;
 }
 
-/** Ground this far below the road (m): a viaduct; this far above: a tunnel. Between, earthworks from EARTH_H. */
+/** Ground this far below the road (m): a viaduct; MW_TUNNEL_H above: a tunnel. Between, earthworks from EARTH_H. */
 const VIADUCT_H = 10;
-const TUNNEL_H = 25;
 export const EARTH_H = 2.5;
 /** The road's height: the ground averaged over this many points (25 m apart) either side. */
 const PROFILE_HALF = 20;
@@ -43,7 +43,7 @@ const MIN_RUN = 3;
  * profile from the coarse surface, which lies some 15 m off the map's ground in places,
  * bridged long stretches of flat land.)
  */
-export function classifyMotorways(lines: Float64Array[], p?: RoadPatch): MotorwayDraw[] {
+export function classifyMotorways(lines: Float64Array[], p?: RoadPatch, ends?: ArrayLike<number>): MotorwayDraw[] {
   const ground = (x: number, y: number) => {
     if (!p) return NaN;
     const u = x / NODE - p.gx;
@@ -106,7 +106,7 @@ export function classifyMotorways(lines: Float64Array[], p?: RoadPatch): Motorwa
       d[i] = w.length ? w[w.length >> 1] : NaN;
     }
     const cls = new Uint8Array(n);
-    for (let i = 0; i < n; i++) cls[i] = d[i] < -VIADUCT_H ? MW_VIADUCT : d[i] > TUNNEL_H ? MW_TUNNEL : MW_LEVEL;
+    for (let i = 0; i < n; i++) cls[i] = d[i] < -VIADUCT_H ? MW_VIADUCT : d[i] > MW_TUNNEL_H ? MW_TUNNEL : MW_LEVEL;
     for (let i = 0; i < n; i++) {
       if (cls[i] === MW_LEVEL) continue;
       let e = i;
@@ -122,7 +122,27 @@ export function classifyMotorways(lines: Float64Array[], p?: RoadPatch): Motorwa
   };
   lines.forEach((_, li) => !hasPrev.has(li) && chain(li));
   lines.forEach((_, li) => !seen.has(li) && chain(li)); // closed loops, if any
-  return out;
+  return ends ? out.map((m, li) => atPortal(m, ends[li] ?? 0)) : out;
+}
+
+/**
+ * A motorway cut back to its portal where it ends in a tunnel: one cannot end inside one,
+ * with no portal there and nothing beyond. `flags` are the line's own ends (MW_END_HEAD,
+ * MW_END_TAIL), not the joints between pieces.
+ *
+ * The classes come from the whole line, so cutting it changes no structure along the rest:
+ * the road's height is the ground averaged over ±PROFILE_HALF, which a shorter line would
+ * read differently (it would drop the hill the tunnel goes through, and the cut end would
+ * read as tunnel again). A line in a tunnel end to end is left alone — nowhere to stop.
+ */
+function atPortal(m: MotorwayDraw, flags: number): MotorwayDraw {
+  const n = m.cls.length;
+  let a = 0;
+  let b = n - 1;
+  if (flags & MW_END_HEAD) while (a < b && m.cls[a] === MW_TUNNEL) a++;
+  if (flags & MW_END_TAIL) while (b > a && m.cls[b] === MW_TUNNEL) b--;
+  if (a === 0 && b === n - 1) return m;
+  return b > a ? { xy: m.xy.slice(2 * a, 2 * b + 2), cls: m.cls.slice(a, b + 1), d: m.d.slice(a, b + 1) } : m;
 }
 
 /**

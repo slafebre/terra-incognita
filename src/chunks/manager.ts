@@ -17,7 +17,7 @@ import {
   type PreResult,
 } from '../gen/hydro';
 import { latticeSegments } from '../gen/lattice';
-import { motorwayEnd, MW_END_PROFILE, MW_END_REACH, MW_SPILL, type MotorwayPiece } from '../gen/motorway';
+import { motorwayEnd, MW_END_HEAD, MW_END_PROFILE, MW_END_REACH, MW_END_TAIL, MW_SPILL, type MotorwayPiece } from '../gen/motorway';
 import { FIELD_PAD, FIELD_REACH, type Fields } from '../gen/fields';
 import { POI_PAD, type PoiPatch } from '../gen/poi';
 import { NET_CELL, NET_REACH, ROAD_C, ROAD_PAD, zOnPatch, type NetCell, type RoadEdge, type RoadPatch, type SegmentPath } from '../gen/roads';
@@ -583,16 +583,22 @@ export class ChunkManager {
    * Centre lines of the motorways a chunk draws: those passing within MOTORWAY_DRAW, a
    * piece where the motorway ends run on to its terminus (motorwayEnd) among `roads`
    * (the chunk's and its neighbours', which hold every terminus near enough to matter).
+   * `ends` marks each line's extremities that are a motorway's end, so the renderer can
+   * stop the drawing at a portal where one lies in a tunnel.
    */
-  private motorwaysToDraw(c: Chunk, roads: SegmentPath[]): Float64Array[] {
+  private motorwaysToDraw(c: Chunk, roads: SegmentPath[]): { lines: Float64Array[]; ends: Uint8Array } {
     const r = chunkRect(c.cx, c.cy);
     const q = expand(r, MOTORWAY_DRAW);
     const out: Float64Array[] = [];
+    const ends: number[] = [];
     const lanes: SegmentPath[] = [];
     for (const [gx, gy] of this.netCells(expand(r, MW_SPILL + MW_END_REACH)))
       for (const p of this.mws.get(`${gx},${gy}`)?.data ?? []) {
         if (!p.endA && !p.endB) {
-          if (intersects(pieceBox(p), q)) out.push(p.xy);
+          if (intersects(pieceBox(p), q)) {
+            out.push(p.xy);
+            ends.push(0);
+          }
           continue;
         }
         const end = motorwayEnd(p, roads, this.endGround(p));
@@ -600,12 +606,18 @@ export class ChunkManager {
           for (let k = 0; k < xy.length; k += 2) if (xy[k] >= q.x0 && xy[k] <= q.x1 && xy[k + 1] >= q.y0 && xy[k + 1] <= q.y1) return true;
           return false;
         };
-        if (near(end.xy)) out.push(end.xy);
+        if (near(end.xy)) {
+          out.push(end.xy);
+          // Where the end is at grade its run-on reaches ground the carriageway can get
+          // to, so a line with lanes into a ring is not one that gets cut back; where the
+          // end is buried the cut is what keeps the drawing out of the hill.
+          ends.push((p.endA ? MW_END_HEAD : 0) | (p.endB ? MW_END_TAIL : 0));
+        }
         // Its lanes into the roundabout: drawn as ramps, with the roads.
         end.lanes.forEach((xy, i) => near(xy) && lanes.push({ key: `mwlane:${p.key}:${i}`, cls: ROAD_C, xy: Float32Array.from(xy), ramp: true }));
       }
     roads.push(...lanes);
-    return out;
+    return { lines: out, ends: Uint8Array.from(ends) };
   }
 
   /**
@@ -879,7 +891,7 @@ export class ChunkManager {
         this.ring(c, (n) => (roads.push(...n!.roads!), true));
         const poi = this.poiPatch(c);
         // (Adds the lanes where a motorway runs into a roundabout to the roads.)
-        const motorways = this.motorwaysToDraw(c, roads);
+        const { lines: motorways, ends: motorwayEnds } = this.motorwaysToDraw(c, roads);
         const plans = this.plansFor(c)!;
         fieldInputs = this.fieldInputs(c, plans);
         const kept = c.fields && sameItems(c.fields.inputs, fieldInputs) ? c.fields.layout : undefined;
@@ -893,6 +905,7 @@ export class ChunkManager {
           streams,
           roads,
           motorways,
+          motorwayEnds,
           plans,
           poi,
           edges: this.fieldEdges(c),

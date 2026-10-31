@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { CoarseField } from '../src/gen/hydro';
-import { MW_CELL, MW_RMIN, MW_SPILL, Motorways, motorwayEnd, tightestRadius, type MotorwayPiece } from '../src/gen/motorway';
+import { MW_CELL, MW_END_TAIL, MW_RMIN, MW_SPILL, Motorways, motorwayEnd, tightestRadius, type MotorwayPiece } from '../src/gen/motorway';
 import { NET_REACH } from '../src/gen/roads';
 import { expand, SeedStore, SeedView } from '../src/gen/seeds';
 import { Settlements } from '../src/gen/settle';
@@ -140,6 +140,50 @@ describe('motorways', () => {
     expect(last(motorwayEnd(piece, roads, () => 40))).toEqual([150, 0]);
     // Ground it cannot see leaves the end as it was.
     expect(last(motorwayEnd(piece, roads, () => NaN))).toEqual([150, 0]);
+  });
+
+  it('ends at a portal, not inside a tunnel', () => {
+    // A straight line over level ground (100 m) running into a hill (160 m) for its last
+    // 185 m: too narrow to lift the road's profile with it, so the end is in a tunnel.
+    const n = 60;
+    const xy = new Float64Array(2 * n);
+    for (let i = 0; i < n; i++) xy[2 * i] = 160 + i * 25;
+    const w = 130;
+    const patch = { gx: 0, gy: -4, w, h: 9, zE: new Float32Array(w * 9), A: new Float32Array(w * 9), lake: new Float32Array(w * 9).fill(NaN) };
+    for (let j = 0; j < 9; j++) for (let i = 0; i < w; i++) patch.zE[j * w + i] = i * 16 > 1450 ? 160 : 100;
+
+    // Left to itself the drawing ends underground.
+    const [whole] = classifyMotorways([xy], patch);
+    expect(whole.cls[n - 1]).toBe(MW_TUNNEL);
+    expect(whole.xy.length).toBe(2 * n);
+
+    // Told that this end is a motorway's, it stops where the road leaves the hill.
+    const [cut] = classifyMotorways([xy], patch, [MW_END_TAIL]);
+    const k = cut.xy.length / 2;
+    expect(k).toBeLessThan(n);
+    expect(cut.cls[k - 1]).not.toBe(MW_TUNNEL);
+    expect(cut.cls.length).toBe(k);
+    // What is left is the line's own start, unchanged: the classes come from the whole of
+    // it, so cutting the end moves no structure along the rest.
+    expect([...cut.xy.slice(0, 2 * k)]).toEqual([...xy.slice(0, 2 * k)]);
+    expect([...cut.cls]).toEqual([...whole.cls.slice(0, k)]);
+  });
+
+  it('leaves the terminus to the geometry where the end itself is buried', () => {
+    // The same motorway as above, ending at the origin, but the last 100 m of it and
+    // everything ahead stand 60 m up: the end is inside the hill, so the approach says
+    // nothing about what the carriageway can reach and the nearest terminus is taken.
+    // (The renderer cuts the drawing back to the portal instead.)
+    const n = 41;
+    const xy = new Float64Array(2 * n);
+    for (let i = 0; i < n; i++) xy[2 * i] = (i - n + 1) * 25;
+    const piece = { key: 'test', xy, endA: false, endB: true } as unknown as MotorwayPiece;
+    const roads = [{ xy: [150, 0, 150, 400], cls: 0 }];
+    const last = (r: { xy: Float64Array }) => [r.xy[r.xy.length - 2], r.xy[r.xy.length - 1]];
+    const buried = (x: number) => (x > -100 ? 60 : 0);
+    expect(last(motorwayEnd(piece, roads, buried))).toEqual([150, 0]);
+    // With the end at grade, the same hill ahead does refuse that terminus.
+    expect(last(motorwayEnd(piece, roads, (x) => (x > 60 ? 60 : 0)))).toEqual([0, 0]);
   });
 
   it('keeps to wide curves', () => {
