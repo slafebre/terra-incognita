@@ -34,8 +34,10 @@ export interface Chunk {
   busy: boolean;
   /** When its running task was sent (ms), for the progress estimate. */
   since?: number;
-  /** Set after a task throws, so a broken chunk isn't retried forever. */
+  /** Given up on: its task failed, and failed again on every retry (see Tried). */
   failed?: boolean;
+  tries?: number;
+  retryAt?: number;
   /** Uplift surface and region at node resolution. */
   pre?: PreResult;
   /** Core of the window solve centred on this chunk. */
@@ -58,6 +60,8 @@ export interface Chunk {
 }
 
 type Candidate = { chunk: Chunk; kind: TaskKind; priority: number };
+/** A chunk task ready to send: what it transfers, and the inputs a render lays its fields out from. */
+type Built = { task: TaskRequest; transfer: Transferable[]; fieldInputs?: unknown[] };
 
 /** Blended ground may sit this far (m) below a lake's level and still hold it. */
 const LAKE_DEFICIT = 1;
@@ -113,11 +117,10 @@ const EDGE_REACH = 1000;
 const SITE_REACH = 1600;
 
 /** A net cell's lattice (and sites), or the motorway pieces of its motorway cells. */
-interface CellState<T> {
+interface CellState<T> extends Tried {
   busy: boolean;
   /** When its task was sent (ms), for the progress estimate. */
   since?: number;
-  failed?: boolean;
   data?: T;
 }
 type NetState = CellState<NetCell>;
@@ -137,10 +140,9 @@ const sameItems = (a: unknown[], b: unknown[]) => a.length === b.length && a.eve
 const bounds = (rs: Rect[]): Rect =>
   rs.reduce((a, r) => ({ x0: Math.min(a.x0, r.x0), y0: Math.min(a.y0, r.y0), x1: Math.max(a.x1, r.x1), y1: Math.max(a.y1, r.y1) }));
 
-interface PlanState {
+interface PlanState extends Tried {
   site: Site;
   busy: boolean;
-  failed?: boolean;
   data?: TownPlan;
 }
 
@@ -201,6 +203,28 @@ const GEN_REACH = PLAN_REACH + PLAN_EXTENT[TOWN] + PLAN_MARGIN + PLAN_EDGE + CHU
 const GEN_LEAD = FORGET + CHUNK - GEN_MARGIN - GEN_REACH;
 
 /**
+ * A failed task is tried again after each of these delays (ms), then given up on. A
+ * worker that died or memory run short pass; a fault in the generator doesn't.
+ */
+const RETRY_MS = [500, 2000, 8000];
+/** Anything a task makes: how often its task failed, when to try again, whether given up on. */
+interface Tried {
+  tries?: number;
+  retryAt?: number;
+  failed?: boolean;
+}
+/** Waiting to be tried again. */
+const resting = (s: Tried, now: number) => s.retryAt !== undefined && now < s.retryAt;
+/** Chunks a town's plan reaches across: it reads the roads of chunks this far from those it draws into. */
+const PLAN_CHUNKS = Math.ceil((PLAN_REACH + PLAN_EXTENT[TOWN] + PLAN_MARGIN + PLAN_EDGE) / CHUNK);
+/**
+ * How far (in chunks) other chunks' drawing waits on a chunk's stage: render reads the
+ * roads of its 3×3, a roads task the solves of its 3×3, a solve the pre data of its window,
+ * and a plan the roads round its town.
+ */
+const STUCK_REACH = { pre: WIN_CHUNKS + 2 + PLAN_CHUNKS, hydro: 2 + PLAN_CHUNKS, roads: 1 + PLAN_CHUNKS, dem: 0, render: 0 };
+
+/**
  * Owns chunk state and schedules the generation pipeline:
  *
  *   pre (per chunk) → hydro (window solve centred on the chunk)
@@ -246,12 +270,16 @@ export class ChunkManager {
   private keepBitmapRect: Rect = this.genRect;
   private forgetRect: Rect = this.genRect;
   private focus: [number, number] = [0, 0];
+  /** Chunks given up on (see stuck()). */
+  private readonly givenUp = new Set<Chunk>();
 
   constructor(
     private readonly pool: TaskRunner,
     private readonly onChange: () => void,
     /** Debugging: a world seed makes every place reproducible (see SeedStore). */
     worldSeed?: number,
+    /** Delays before each retry of a failed task (tests shorten them). */
+    private readonly retryMs: readonly number[] = RETRY_MS,
   ) {
     this.seeds = new SeedStore(worldSeed);
   }
@@ -268,7 +296,6 @@ export class ChunkManager {
     return !!this.get(cx, cy)?.bitmap;
   }
 
-  /** True if every chunk overlapping `r` can be drawn. */
   /**
    * How far the land the view needs is made (0..1): the tasks its rectangles call for,
    * each weighted by its kind's mean time so far (or a typical one), finished ones in
@@ -308,7 +335,7 @@ export class ChunkManager {
       for (const [gx, gy] of this.netCells(rect)) {
         const n = map.get(`${gx},${gy}`);
         total += weight;
-        if (n?.data) done += weight;
+        if (n?.data || n?.failed) done += weight;
         else if (n?.busy) done += running(n.since, weight);
       }
     };
@@ -323,14 +350,40 @@ export class ChunkManager {
     return total > 0 ? done / total : 1;
   }
 
+  /** True if every chunk overlapping `r` is drawn, or can't be (stuck). */
   covered(r: Rect): boolean {
     const e = 0.01;
     const inner = { x0: r.x0 + e, y0: r.y0 + e, x1: r.x1 - e, y1: r.y1 - e };
     let ok = true;
     forChunksIn(inner, (cx, cy) => {
-      if (ok && !this.drawable(cx, cy)) ok = false;
+      if (ok && !this.drawable(cx, cy) && !this.stuck(cx, cy)) ok = false;
     });
     return ok;
+  }
+
+  /**
+   * A chunk given up on, or one whose drawing waits on it (STUCK_REACH), can't be drawn:
+   * the view passes over it (showing its sketch, if it has pre data) rather than hold
+   * still there for good. Once forgotten, that land is made anew like any other.
+   */
+  private stuck(cx: number, cy: number): boolean {
+    for (const g of this.givenUp) {
+      if (!this.alive(g)) {
+        this.givenUp.delete(g);
+        continue;
+      }
+      const r = STUCK_REACH[firstMissing(g)];
+      if (Math.abs(g.cx - cx) <= r && Math.abs(g.cy - cy) <= r) return true;
+    }
+    return false;
+  }
+
+  /** After a failed task: tried again after the next delay, or given up on after the last. True if given up on. */
+  private failedTry(s: Tried): boolean {
+    const n = (s.tries = (s.tries ?? 0) + 1);
+    if (n > this.retryMs.length) return (s.failed = true);
+    s.retryAt = performance.now() + this.retryMs[n - 1];
+    return false;
   }
 
   update(actual: Rect, desired: Rect, focus: [number, number]): void {
@@ -459,12 +512,20 @@ export class ChunkManager {
     return out;
   }
 
+  // A cell given up on counts as made, with nothing in it: the land round it is drawn
+  // without its roads and settlements rather than not at all (as with tiles and plans).
   private netsReady(r: Rect): boolean {
-    return this.netCells(r).every(([gx, gy]) => this.nets.get(`${gx},${gy}`)?.data);
+    return this.netCells(r).every(([gx, gy]) => {
+      const n = this.nets.get(`${gx},${gy}`);
+      return n?.data || n?.failed;
+    });
   }
 
   private mwsReady(r: Rect): boolean {
-    return this.netCells(r).every(([gx, gy]) => this.mws.get(`${gx},${gy}`)?.data);
+    return this.netCells(r).every(([gx, gy]) => {
+      const n = this.mws.get(`${gx},${gy}`);
+      return n?.data || n?.failed;
+    });
   }
 
   /**
@@ -474,10 +535,11 @@ export class ChunkManager {
    */
   private schedulePreFirst(): boolean {
     const [fx, fy] = this.focus;
+    const now = performance.now();
     const cands: Candidate[] = [];
     forChunksIn(this.genRect, (cx, cy) => {
       const c = this.ensure(cx, cy);
-      if (c.pre || c.busy || c.failed) return;
+      if (c.pre || c.busy || c.failed || resting(c, now)) return;
       cands.push({ chunk: c, kind: 'pre', priority: Math.hypot((cx + 0.5) * CHUNK - fx, (cy + 0.5) * CHUNK - fy) });
     });
     if (!cands.length) return false;
@@ -501,7 +563,8 @@ export class ChunkManager {
       [this.mwRect, this.mws],
     ] as [Rect, Map<string, CellState<unknown>>][])
       for (const [gx, gy] of this.netCells(rect)) {
-        if (cells.get(`${gx},${gy}`)?.data) continue;
+        const n = cells.get(`${gx},${gy}`);
+        if (n?.data || n?.failed) continue;
         for (const [tx, ty] of tilesOfCell(gx, gy)) out.set(tileKey(tx, ty), [tx, ty]);
       }
     return out;
@@ -553,11 +616,12 @@ export class ChunkManager {
   /** Dispatches the nearest missing cell of a kind in `rect`, if any. */
   private scheduleCell<T>(kind: 'net' | 'mw', cells: Map<string, CellState<T>>, rect: Rect): boolean {
     const [fx, fy] = this.focus;
+    const now = performance.now();
     let best: [number, number] | undefined;
     let bestD = Infinity;
     for (const [gx, gy] of this.netCells(rect)) {
       const n = cells.get(`${gx},${gy}`);
-      if (n && (n.busy || n.data || n.failed)) continue;
+      if (n && (n.busy || n.data || n.failed || resting(n, now))) continue;
       // Not before its coarse tiles are made: each worker would make them all again.
       if (!this.tilesReady(gx, gy)) continue;
       const d = Math.hypot((gx + 0.5) * NET_CELL - fx, (gy + 0.5) * NET_CELL - fy);
@@ -569,7 +633,7 @@ export class ChunkManager {
     if (!best) return false;
     const [gx, gy] = best;
     const key = `${gx},${gy}`;
-    const state: CellState<T> = { busy: true, since: performance.now() };
+    const state: CellState<T> = { busy: true, since: now, tries: cells.get(key)?.tries };
     cells.set(key, state);
     const cx = (gx + 0.5) * NET_CELL;
     const cy = (gy + 0.5) * NET_CELL;
@@ -591,7 +655,7 @@ export class ChunkManager {
       })
       .catch((err) => {
         state.busy = false;
-        state.failed = true;
+        this.failedTry(state);
         this.stats.errors++;
         console.error(`${kind === 'net' ? 'net' : 'motorway'} cell ${key} failed`, err);
       });
@@ -698,12 +762,13 @@ export class ChunkManager {
 
   /** Dispatches a needed plan whose inputs all exist, if any. */
   private schedulePlan(): boolean {
+    const now = performance.now();
     for (const site of this.neededPlans()) {
       const pl = this.plans.get(site.id);
-      if (pl) continue;
+      if (pl && (pl.busy || pl.data || pl.failed || resting(pl, now))) continue;
       const input = this.planInput(site);
       if (!input) continue;
-      const state: PlanState = { site, busy: true };
+      const state: PlanState = { site, busy: true, tries: pl?.tries };
       this.plans.set(site.id, state);
       this.pool
         .run({ kind: 'plan', input })
@@ -715,7 +780,7 @@ export class ChunkManager {
         })
         .catch((err) => {
           state.busy = false;
-          state.failed = true;
+          this.failedTry(state);
           this.stats.errors++;
           console.error(`plan ${site.id} failed`, err);
         });
@@ -731,7 +796,8 @@ export class ChunkManager {
     const out: TownPlan[] = [];
     for (const s of this.planSites(r)) {
       const pl = this.plans.get(s.id);
-      if (!pl || pl.busy) return undefined;
+      // (Neither made nor given up on: running, or waiting to be tried again.)
+      if (!pl || (!pl.data && !pl.failed)) return undefined;
       if (pl.data) out.push(pl.data);
     }
     return out;
@@ -795,9 +861,10 @@ export class ChunkManager {
       const q = expand(r, WIN_CHUNKS * CHUNK);
       preBox = { x0: Math.min(preBox.x0, q.x0), y0: Math.min(preBox.y0, q.y0), x1: Math.max(preBox.x1, q.x1), y1: Math.max(preBox.y1, q.y1) };
     }
+    const now = performance.now();
     forChunksIn(preBox, (cx, cy) => {
       const c = this.ensure(cx, cy);
-      if (c.busy || c.failed) return;
+      if (c.busy || c.failed || resting(c, now)) return;
       const r = chunkRect(cx, cy);
       const d = Math.hypot((cx + 0.5) * CHUNK - fx, (cy + 0.5) * CHUNK - fy);
       if (!c.pre) {
@@ -830,12 +897,46 @@ export class ChunkManager {
   }
 
   private dispatch(cands: Candidate[]): void {
-    const kind = cands[0].kind;
     const now = performance.now();
     for (const c of cands) {
       c.chunk.busy = true;
       c.chunk.since = now;
     }
+    let built: Built;
+    try {
+      built = this.build(cands);
+    } catch (err) {
+      // Building a task runs generator code here (latticeSegments, motorwayEnd): a throw
+      // left these chunks busy for good and stopped the frame loop.
+      this.chunkFailed(cands, err);
+      return;
+    }
+    const { task, transfer, fieldInputs } = built;
+    const bucket = this.renderBucket;
+    this.pool
+      .run(task, transfer)
+      .then((res) => {
+        for (const k of cands) k.chunk.busy = false;
+        this.stats[res.kind].ms += res.ms;
+        this.stats[res.kind].n++;
+        this.receive(cands, res, bucket, fieldInputs);
+      })
+      .catch((err) => this.chunkFailed(cands, err));
+  }
+
+  /** A chunk task failed, or couldn't be built: tried again later, or its chunks given up on. */
+  private chunkFailed(cands: Candidate[], err: unknown): void {
+    for (const k of cands) {
+      k.chunk.busy = false;
+      if (this.failedTry(k.chunk)) this.givenUp.add(k.chunk);
+    }
+    this.stats.errors++;
+    console.error(`chunk ${cands[0].chunk.key} ${cands[0].kind} failed`, err);
+  }
+
+  /** The task for `cands` (all of the first one's kind), what it transfers, and what a render lays its fields out from. */
+  private build(cands: Candidate[]): Built {
+    const kind = cands[0].kind;
     const c = cands[0].chunk;
     let task: TaskRequest;
     let transfer: Transferable[] = [];
@@ -937,23 +1038,7 @@ export class ChunkManager {
         break;
       }
     }
-    const bucket = this.renderBucket;
-    this.pool
-      .run(task, transfer)
-      .then((res) => {
-        for (const k of cands) k.chunk.busy = false;
-        this.stats[res.kind].ms += res.ms;
-        this.stats[res.kind].n++;
-        this.receive(cands, res, bucket, fieldInputs);
-      })
-      .catch((err) => {
-        for (const k of cands) {
-          k.chunk.busy = false;
-          k.chunk.failed = true;
-        }
-        this.stats.errors++;
-        console.error(`chunk ${c.key} ${kind} failed`, err);
-      });
+    return { task, transfer, fieldInputs };
   }
 
   private alive(c: Chunk): boolean {
