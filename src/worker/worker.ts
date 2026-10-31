@@ -24,5 +24,11 @@ self.onmessage = (e: MessageEvent<WorkerRequest | WorkerConfig | WorkerTiles>) =
   } catch (err) {
     msg = { id: e.data.id, ok: false, error: err instanceof Error ? `${err.message}\n${err.stack}` : String(err) };
   }
-  self.postMessage(msg, transfer);
+  try {
+    self.postMessage(msg, transfer);
+  } catch (err) {
+    // A result that can't be cloned or transferred: say so, or its task waits for ever.
+    const why = err instanceof Error ? err.message : String(err);
+    self.postMessage({ id: e.data.id, ok: false, error: `result could not be sent: ${why}` } satisfies WorkerResponse);
+  }
 };

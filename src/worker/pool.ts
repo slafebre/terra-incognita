@@ -14,23 +14,26 @@ export interface TaskRunner {
   shareTiles?(msg: WorkerTiles): void;
 }
 
+/** Workers replaced after an error, at most, per worker of the pool: one that can't even start would be replaced for ever. */
+const RESTARTS = 4;
+
 /** Fixed-size pool; one task per worker at a time. The caller decides what to run next. */
 export class WorkerPool implements TaskRunner {
   private readonly slots: Slot[] = [];
   private readonly pending = new Map<number, { resolve: (r: TaskResult) => void; reject: (e: Error) => void; slot: Slot }>();
   private nextId = 1;
+  private restarts = 0;
 
   constructor(
     size: number,
     private readonly onIdle: () => void,
-    config: WorkerConfig['config'] = { regionOverride: NaN },
+    private readonly config: WorkerConfig['config'] = { regionOverride: NaN },
+    /** Starts a worker (tests pass a fake). */
+    private readonly spawn: () => Worker = () => new Worker(new URL('./worker.ts', import.meta.url), { type: 'module' }),
   ) {
     for (let i = 0; i < size; i++) {
-      const worker = new Worker(new URL('./worker.ts', import.meta.url), { type: 'module' });
-      const slot: Slot = { worker, busy: false };
-      worker.onmessage = (e: MessageEvent<WorkerResponse>) => this.receive(e.data);
-      worker.onerror = (e) => console.error('worker error', e.message);
-      worker.postMessage({ config } satisfies WorkerConfig);
+      const slot = { busy: false } as Slot;
+      this.start(slot);
       this.slots.push(slot);
     }
   }
@@ -56,8 +59,49 @@ export class WorkerPool implements TaskRunner {
     const msg: WorkerRequest = { id, task };
     return new Promise((resolve, reject) => {
       this.pending.set(id, { resolve, reject, slot });
-      slot.worker.postMessage(msg, transfer);
+      try {
+        slot.worker.postMessage(msg, transfer);
+      } catch (err) {
+        // Not sent (something that can't be cloned or transferred): the worker is still free.
+        this.pending.delete(id);
+        slot.busy = false;
+        reject(err instanceof Error ? err : new Error(String(err)));
+        queueMicrotask(this.onIdle);
+      }
     });
+  }
+
+  /** Starts a worker in `slot` (again, after its last one failed). */
+  private start(slot: Slot): void {
+    const worker = this.spawn();
+    slot.worker = worker;
+    worker.onmessage = (e: MessageEvent<WorkerResponse>) => this.receive(e.data);
+    // An error outside a task's own try (a module that won't load, a result that can't be
+    // sent, memory run out) or a reply that can't be read: no reply will come.
+    worker.onerror = (e) => slot.worker === worker && this.lost(slot, `worker error: ${e.message}`);
+    worker.onmessageerror = () => slot.worker === worker && this.lost(slot, 'worker reply could not be read');
+    worker.postMessage({ config: this.config } satisfies WorkerConfig);
+  }
+
+  /**
+   * The worker in `slot` won't answer: fail its task, so whatever waits on it can try
+   * again, and replace the worker, whose state can't be trusted (it makes the coarse tiles
+   * it misses itself). Past RESTARTS per worker the slot stays busy: out of use.
+   */
+  private lost(slot: Slot, why: string): void {
+    console.error(why);
+    slot.worker.terminate();
+    for (const [id, p] of this.pending)
+      if (p.slot === slot) {
+        this.pending.delete(id);
+        p.reject(new Error(why));
+      }
+    if (this.restarts < RESTARTS * this.slots.length) {
+      this.restarts++;
+      this.start(slot);
+      slot.busy = false;
+    } else slot.busy = true;
+    queueMicrotask(this.onIdle);
   }
 
   private receive(msg: WorkerResponse): void {
