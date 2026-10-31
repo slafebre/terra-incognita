@@ -5,6 +5,7 @@ const en = {
   close: 'Close legend',
   note: '1:10,000 at zoom 1.',
   noteKeys: 'Press L to show or hide.',
+  build: 'Build',
 
   roads: 'Roads and paths',
   motorway: 'Motorway',
@@ -67,6 +68,7 @@ export const TEXT: Record<Lang, Record<TextKey, string>> = {
     close: 'Legenda sluiten',
     note: '1:10.000 bij zoom 1.',
     noteKeys: 'Druk op L om te tonen of te verbergen.',
+    build: 'Versie',
 
     roads: 'Wegen en paden',
     motorway: 'Autosnelweg',
@@ -123,6 +125,7 @@ export const TEXT: Record<Lang, Record<TextKey, string>> = {
     close: 'Fermer la légende',
     note: '1/10 000 au zoom 1.',
     noteKeys: 'Touche L pour afficher ou masquer.',
+    build: 'Version',
 
     roads: 'Routes et chemins',
     motorway: 'Autoroute',
@@ -179,6 +182,7 @@ export const TEXT: Record<Lang, Record<TextKey, string>> = {
     close: 'Legende schließen',
     note: '1:10.000 bei Zoom 1.',
     noteKeys: 'Taste L blendet sie ein und aus.',
+    build: 'Build',
 
     roads: 'Straßen und Wege',
     motorway: 'Autobahn',

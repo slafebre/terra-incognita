@@ -1,4 +1,5 @@
 import { DPR_MAX, M_PER_CSS_PX } from '../lib/constants';
+import { BUILD_COMMIT } from '../snapshot';
 import { CHAPEL, CROSS, RESERVOIR, SPRING, TOWER, TRIG, type PoiKind } from '../gen/poi';
 import { ROAD_C, ROAD_D, ROAD_N, ROAD_P, ROAD_T } from '../gen/roads';
 import { MW_WIDTH } from '../gen/motorway';
@@ -74,7 +75,10 @@ export class Legend {
     const note = document.createElement('p');
     note.className = 'note';
     note.textContent = touch ? t.note : `${t.note} ${t.noteKeys}`;
-    el.append(note, this.foot);
+    const build = document.createElement('p');
+    build.className = 'build';
+    build.textContent = `${t.build} ${BUILD_COMMIT}`;
+    el.append(note, build, this.foot);
     el.addEventListener('click', (e) => {
       if ((e.target as HTMLElement).closest('[data-act="close"]')) this.toggle(false);
     });

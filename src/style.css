@@ -215,6 +215,12 @@ body {
   font-size: 11px;
   color: #8a7a64;
 }
+#legend .build {
+  margin: 6px 0 0;
+  font-size: 9.5px;
+  color: #a89a84;
+  font-variant-numeric: tabular-nums;
+}
 #legend-tab {
   position: fixed;
   box-sizing: border-box;
