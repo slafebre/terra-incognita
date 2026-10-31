@@ -3,13 +3,11 @@
 // as the app's ?seed=n (so results don't depend on task order), captures every task's
 // output by what it was for (chunk, net cell, plan) and either writes them or compares
 // them with a file written earlier, field by field. Also prints per-stage timings.
+// (npm test checks digests of the first place on every run: test/golden.test.ts.)
 //   OUT=<file> npx vite-node dev/golden.ts        write a baseline
 //   GOLD=<file> npx vite-node dev/golden.ts       compare with one
 // PLACES=n uses the first n places (default all), SEED=n the world seed (default 7).
-import { ChunkManager } from '../src/chunks/manager';
-import { setRegionOverride } from '../src/gen/terrain';
-import type { TaskRequest, TaskResult } from '../src/worker/protocol';
-import { runTask } from '../src/worker/tasks';
+import { capture, PLACES, type Output as Out } from './capture';
 
 declare const process: { argv: string[]; env: Record<string, string | undefined>; exitCode?: number };
 type Buffer = Uint8Array;
@@ -19,107 +17,15 @@ const fs = await import(FS);
 const { deserialize, serialize } = (await import(V8)) as { serialize: (o: unknown) => Buffer; deserialize: (b: Buffer) => unknown };
 const { gunzipSync, gzipSync } = (await import(ZLIB)) as { gzipSync: (b: Buffer) => Buffer; gunzipSync: (b: Buffer) => Buffer };
 
-/** Places: centre (world m) and forced region (NaN: the region field). */
-const PLACES: [number, number, number][] = [
-  [100_750, 50_600, NaN],
-  [-41_300, 12_900, 0.1],
-  [23_400, -77_100, 0.42],
-  [61_800, 88_300, 0.65],
-  [-90_200, -30_700, 0.9],
-];
-const HALF = 700;
 const SEED = Number(process.env.SEED ?? 7) >>> 0;
 const places = PLACES.slice(0, Number(process.env.PLACES ?? PLACES.length));
 
-type Out = Record<string, unknown>;
 const outputs = new Map<string, Buffer>();
 const ms: Record<string, { ms: number; n: number }> = {};
 
-const keyOf = (t: TaskRequest, p: number): string[] => {
-  switch (t.kind) {
-    case 'pre':
-      return t.chunks.map(([cx, cy]) => `${p}:pre:${cx},${cy}`);
-    case 'net':
-      // (Net cells carried their motorway pieces before the motorway stage: kept apart, to compare.)
-      return [`${p}:net:${t.gx},${t.gy}`, `${p}:mw:${t.gx},${t.gy}`];
-    case 'mw':
-      return [`${p}:mw:${t.gx},${t.gy}`];
-    case 'plan':
-      return [`${p}:plan:${t.input.site.id}`];
-    case 'render':
-    case 'tile':
-      return [];
-    default:
-      return [`${p}:${t.kind}:${t.cx},${t.cy}`];
-  }
-};
-/** What a result holds, as plain data (render bitmaps can't be made in node). */
-const payload = (r: TaskResult): Out[] => {
-  switch (r.kind) {
-    case 'pre':
-      return r.results.map((x) => ({ ...x }));
-    case 'hydro':
-      return [{ ...r.result.core, stats: r.result.stats }];
-    case 'dem':
-      return [{ ...r.result }];
-    case 'net': {
-      const old = (r.result as { motorways?: unknown }).motorways;
-      return [{ sites: r.result.sites, edges: r.result.edges }, ...(old ? [{ pieces: old }] : [])];
-    }
-    case 'mw':
-      return [{ pieces: r.result }];
-    case 'roads':
-      return [{ roads: r.result }];
-    case 'plan':
-      return [{ ...r.result }];
-    default:
-      return [];
-  }
-};
-
-let place = 0;
-const pool = {
-  size: 1,
-  busy: 0,
-  get idle() {
-    return this.size - this.busy;
-  },
-  run(task: TaskRequest): Promise<TaskResult> {
-    this.busy++;
-    return new Promise((resolve) =>
-      setTimeout(() => {
-        let r: TaskResult;
-        if (task.kind === 'render') r = { kind: 'render', bitmap: { close() {} } as unknown as ImageBitmap, ms: 0 };
-        else {
-          r = runTask(task).result;
-          const s = (ms[task.kind] ??= { ms: 0, n: 0 });
-          s.ms += r.ms;
-          s.n++;
-          const keys = keyOf(task, place);
-          // Serialized at once: the manager may keep and change what it gets.
-          payload(r).forEach((o, i) => outputs.set(keys[i], serialize(o)));
-        }
-        this.busy--;
-        resolve(r);
-        queueMicrotask(() => mgr?.schedule());
-      }, 0),
-    );
-  },
-};
-
-let mgr: ChunkManager | undefined;
 const t0 = performance.now();
-for (const [x, y, R] of places) {
-  setRegionOverride(R);
-  mgr = new ChunkManager(pool, () => {}, SEED);
-  const view = { x0: x - HALF, y0: y - HALF, x1: x + HALF, y1: y + HALF };
-  for (let i = 0; i < 40000 && !mgr.covered(view); i++) {
-    mgr.update(view, view, [x, y]);
-    await new Promise((r) => setTimeout(r, 0));
-  }
-  if (!mgr.covered(view)) throw new Error(`place ${place} not covered`);
-  place++;
-}
+// Serialized at once: the manager may keep and change what it gets.
+await capture(SEED, places, (key, o) => outputs.set(key, serialize(o)), ms);
 const total = performance.now() - t0;
 console.log(`places ${places.length}, ${outputs.size} outputs, ${(total / 1000).toFixed(1)} s`);
 for (const [k, s] of Object.entries(ms)) console.log(`  ${k.padEnd(6)} ${(s.ms / 1000).toFixed(2).padStart(7)} s  ${s.n} × ${(s.ms / s.n).toFixed(1)} ms`);

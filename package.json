@@ -9,6 +9,7 @@
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
     "test": "vitest run",
+    "golden": "vitest run --update test/golden.test.ts",
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {

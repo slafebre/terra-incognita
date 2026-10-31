@@ -407,6 +407,8 @@ test/                invariant tests (Vitest)
   - street plans (synthetic villages and towns): churches beside a way, never on one, and apart; squares (some triangular) free of buildings and ways; links never outranking the roads at both their ends, bypasses taking over (old roads in downgraded); buildings clear of ways, water and each other, both densities present; industrial estates in towns on flat land (sheds and halls, on flat ground) and none on a steady 13 % slope; the same plan whatever order the roads come in, streets meet roads and each other only at junctions, every street connected, off water, within the plan's extent, redrawn roads keep their far ends, tracks through built-up land become streets, woods cleared under built-up land
   - no building overlaps a road or water
   - chunk borders join (height and polyline continuity)
+- Tests make their land from world seed 7 and print it: `SEED=n` uses other land, `SEED=random` new land every run, and any failure reruns with `SEED=n`.
+- **Golden digests** (`test/golden.test.ts`): every task's output round the first golden place (seed 7), as a digest, against `test/golden/seed7-place0.json`. A change that should leave the land as it is must keep every digest; one that changes it rewrites the file (`npm run golden`) and says in its commit what changed and why. `dev/golden.ts` compares five places field by field. Render output (bitmaps, field parcels, points of interest) is not covered.
 - **Visual checks** in the browser at phone and desktop sizes. A hidden `?debug` flag shows chunk stages and timings for development (not a user-facing panel).
 
 ## 8. Resolved questions

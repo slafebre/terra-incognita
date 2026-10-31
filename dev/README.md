@@ -16,6 +16,8 @@ Press `i` (or add `?info`) for the reproduction panel: everything needed to rebu
 npm test
 ```
 
+Tests make their land from world seed 7 and print the seed they used; `SEED=n npm test` uses other land and `SEED=random npm test` new land every run, so a failure on random land can be run again with its seed. `test/golden.test.ts` checks a digest of every task's output round the first golden place against `test/golden/seed7-place0.json`; after a change meant to alter the land, `npm run golden` rewrites that file (say in the commit what changed), and `dev/golden.ts` (below) shows by how much.
+
 ## Dev tools
 
 - `/dev/overview.html?size=24000` renders a 24 km overview of the un-eroded terrain, tinted by region type.
