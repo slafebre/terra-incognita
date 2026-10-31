@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { ChunkManager } from '../src/chunks/manager';
 import { NODES } from '../src/gen/hydro';
 import type { Rect } from '../src/gen/seeds';
@@ -70,5 +70,20 @@ describe('generation and retention', () => {
     const { sent, wasted } = await hold(zoom, lead);
     expect(wasted).toBe(0);
     expect(Object.keys(sent).filter((k) => k !== 'pre').length).toBeGreaterThan(0);
+  });
+
+  // GEN_LEAD comes from FORGET less what generation reaches beyond its rectangle. Were it
+  // to vanish (FORGET lowered, a town's plan reaching further), generation couldn't run
+  // ahead of the view, and past -GEN_MARGIN wouldn't even cover it: the view would wait
+  // for good. The manager won't load rather than do that.
+  it('refuses constants that leave generation no lead', async () => {
+    vi.resetModules();
+    vi.doMock('../src/lib/constants', async (original) => ({ ...(await original<object>()), FORGET: 3000 }));
+    try {
+      await expect(import('../src/chunks/manager')).rejects.toThrow(/GEN_LEAD/);
+    } finally {
+      vi.doUnmock('../src/lib/constants');
+      vi.resetModules();
+    }
   });
 });

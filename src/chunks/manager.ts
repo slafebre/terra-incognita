@@ -201,6 +201,9 @@ const GEN_REACH = PLAN_REACH + PLAN_EXTENT[TOWN] + PLAN_MARGIN + PLAN_EDGE + CHU
  * the view never moved on. Within this lead everything generation makes is kept.
  */
 const GEN_LEAD = FORGET + CHUNK - GEN_MARGIN - GEN_REACH;
+// Without a lead generation can't run ahead of the view at all, and past -GEN_MARGIN it
+// wouldn't even cover the view, which would then wait for good.
+if (!(GEN_LEAD > 0)) throw new Error(`GEN_LEAD is ${GEN_LEAD} m: FORGET must exceed what generation reaches beyond the view`);
 
 /**
  * A failed task is tried again after each of these delays (ms), then given up on. A
