@@ -557,6 +557,8 @@ export function planTown({ site, roads, patch: p, motorways = [] }: PlanInput): 
   // their keys and replace the network's; their far ends don't move.
   const redrawn: SegmentPath[] = [];
   let net = sorted;
+  /** The crossroads' links: the cut roads they join (key and cut point), for their class. */
+  const sqEnds = new Map<string, { key: string; x: number; y: number }[]>();
   {
     const at = sorted.filter((r) => {
       const n = r.xy.length;
@@ -644,6 +646,10 @@ export function planTown({ site, roads, patch: p, motorways = [] }: PlanInput): 
         }
         // A link carries the lesser of its two roads: the through road keeps its class along its side.
         links.push({ key: `${site.id}#sq${i}`, cls: Math.max(A.r.cls, B.r.cls) as SegmentPath['cls'], xy: Float32Array.from(xy) });
+        sqEnds.set(`${site.id}#sq${i}`, [
+          { key: A.r.key, x: A.xs[0], y: A.ys[0] },
+          { key: B.r.key, x: B.xs[0], y: B.ys[0] },
+        ]);
       }
       if (ok && links.length) {
         const cutKeys = new Set(cuts.map((c) => c.r.key));
@@ -791,16 +797,19 @@ export function planTown({ site, roads, patch: p, motorways = [] }: PlanInput): 
     });
 
   /**
-   * Splits the track or path of the network (or the plan's redrawn piece of one)
-   * passing through (x, y) there, so a road link crossing it meets it at a junction:
-   * both pieces end at the crossing and are drawn by the plan instead.
+   * Splits the segment of the network (or the plan's redrawn piece of one) chosen by
+   * `which` passing through (x, y) there: both pieces end at that point and are drawn
+   * by the plan instead. Tracks and paths a road link crosses are split so it meets
+   * them at a junction; main roads where a bypass takes over from them.
    */
-  const splitMinor = (x: number, y: number) => {
+  const splitAt = (x: number, y: number, which: (q: SegmentPath) => boolean) => {
     for (let qi = 0; qi < net.length; qi++) {
       const q = net[qi];
-      if (q.cls <= ROAD_C || q.ring) continue;
+      if (!which(q) || q.ring) continue;
       for (let k = 2; k < q.xy.length; k += 2) {
         if (segPointDist(q.xy[k - 2], q.xy[k - 1], q.xy[k], q.xy[k + 1], x, y) > 0.5) continue;
+        // Already ends there: nothing to split.
+        if (Math.hypot(q.xy[0] - x, q.xy[1] - y) < 0.5 || Math.hypot(q.xy[q.xy.length - 2] - x, q.xy[q.xy.length - 1] - y) < 0.5) return;
         const a = Float32Array.from([...q.xy.subarray(0, k), x, y]);
         const b = Float32Array.from([x, y, ...q.xy.subarray(k)]);
         const pa = { ...q, xy: a };
@@ -813,6 +822,7 @@ export function planTown({ site, roads, patch: p, motorways = [] }: PlanInput): 
       }
     }
   };
+  const splitMinor = (x: number, y: number) => splitAt(x, y, (q) => q.cls > ROAD_C);
 
   /**
    * Checks a proposed street (free of the network except at its two ends) against
@@ -1308,14 +1318,19 @@ export function planTown({ site, roads, patch: p, motorways = [] }: PlanInput): 
       const main = hits.filter((hh) => hh.cls <= ROAD_D);
       return (main.length >= 3 ? main : hits).sort((h1, h2) => h1.a - h2.a);
     };
-    /** A link across the gap from arm A to arm B: leaving each square on, bulging outward. */
-    const link = (A: ReturnType<typeof armsAt>[number], B: ReturnType<typeof armsAt>[number]) => {
-      const into = (hh: typeof A, ox: number, oy: number): [number, number] => {
-        const sd = -hh.ty * (ox - hh.x) + hh.tx * (oy - hh.y) > 0 ? 1 : -1;
+    /**
+     * A link across the gap from arm A to arm B (its middle at angle `mid`): leaving
+     * each road square on into the gap, bulging outward. (Towards the gap's middle,
+     * not towards the other end: across a straight road's two arms, the other end
+     * lies on the road's own line.)
+     */
+    const link = (A: ReturnType<typeof armsAt>[number], B: ReturnType<typeof armsAt>[number], mid: number) => {
+      const into = (hh: typeof A): [number, number] => {
+        const sd = -hh.ty * Math.cos(mid) + hh.tx * Math.sin(mid) > 0 ? 1 : -1;
         return [-hh.ty * sd, hh.tx * sd];
       };
-      const [nax, nay] = into(A, B.x, B.y);
-      const [nbx, nby] = into(B, A.x, A.y);
+      const [nax, nay] = into(A);
+      const [nbx, nby] = into(B);
       const d = Math.hypot(B.x - A.x, B.y - A.y);
       const k = 0.45 * d;
       const steps = Math.max(4, Math.ceil((1.3 * d) / STEP));
@@ -1337,7 +1352,7 @@ export function planTown({ site, roads, patch: p, motorways = [] }: PlanInput): 
      * more across a river; never over a lake or near another way but at its ends;
      * kept to a band round the core), then smoothed and resampled. Empty if none.
      */
-    const route = (A: ReturnType<typeof armsAt>[number], B: ReturnType<typeof armsAt>[number], r: number): [number[], number[]] => {
+    const route = (A: ReturnType<typeof armsAt>[number], B: ReturnType<typeof armsAt>[number], r: number, mid: number, gap: number): [number[], number[]] => {
       const i0 = Math.max(1, Math.floor((cx - LINK_BAND[1] * r) / NODE) - p.gx);
       const j0 = Math.max(1, Math.floor((cy - LINK_BAND[1] * r) / NODE) - p.gy);
       const i1 = Math.min(w - 2, Math.ceil((cx + LINK_BAND[1] * r) / NODE) - p.gx);
@@ -1353,6 +1368,8 @@ export function planTown({ site, roads, patch: p, motorways = [] }: PlanInput): 
           const [x, y] = [(i + p.gx) * NODE, (j + p.gy) * NODE];
           const d = Math.hypot(x - cx, y - cy);
           if (d < LINK_BAND[0] * r || d > LINK_BAND[1] * r || d > hardReach || wet(x, y)) continue;
+          // Within the gap's sector (a little either side of it, for the ends).
+          if (Math.abs(angDiff(Math.atan2(y - cy, x - cx), mid)) > gap / 2 + 0.15) continue;
           // Off other ways (as the link's checks want: GAP from roads and streets, less
           // from tracks, which it may cross), but at its ends.
           const nearEnds = Math.hypot(x - A.x, y - A.y) < 40 || Math.hypot(x - B.x, y - B.y) < 40;
@@ -1441,7 +1458,15 @@ export function planTown({ site, roads, patch: p, motorways = [] }: PlanInput): 
     // that, a little inside and outside it.
     const arms = armsAt(r0);
     let made = 0;
-    for (let i = 0; i < arms.length && arms.length > 1 && made < LINK_MAX[t]; i++) {
+    /** Links made: the arms they join (indices into `arms`), their ends, and their piece and line. */
+    const madeLinks: { i: number; j: number; A: (typeof arms)[number]; B: (typeof arms)[number]; piece: SegmentPath; li: number }[] = [];
+    // Gaps between two N or D roads first: a bypass of a road through the centre.
+    const order = arms.map((_, i) => i).sort((i1, i2) => {
+      const mm = (i: number) => (arms[i].cls <= ROAD_D && arms[(i + 1) % arms.length].cls <= ROAD_D ? 0 : 1);
+      return mm(i1) - mm(i2) || i1 - i2;
+    });
+    for (const i of order) {
+      if (arms.length < 2 || made >= LINK_MAX[t]) break;
       let gap = arms[(i + 1) % arms.length].a - arms[i].a;
       if (gap <= 0) gap += 2 * Math.PI;
       if (gap < LINK_GAP[0] || gap > LINK_GAP[1] || rand() > LINK_CHANCE[t]) continue;
@@ -1454,19 +1479,84 @@ export function planTown({ site, roads, patch: p, motorways = [] }: PlanInput): 
         const B = at[after < 0 ? 0 : after];
         const A = at[((after < 0 ? 0 : after) - 1 + at.length) % at.length];
         if (A.li !== arms[i].li || B.li !== arms[(i + 1) % arms.length].li) continue;
-        // A smooth curve first; where that fails, a route over the ground.
+        // A smooth curve first; where that fails, a route over the ground. It carries
+        // the lesser of the two roads it joins (a bypass may take over below).
         let ok = false;
-        for (const [xs, ys] of [link(A, B), f >= LINK_TRY[1] ? route(A, B, r0 * f) : [[], []]]) {
+        const cls = Math.max(A.cls, B.cls, ROAD_D);
+        for (const [xs, ys] of [link(A, B, mid), f >= LINK_TRY[1] ? route(A, B, r0 * f, mid, gap) : [[], []]]) {
           if (!xs.length) continue;
-          ok = tryStreet(xs, ys, organic, 0, ROAD_D, `${site.id}#d${made}`);
+          ok = tryStreet(xs, ys, organic, 0, cls, `${site.id}#d${made}`);
           linkTries.push({ xy: xs.flatMap((x, q) => [x, ys[q]]), made: ok });
           if (ok) break;
         }
         if (ok) {
+          // (Its line is the last added; its piece is found by key, as tracks it crossed were split after it.)
+          madeLinks.push({ i, j: (i + 1) % arms.length, A, B, piece: redrawn.find((q) => q.key === `${site.id}#d${made}`)!, li: lines.length - 1 });
           made++;
           break;
         }
       }
+    }
+    // A bypass: where the links join every N and D road leaving the centre into one,
+    // they take over as the main route (the higher class of the roads they join) and
+    // the old roads in from them to the centre drop a class (D to C, N to D).
+    const main = arms.map((a, i) => (a.cls <= ROAD_D ? i : -1)).filter((i) => i >= 0);
+    const between = madeLinks.filter((l) => arms[l.i].cls <= ROAD_D && arms[l.j].cls <= ROAD_D);
+    const comp = new Map(main.map((i) => [i, i]));
+    const find = (i: number): number => (comp.get(i) === i ? i : find(comp.get(i)!));
+    for (const l of between) comp.set(find(l.i), find(l.j));
+    if (main.length >= 2 && between.length && new Set(main.map(find)).size === 1) {
+      for (const l of between) {
+        const cls = Math.min(l.A.cls, l.B.cls) as SegmentPath['cls'];
+        const k = redrawn.indexOf(l.piece);
+        redrawn[k] = { ...l.piece, cls };
+        lines[l.li].cls = cls;
+      }
+      // Each main arm, from its junction with a bypass in to the centre.
+      for (const ai of main) {
+        const arm = arms[ai];
+        const ends = between.flatMap((l) => [...(l.i === ai ? [l.A] : []), ...(l.j === ai ? [l.B] : [])]);
+        const L = lines[arm.li];
+        const sOn = (x: number, y: number) => nearest(x, y, 1, (li) => li !== arm.li)?.s ?? NaN;
+        // Nearest the centre along the line: its point nearest the centre.
+        let sc = 0;
+        let dc = Infinity;
+        for (let k = 0; k < L.xs.length; k++) {
+          const d = Math.hypot(L.xs[k] - cx, L.ys[k] - cy);
+          if (d < dc) {
+            dc = d;
+            sc = L.s[k];
+          }
+        }
+        for (const J of ends) {
+          splitAt(J.x, J.y, (q) => q.cls === arm.cls);
+          const sj = sOn(J.x, J.y);
+          if (Number.isNaN(sj)) continue;
+          const [lo, hi] = [Math.min(sj, sc), Math.max(sj, sc)];
+          net = net.map((q) => {
+            if (q.cls !== arm.cls || q.ring || q.key.startsWith(`${site.id}#`)) return q;
+            const m = 2 * Math.floor(q.xy.length / 4);
+            const mx = (q.xy[m - 2 >= 0 ? m - 2 : 0] + q.xy[m]) / 2;
+            const my = (q.xy[m - 1 >= 0 ? m - 1 : 1] + q.xy[m + 1]) / 2;
+            const sm = sOn(mx, my);
+            if (Number.isNaN(sm) || sm < lo || sm > hi) return q;
+            const down = { ...q, cls: (q.cls + 1) as SegmentPath['cls'] };
+            const k = redrawn.indexOf(q);
+            if (k >= 0) redrawn[k] = down;
+            else redrawn.push(down);
+            return down;
+          });
+        }
+      }
+      // The crossroads' links carry the lesser of the roads they join, as they now are.
+      for (const [key, [ea, eb]] of sqEnds) {
+        const at = (e: { key: string; x: number; y: number }) =>
+          net.find((q) => q.key === e.key && (Math.hypot(q.xy[0] - e.x, q.xy[1] - e.y) < 0.5 || Math.hypot(q.xy[q.xy.length - 2] - e.x, q.xy[q.xy.length - 1] - e.y) < 0.5))?.cls ?? ROAD_C;
+        const cls = Math.max(at(ea), at(eb)) as SegmentPath['cls'];
+        net = net.map((q) => (q.key === key ? { ...q, cls } : q));
+        for (let k = 0; k < redrawn.length; k++) if (redrawn[k].key === key) redrawn[k] = { ...redrawn[k], cls };
+      }
+      no('BYPASS');
     }
   }
 

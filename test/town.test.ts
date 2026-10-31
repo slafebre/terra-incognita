@@ -477,27 +477,39 @@ describe('street plans', () => {
     expect(n).toBeGreaterThan(0);
   });
 
-  it('link the main roads round the core of towns and large villages with D roads', () => {
+  it('link the main roads round the core, classed to match the roads they join', () => {
     let links = 0;
-    for (const { name, plan } of plans) {
+    let bypasses = 0;
+    for (const { name, inp, plan } of plans) {
       const own = plan.roads.filter((r) => r.key.includes('#d'));
-      if (!name.startsWith('town') && !name.startsWith('village')) expect(own.length, name).toBe(0);
-      for (const r of own) {
-        links++;
-        expect(r.cls, name).toBe(ROAD_D);
-        // Both ends on another road (a junction).
+      if (name.startsWith('hamlet')) expect(own.length, name).toBe(0);
+      const replaced = new Set(plan.replaced);
+      const all = [...inp.roads.filter((r) => !replaced.has(r.key)), ...plan.roads];
+      // A link (round the core, or round the crossroads) never outranks the roads at
+      // its ends: each end meets a road of its class or higher.
+      for (const r of plan.roads.filter((q) => q.key.includes('#d') || q.key.includes('#sq'))) {
+        if (r.key.includes('#d')) links++;
         for (const [x, y] of [
           [r.xy[0], r.xy[1]],
           [r.xy[r.xy.length - 2], r.xy[r.xy.length - 1]],
         ])
           expect(
-            plan.roads.some((o) => o !== r && distTo(o.xy, x, y) < 0.5) ||
-              cases.find((c) => c.name === name)!.inp.roads.some((o) => !plan.replaced.includes(o.key) && distTo(o.xy, x, y) < 0.5),
-            `${name} link end on a road`,
+            all.some((o) => o !== r && o.cls <= r.cls && distTo(o.xy, x, y) < 0.5),
+            `${name} ${r.key} (class ${r.cls}) ends on no road as high`,
           ).toBe(true);
       }
+      // A bypass: a link carrying a D road, the old road in to the centre a C road now.
+      const byKey = new Map(inp.roads.map((r) => [r.key, r.cls]));
+      const down = plan.roads.filter((r) => byKey.has(r.key) && r.cls > byKey.get(r.key)! && r.cls <= ROAD_C);
+      if (down.length) {
+        bypasses++;
+        expect(own.some((r) => r.cls === ROAD_D), name).toBe(true);
+        // Downgraded pieces lie within the core: inside the bypass.
+        for (const r of down) for (let k = 0; k < r.xy.length; k += 2) expect(Math.hypot(r.xy[k] - plan.x, r.xy[k + 1] - plan.y), name).toBeLessThan(400);
+      }
     }
-    console.log(`D links: ${links}`);
+    console.log(`links: ${links}, bypasses: ${bypasses}`);
     expect(links).toBeGreaterThan(0);
+    expect(bypasses).toBeGreaterThan(0);
   });
 });
