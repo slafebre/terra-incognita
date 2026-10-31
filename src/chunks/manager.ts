@@ -712,6 +712,24 @@ export class ChunkManager {
   }
 
   /**
+   * What a chunk's render reads of the drawn world: the ways around it (with the lanes
+   * where a motorway runs into a terminus ring), the motorway centre lines and which of
+   * their ends are a motorway's own, the plans drawing into it, and its fine nodes.
+   *
+   * The render task is built from this, and dev tools ask for it to check the map
+   * against what is actually drawn rather than against a second reckoning of it
+   * (dev/check.ts). Call it only for a chunk whose roads and neighbours are ready.
+   */
+  drawnInput(c: Chunk): { roads: SegmentPath[]; motorways: Float64Array[]; motorwayEnds: Uint8Array; plans: TownPlan[]; poi?: PoiPatch } {
+    const roads: SegmentPath[] = [];
+    this.ring(c, (n) => (roads.push(...(n?.roads ?? [])), true));
+    const poi = this.poiPatch(c);
+    // (Adds the lanes where a motorway runs into a roundabout to the roads.)
+    const { lines: motorways, ends: motorwayEnds } = this.motorwaysToDraw(c, roads);
+    return { roads, motorways, motorwayEnds, plans: this.plansFor(c) ?? [], poi };
+  }
+
+  /**
    * Ground for motorwayEnd's terminus check: the fine nodes about each end of a piece —
    * its approach, and everything within reach of it. Each node comes from its own
    * chunk's solve, so every chunk that draws this end reads the same land and chooses
@@ -1019,12 +1037,7 @@ export class ChunkManager {
         const water = c.water!.slice();
         const cover = c.cover!.slice();
         const streams = c.streams!.slice();
-        const roads: SegmentPath[] = [];
-        this.ring(c, (n) => (roads.push(...n!.roads!), true));
-        const poi = this.poiPatch(c);
-        // (Adds the lanes where a motorway runs into a roundabout to the roads.)
-        const { lines: motorways, ends: motorwayEnds } = this.motorwaysToDraw(c, roads);
-        const plans = this.plansFor(c)!;
+        const { roads, motorways, motorwayEnds, plans, poi } = this.drawnInput(c);
         fieldInputs = this.fieldInputs(c, plans);
         const kept = c.fields && sameItems(c.fields.inputs, fieldInputs) ? c.fields.layout : undefined;
         task = {
