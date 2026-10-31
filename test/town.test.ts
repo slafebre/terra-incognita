@@ -443,38 +443,44 @@ describe('street plans', () => {
 
   it('keep squares open: no building or way across them', () => {
     let n = 0;
+    let triangles = 0;
     for (const { name, plan } of plans) {
       for (const sq of plan.squares) {
         n++;
         const poly = Array.from(sq);
-        const inside = (x: number, y: number) => {
+        const m = poly.length;
+        if (m === 6) triangles++;
+        // Strictly inside, at least `e` m from every side.
+        const inside = (x: number, y: number, e: number) => {
           let sign = 0;
-          for (let k = 0; k < 8; k += 2) {
-            const c = (poly[(k + 2) % 8] - poly[k]) * (y - poly[k + 1]) - (poly[(k + 3) % 8] - poly[k + 1]) * (x - poly[k]);
-            if (c !== 0) {
-              if (sign && Math.sign(c) !== sign) return false;
-              sign = Math.sign(c);
-            }
+          for (let k = 0; k < m; k += 2) {
+            const [ax, ay, bx, by] = [poly[k], poly[k + 1], poly[(k + 2) % m], poly[(k + 3) % m]];
+            const c = ((bx - ax) * (y - ay) - (by - ay) * (x - ax)) / (Math.hypot(bx - ax, by - ay) || 1);
+            if (Math.abs(c) < e) return false;
+            if (sign && Math.sign(c) !== sign) return false;
+            sign = Math.sign(c);
           }
           return true;
         };
         const b = plan.buildings;
-        for (let i = 0; i < b.length; i += 8) expect(quadsOverlap(poly, b.subarray(i, i + 8), 0.3), `${name} building on its square`).toBe(false);
-        // No way through it (sampled every metre, a metre inside its edge).
-        const [mx, my] = [(poly[0] + poly[4]) / 2, (poly[1] + poly[5]) / 2];
+        for (let i = 0; i < b.length; i += 8) {
+          const pts = [0, 2, 4, 6].map((k) => [b[i + k], b[i + k + 1]]);
+          pts.push([(b[i] + b[i + 4]) / 2, (b[i + 1] + b[i + 5]) / 2]);
+          for (const [x, y] of pts) expect(inside(x, y, 0.3), `${name} building on its square`).toBe(false);
+        }
+        // No way through it (sampled along every way, a metre in from its sides).
         for (const xy of [...plan.streets.map((s) => s.xy), ...plan.roads.map((r) => r.xy)])
           for (let k = 2; k < xy.length; k += 2)
             for (let t = 0; t <= 1; t += 0.05) {
               const x = xy[k - 2] + t * (xy[k] - xy[k - 2]);
               const y = xy[k - 1] + t * (xy[k + 1] - xy[k - 1]);
-              // Shrink toward the middle by a metre.
-              const sx = x + ((mx - x) / (Math.hypot(mx - x, my - y) || 1)) * -1;
-              const sy = y + ((my - y) / (Math.hypot(mx - x, my - y) || 1)) * -1;
-              expect(inside(sx, sy) && inside(x, y), `${name} way across its square`).toBe(false);
+              expect(inside(x, y, 1), `${name} way across its square`).toBe(false);
             }
       }
     }
+    console.log(`squares: ${n}, ${triangles} triangular`);
     expect(n).toBeGreaterThan(0);
+    expect(triangles).toBeGreaterThan(0);
   });
 
   it('link the main roads round the core, classed to match the roads they join', () => {

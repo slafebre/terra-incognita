@@ -167,6 +167,13 @@ const LINK_BRIDGE = 150;
  * SQUARE_STEEP m/m) and dry.
  */
 const SQUARE_CHANCE = [0.6, 0.6, 0.4];
+/** A square between the roads at the centre (a town's market place, a village's square): its corners this far out along the roads (m; town, village)… */
+const PLAZA_R = [
+  [36, 50],
+  [26, 38],
+];
+/** …where no two roads are closer than PLAZA_GAP[0] rad, nor further apart than PLAZA_GAP[1] (four or more roads) or PLAZA_GAP[2] (three). */
+const PLAZA_GAP = [(40 * Math.PI) / 180, (175 * Math.PI) / 180, (215 * Math.PI) / 180];
 const SQUARE_D = [30, 110];
 const SQUARE_W = [28, 44];
 const SQUARE_DEPTH = [22, 34];
@@ -549,6 +556,26 @@ export function planTown({ site, roads, patch: p, motorways = [] }: PlanInput): 
     return [dx / l, dy / l];
   };
 
+  /** Squares: open places (convex polygons), streets never across them. */
+  const squares: Float32Array[] = [];
+  const squarePolys: number[][] = [];
+  const inConvexAny = (x: number, y: number) => squarePolys.some((q) => inConvex(q, x, y));
+  /** Is (x, y) on a square (within m of it)? */
+  const onSquare = (x: number, y: number, m: number) =>
+    squarePolys.some((q) => {
+      if (inConvex(q, x, y)) return true;
+      const n = q.length;
+      for (let k = 0; k < n; k += 2) if (segPointDist(q[k], q[k + 1], q[(k + 2) % n], q[(k + 3) % n], x, y) < m) return true;
+      return false;
+    });
+  // Towns, and villages with a wide core, are large: links round the core, more squares and churches.
+  const big = rank === TOWN || (rank === VILLAGE && core > BIG_VILLAGE);
+  // Some villages (more of the large ones, and towns besides their market square) have a
+  // square: where three or more roads meet at the centre, the place between them
+  // (a triangle for three); else a rectangle beside a main road (below).
+  const wantSquare = rank !== HAMLET && rand() < SQUARE_CHANCE[rank === TOWN ? 0 : big ? 1 : 2];
+  let plaza = false;
+
   // --- The crossroads: a square, a green or a spindle ----------------------------
   // The roads ending at the centre are cut back and joined by short links round it,
   // each leaving its road at an angle and bulging outward: three or more roads make
@@ -566,9 +593,16 @@ export function planTown({ site, roads, patch: p, motorways = [] }: PlanInput): 
     });
     const slope = Math.hypot(zAt(cx + 16, cy) - zAt(cx - 16, cy), zAt(cx, cy + 16) - zAt(cx, cy - 16)) / 32;
     const deg = at.length;
-    const r =
-      rank === TOWN ? lerp(30, 45, rand()) * Math.sqrt(size) : deg >= 3 ? lerp(24, 34, rand()) : lerp(35, 60, rand());
-    const chance = rank === HAMLET ? 0 : rank === TOWN ? 1 : deg >= 3 ? 0.8 : deg === 2 ? lerp(0.4, 0.1, mount) : 0;
+    // A square between the roads: a town's market place, or a village's square.
+    const wantPlaza = deg >= 3 && (rank === TOWN || wantSquare);
+    const r = wantPlaza
+      ? lerp(PLAZA_R[rank === TOWN ? 0 : 1][0], PLAZA_R[rank === TOWN ? 0 : 1][1], rand()) * (rank === TOWN ? Math.sqrt(size) : 1)
+      : rank === TOWN
+        ? lerp(30, 45, rand()) * Math.sqrt(size)
+        : deg >= 3
+          ? lerp(24, 34, rand())
+          : lerp(35, 60, rand());
+    const chance = wantPlaza ? 1 : rank === HAMLET ? 0 : rank === TOWN ? 1 : deg >= 3 ? 0.8 : deg === 2 ? lerp(0.4, 0.1, mount) : 0;
     if (deg >= 2 && slope < 0.1 && rand() < chance) {
       // Each road from the centre, cut at r: [kept polyline (outward), cut point, outward direction].
       const cuts: { r: SegmentPath; xs: number[]; ys: number[]; ux: number; uy: number; a: number }[] = [];
@@ -605,6 +639,17 @@ export function planTown({ site, roads, patch: p, motorways = [] }: PlanInput): 
       // Links between neighbouring cuts round the centre.
       const links: SegmentPath[] = [];
       let ok = cuts.length === deg;
+      // The square is the polygon of the cut points, edged by straight links: a
+      // triangle where three roads meet (at a T too: the through road is its long
+      // side), with no two roads closer than PLAZA_GAP[0]; with four or more, only
+      // where they leave all round (no gap of PLAZA_GAP[1] or more), so it is convex.
+      const gaps = cuts.map((A, i) => {
+        let g = cuts[(i + 1) % cuts.length].a - A.a;
+        if (g <= 0) g += 2 * Math.PI;
+        return g;
+      });
+      const isPlaza =
+        wantPlaza && Math.min(...gaps) >= PLAZA_GAP[0] && Math.max(...gaps) < (cuts.length === 3 ? PLAZA_GAP[2] : PLAZA_GAP[1]);
       // Squares and greens: nearly straight sides (a rounded triangle or square, not a
       // ring); spindles: a narrow parting.
       const angle = deg >= 3 || rank === TOWN ? (62 * Math.PI) / 180 : (35 * Math.PI) / 180;
@@ -614,7 +659,7 @@ export function planTown({ site, roads, patch: p, motorways = [] }: PlanInput): 
         const B = cuts[(i + 1) % deg];
         let gap = B.a - A.a;
         if (gap <= 0) gap += 2 * Math.PI;
-        if (gap > (200 * Math.PI) / 180 && deg >= 3) continue; // open on that side
+        if (gap > (200 * Math.PI) / 180 && deg >= 3 && !isPlaza) continue; // open on that side (a square is closed)
         if (deg === 2 && Math.abs(gap - Math.PI) > (40 * Math.PI) / 180) ok = false; // a spindle needs a road passing straight through
         const ax = A.xs[0];
         const ay = A.ys[0];
@@ -630,7 +675,8 @@ export function planTown({ site, roads, patch: p, motorways = [] }: PlanInput): 
         const [tax, tay] = dir(A, bx, by);
         const [tbx, tby] = dir(B, ax, ay);
         const d = Math.hypot(bx - ax, by - ay);
-        const k = pull * Math.max(d, r);
+        // A square's sides are straight.
+        const k = isPlaza ? 0 : pull * Math.max(d, r);
         const m = Math.max(4, Math.ceil((1.4 * Math.max(d, r)) / 8));
         const xy: number[] = [];
         for (let q = 0; q <= m; q++) {
@@ -639,8 +685,8 @@ export function planTown({ site, roads, patch: p, motorways = [] }: PlanInput): 
           const b1 = 3 * u * (1 - u) ** 2;
           const b2 = 3 * u * u * (1 - u);
           const b3 = u ** 3;
-          const x = b0 * ax + b1 * (ax + tax * k) + b2 * (bx + tbx * k) + b3 * bx;
-          const y = b0 * ay + b1 * (ay + tay * k) + b2 * (by + tby * k) + b3 * by;
+          const x = isPlaza ? ax + (bx - ax) * u : b0 * ax + b1 * (ax + tax * k) + b2 * (bx + tbx * k) + b3 * bx;
+          const y = isPlaza ? ay + (by - ay) * u : b0 * ay + b1 * (ay + tay * k) + b2 * (by + tby * k) + b3 * by;
           if (wet(x, y)) ok = false;
           xy.push(x, y);
         }
@@ -663,6 +709,13 @@ export function planTown({ site, roads, patch: p, motorways = [] }: PlanInput): 
         }
         redrawn.push(...links);
         net = [...sorted.filter((q) => !cutKeys.has(q.key)), ...redrawn].sort((p1, p2) => (p1.key < p2.key ? -1 : p1.key > p2.key ? 1 : 0));
+        if (isPlaza) {
+          const poly = cuts.flatMap((c) => [c.xs[0], c.ys[0]]);
+          squarePolys.push(poly);
+          squares.push(Float32Array.from(poly));
+          plaza = true;
+          planStats.PLAZA = (planStats.PLAZA ?? 0) + 1;
+        }
       }
     }
   }
@@ -784,17 +837,6 @@ export function planTown({ site, roads, patch: p, motorways = [] }: PlanInput): 
   const streets: { li: number; cls: StreetClass; parent: number; target: number; stop: string; len: number }[] = [];
   const no = (k: string) => (planStats[k] = (planStats[k] ?? 0) + 1);
 
-  /** Squares: open places (polygons), streets never across them. */
-  const squares: Float32Array[] = [];
-  const squarePolys: number[][] = [];
-  const inConvexAny = (x: number, y: number) => squarePolys.some((q) => inConvex(q, x, y));
-  /** Is (x, y) on a square (within m of it)? */
-  const onSquare = (x: number, y: number, m: number) =>
-    squarePolys.some((q) => {
-      if (inConvex(q, x, y)) return true;
-      for (let k = 0; k < 8; k += 2) if (segPointDist(q[k], q[k + 1], q[(k + 2) % 8], q[(k + 3) % 8], x, y) < m) return true;
-      return false;
-    });
 
   /**
    * Splits the segment of the network (or the plan's redrawn piece of one) chosen by
@@ -1297,7 +1339,6 @@ export function planTown({ site, roads, patch: p, motorways = [] }: PlanInput): 
   // before any street: neighbouring roads, a link leaving each square on and bulging
   // outward (across a wide gap, an arc of an inner ring road). Streets then grow from
   // them as from the network's roads.
-  const big = rank === TOWN || (rank === VILLAGE && core > BIG_VILLAGE);
   if (big) {
     const t = rank === TOWN ? 0 : 1;
     const r0 = core * lerp(LINK_R[t][0], LINK_R[t][1], rand());
@@ -1561,11 +1602,11 @@ export function planTown({ site, roads, patch: p, motorways = [] }: PlanInput): 
   }
 
   // --- A square ----------------------------------------------------------------
-  // Some villages (more of the large ones, and towns besides their market square)
-  // have a square: an open place beside a main road near the centre, framed by
-  // streets on its other three sides, flat and dry. Houses line it from outside, and
-  // the church may face it.
-  if (rank !== HAMLET && rand() < SQUARE_CHANCE[rank === TOWN ? 0 : big ? 1 : 2]) {
+  // A village's square where its roads don't meet all round the centre (and a town's,
+  // besides its market place): an open place beside a main road near the centre,
+  // framed by streets on its other three sides, flat and dry. Houses line it from
+  // outside, and the church may face it.
+  if (wantSquare && (!plaza || rank === TOWN)) {
     const sc = rank === TOWN ? SQUARE_TOWN : 1;
     const W = lerp(SQUARE_W[0], SQUARE_W[1], rand()) * sc;
     const D = lerp(SQUARE_DEPTH[0], SQUARE_DEPTH[1], rand()) * sc;
@@ -2080,35 +2121,35 @@ export function planTown({ site, roads, patch: p, motorways = [] }: PlanInput): 
     const east = (rand() - 0.5) * 2 * CHURCH_TURN;
     /** Spots to try, best first: [x, y, angle along the way]. */
     const spots: [number, number, number][] = [];
-    if (k === 0 && redrawn.some((q) => q.key.startsWith(`${site.id}#sq`))) spots.push([cx, cy, east]);
+    if (k === 0 && !plaza && redrawn.some((q) => q.key.startsWith(`${site.id}#sq`))) spots.push([cx, cy, east]);
     if (k === 0)
       for (const q of squarePolys) {
-        // Facing the square across the street round it: its back side first, then its ends.
-        for (const [e0, e1] of [
-          [2, 4],
-          [0, 2],
-          [4, 6],
-        ]) {
+        // Facing the square across a way round it: (a rectangle's back side first).
+        const n = q.length / 2;
+        const mx = q.filter((_, i) => i % 2 === 0).reduce((a, v) => a + v, 0) / n;
+        const my = q.filter((_, i) => i % 2 === 1).reduce((a, v) => a + v, 0) / n;
+        for (let e = 0; e < n; e++) {
+          const e0 = 2 * ((e + 1) % n);
+          const e1 = 2 * ((e + 2) % n);
           const ax = q[e0];
           const ay = q[e0 + 1];
-          const bx = q[(e1 % 8) || 0];
-          const by = q[((e1 % 8) || 0) + 1];
+          const bx = q[e1];
+          const by = q[e1 + 1];
           const ex = bx - ax;
           const ey = by - ay;
           const el = Math.hypot(ex, ey) || 1;
           // Outward: away from the square's middle.
-          const mx = (q[0] + q[4]) / 2;
-          const my = (q[1] + q[5]) / 2;
           let ox = -ey / el;
           let oy = ex / el;
           if (ox * ((ax + bx) / 2 - mx) + oy * ((ay + by) / 2 - my) < 0) {
             ox = -ox;
             oy = -oy;
           }
-          for (const f of [0.5, 0.3, 0.7]) {
-            const off = STREET_CLEAR[0] + CHURCH_SETBACK + d / 2;
-            spots.push([ax + ex * f + ox * off, ay + ey * f + oy * off, Math.atan2(ey, ex)]);
-          }
+          for (const f of [0.5, 0.3, 0.7])
+            for (const c of [STREET_CLEAR[0], ROAD_CLEAR[ROAD_D], ROAD_CLEAR[0]]) {
+              const off = c + CHURCH_SETBACK + d / 2;
+              spots.push([ax + ex * f + ox * off, ay + ey * f + oy * off, Math.atan2(ey, ex)]);
+            }
         }
       }
     // Beside a main road, then a street, nearest the centre first (further ones: far
