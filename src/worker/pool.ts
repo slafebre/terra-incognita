@@ -14,7 +14,11 @@ export interface TaskRunner {
   shareTiles?(msg: WorkerTiles): void;
 }
 
-/** Workers replaced after an error, at most, per worker of the pool: one that can't even start would be replaced for ever. */
+/**
+ * Replacements after an error, per worker of the pool: the pool replaces this many times its
+ * size in all, whichever workers fail, and never more (one that can't even start would be
+ * replaced for ever). After that, each worker that fails takes its slot out of use.
+ */
 const RESTARTS = 4;
 
 /** Fixed-size pool; one task per worker at a time. The caller decides what to run next. */
@@ -86,7 +90,8 @@ export class WorkerPool implements TaskRunner {
   /**
    * The worker in `slot` won't answer: fail its task, so whatever waits on it can try
    * again, and replace the worker, whose state can't be trusted (it makes the coarse tiles
-   * it misses itself). Past RESTARTS per worker the slot stays busy: out of use.
+   * it misses itself). Once the pool has used its replacements (RESTARTS × its size, shared
+   * by every slot), the slot stays busy: out of use.
    */
   private lost(slot: Slot, why: string): void {
     console.error(why);

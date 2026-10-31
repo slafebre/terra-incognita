@@ -36,7 +36,7 @@ Compositor (draw ImageBitmaps)  ◀─  Chunk raster (OffscreenCanvas → ImageB
 Grid overlay
 ```
 
-- A worker that errors outside a task (a module that won't load, a result that can't be sent back, memory run out) or whose reply can't be read fails the task it was running and is replaced; past 4 replacements per worker of the pool its slot goes out of use. A task that can't be sent fails at once and leaves its worker free; a result that can't be sent comes back as an error. (Each of these left a task waiting for ever and its worker busy for good; `test/pool.test.ts`, `test/worker.test.ts`.)
+- A worker that errors outside a task (a module that won't load, a result that can't be sent back, memory run out) or whose reply can't be read fails the task it was running and is replaced. The pool replaces at most 4 workers per worker it has (16 for the most it has, 4), in all and whichever fail; after that, a worker that fails takes its slot out of use, and with every slot out of use nothing more is made. A task that can't be sent fails at once and leaves its worker free; a result that can't be sent comes back as an error. (Each of these left a task waiting for ever and its worker busy for good; `test/pool.test.ts`, `test/worker.test.ts`.)
 
 ### 3.1 Staged generation
 

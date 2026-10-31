@@ -103,4 +103,23 @@ describe('worker pool', () => {
     expect(workers.length).toBeLessThan(20);
     expect(p.idle).toBeLessThan(2);
   });
+
+  // The replacements are the pool's, not each slot's: one worker that keeps failing can
+  // use them all, and the next to fail, wherever it is, goes out of use.
+  it('shares its replacements between its workers', async () => {
+    const { p, workers } = pool(2);
+    let first = workers[0];
+    for (let i = 0; i < 8; i++) {
+      first.onerror?.({ message: 'cannot load' } as ErrorEvent);
+      first = workers.at(-1)!;
+    }
+    expect(workers).toHaveLength(10);
+    expect(p.idle).toBe(2);
+    first.onerror?.({ message: 'cannot load' } as ErrorEvent);
+    expect(workers).toHaveLength(10);
+    expect(p.idle).toBe(1);
+    workers[1].onerror?.({ message: 'out of memory' } as ErrorEvent);
+    expect(workers).toHaveLength(10);
+    expect(p.idle).toBe(0);
+  });
 });
