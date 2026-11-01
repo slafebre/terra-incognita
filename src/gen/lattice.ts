@@ -3,7 +3,19 @@ import { hash3 } from '../lib/hash';
 import { MinHeap } from '../lib/heap';
 import { lerp, smoothstep } from '../lib/noise';
 import { coarseEpochNow, type CoarseField, lakesOf, NODE } from './hydro';
-import { diamondRamps, lineCrossings, lineDistance, MotorwayLookup, type Motorways } from './motorway';
+import {
+  diamondRamps,
+  FIT_MOTORWAY,
+  lineCrossings,
+  lineDistance,
+  MotorwayLookup,
+  MW_ANGLE,
+  MW_BRIDGE_FREE,
+  MW_EDGE,
+  MW_SITE,
+  MW_VERTEX,
+  type Motorways,
+} from './motorway';
 import {
   MAX_GRADE,
   MAX_LEN,
@@ -547,15 +559,13 @@ const LAKE_W = 12;
 const LAKE_BRIDGE = 150;
 const LAKE_SAMPLES = 5;
 /**
- * Motorways (experimental, motorway.ts): no vertex within MW_VERTEX (m) of one is used
- * (no junction on it); an edge may cross one, at no less than MW_ANGLE, paying MW_CROSS
- * (m, by class: a bridge; local ways gather at a few, main roads cross once rather than
- * weave across), but not run within MW_EDGE of it.
+ * Motorways (experimental): an edge may cross one, at no less than MW_ANGLE, paying
+ * MW_CROSS (m, by class: a bridge; local ways gather at a few, main roads cross once
+ * rather than weave across). The distances it keeps — MW_VERTEX, MW_EDGE, MW_SITE and the
+ * drawing's own FIT_MOTORWAY and MW_BRIDGE_FREE — are in motorway.ts, with every other
+ * tier's, so no reader has to guess which one governs the geometry in front of them.
  */
-const MW_VERTEX = 50;
-const MW_ANGLE = (35 * Math.PI) / 180;
 const MW_CROSS = [300, 300, 400, 800, 800];
-const MW_EDGE = 30;
 /**
  * Interchanges: at least IC_GAP (m) apart, where the road's edge crosses at IC_ANGLE or
  * more (the drawn curve crosses more shallowly still: at 35° the diamond was a sliver);
@@ -600,8 +610,6 @@ function nearMotorway(field: CoarseField, v: number): boolean {
   }
   return b;
 }
-/** Farms and hamlets this near a motorway (m) are left out: it runs through them. */
-const MW_SITE = [0, 0, 200, 120];
 /** The motorways the network keeps to: set by latticeCell for its own edges (the caches are pure functions of the seeds). */
 let motorways: MotorwayLookup | undefined;
 function edgeCostRaw(field: CoarseField, u: number, v: number, cls: RoadClass): number {
@@ -1526,8 +1534,6 @@ export function latticeSegments(edges: RoadEdge[], cx: number, cy: number, motor
   return out;
 }
 
-/** A run crossing a motorway may come near it this close (m) to where its vertices' line crosses. */
-const MW_BRIDGE_FREE = 80;
 const pointSegDist = (x: number, y: number, s: number[]) => segDist(x, y, s, 0);
 
 /** Room around a piece is looked for this far (m): every chunk that sees the piece knows all ways that close. */
@@ -2060,14 +2066,16 @@ function tooSteep(pts: number[], gmax: number, zAt: (x: number, y: number) => nu
 }
 
 
-/** Terrain fitting: samples every FIT_STEP m, shifted sideways by up to FIT_BAND m in FIT_OFFSET steps. */
+/**
+ * Terrain fitting: samples every FIT_STEP m, shifted sideways by up to FIT_BAND m in
+ * FIT_OFFSET steps. (The motorway's own clearance, FIT_MOTORWAY, is in motorway.ts with
+ * every other tier's.)
+ */
 const FIT_STEP = 10;
 const FIT_BAND = 32;
 const FIT_OFFSET = 8;
 /** Per-sample penalties (m-equivalent) for standing in a lake, beside one, or on a stream bed. */
 const FIT_WATER = 400;
-/** Fitted curves keep this far (m) from a motorway's centre line, at the cost of water (where they cross it, alike for every shift). */
-const FIT_MOTORWAY = 28;
 const FIT_SHORE = 60;
 const FIT_STREAM = 6;
 /** Weights: steepness beyond the class limit, sideways change (smoothness), shift itself. */

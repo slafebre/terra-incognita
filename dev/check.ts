@@ -13,7 +13,19 @@
 // Exits non-zero where a count is over its budget: BUDGETS holds what is tolerated
 // today, and lowering them is the work.
 import { ChunkManager } from '../src/chunks/manager';
-import { MW_END_CLEAR, MW_END_HEAD, MW_END_TAIL, MW_PLAN_CLEAR, MW_WIDTH, Motorways, lineDistance } from '../src/gen/motorway';
+import {
+  FIT_MOTORWAY,
+  lineDistance,
+  Motorways,
+  MW_ANGLE,
+  MW_EDGE,
+  MW_END_CLEAR,
+  MW_END_HEAD,
+  MW_END_TAIL,
+  MW_PLAN_CLEAR,
+  MW_VERTEX,
+  MW_WIDTH,
+} from '../src/gen/motorway';
 import { CoarseField } from '../src/gen/hydro';
 import { NET_REACH } from '../src/gen/roads';
 import { expand, SeedStore, SeedView } from '../src/gen/seeds';
@@ -37,12 +49,8 @@ const SIZE = 3000;
 const SEED = Number(process.env.SEED ?? 1);
 const LOG = !!process.env.LOG;
 
-/** The spec's distances, by the rule each belongs to (SPEC §3.5.1). */
-const MW_VERTEX = 50;
-const MW_EDGE = 30;
-/** What the snap guarantees a drawn junction (FIT_MOTORWAY in lattice.ts). */
-const MW_SNAP_CLEAR = 28;
-const MW_CROSS_ANGLE = (35 * Math.PI) / 180;
+/** What the snap guarantees a drawn junction: the fit's own clearance (motorway.ts). */
+const MW_SNAP_CLEAR = FIT_MOTORWAY;
 /** A way counts as crossing (rather than running alongside) within this far of a crossing. */
 const CROSS_NEAR = 60;
 /** What a plan's own symbol (a water tower, a reservoir) keeps from every way and building (§3.8). */
@@ -402,7 +410,7 @@ async function checkArea(R: number, areaNo: number): Promise<{ km: number; km2: 
     for (const o of ways) {
       const cross = crossings(o.xy, mwLines);
       for (const q of cross)
-        if (inChunk(q.x, q.y) && Math.min(q.angle, Math.PI - q.angle) < MW_CROSS_ANGLE)
+        if (inChunk(q.x, q.y) && Math.min(q.angle, Math.PI - q.angle) < MW_ANGLE)
           add('mw-cross-angle', q.x, q.y, `a ${'NDCTP'[o.cls]} way crosses at ${((180 / Math.PI) * Math.min(q.angle, Math.PI - q.angle)).toFixed(0)}°`);
       for (let i = 0; i < o.xy.length; i += 2) {
         if (!inChunk(o.xy[i], o.xy[i + 1])) continue;

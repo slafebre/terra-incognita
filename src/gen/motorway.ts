@@ -29,6 +29,39 @@ export const MW_CELL = 4096;
 export const MW_WIDTH = 24;
 /** Width of an interchange's ramps (m). */
 export const MW_RAMP_WIDTH = 8;
+/**
+ * Keeping clear of a motorway (§3.5.1 A barrier). Every distance the generator keeps off
+ * one is declared here, whichever tier holds it, because the same rule is kept in three
+ * geometries — the lattice chord
+ * the network vetoes, the curve the drawing fits, the ground a plan lays out — so a
+ * consumer that reads the wrong one judges a rule nobody broke. Both of `dev/check.ts`'s
+ * own mistakes were its copies of the network's three (§3.5.1 Open).
+ *
+ *   network, on the lattice chord and its vertices:  MW_VERTEX, MW_EDGE, MW_ANGLE, MW_SITE
+ *   drawing, on the fitted curve and the snap:       FIT_MOTORWAY, and MW_BRIDGE_FREE
+ *                                                    where the chord crosses, which lets
+ *                                                    the first two off
+ *   plans, symbols, cover and fields, on the ground: MW_PLAN_CLEAR, MW_BUILD_CLEAR, MW_VERGE
+ *   at a terminus: the network stops seeing the run-on MW_END_CLEAR short of the ring
+ *
+ * What none of them says, and what made the alongside rate unreadable: a fine-routed
+ * piece is handed the motorway as an ordinary obstacle, so it keeps only MICRO_CLEAR from
+ * it — less near the piece's own ends, nothing at all at a junction (lattice.ts). A
+ * motorway is the one thing nothing may meet, so that relaxation has no junction there to
+ * make room for.
+ */
+/** No vertex within this (m) of a motorway carries a way. */
+export const MW_VERTEX = 50;
+/** The least angle (rad) at which an edge may cross one. */
+export const MW_ANGLE = (35 * Math.PI) / 180;
+/** No edge runs within this (m) of one without crossing it. */
+export const MW_EDGE = 30;
+/** Sites by rank this near (m) are left out (hamlets, farms; towns and villages are never dropped). */
+export const MW_SITE = [0, 0, 200, 120];
+/** A run crossing one may come this near (m) to where its vertices' line crosses: its bridge. */
+export const MW_BRIDGE_FREE = 80;
+/** Fitted curves and the snap keep this far (m) from the centre line, at the cost of water. */
+export const FIT_MOTORWAY = 28;
 /** Streets, built-up land and farmsteads: the band either side counts as water (no street, no building, no junction on a bridge). */
 export const MW_PLAN_CLEAR = MW_WIDTH / 2 + 12;
 /** Building footprints. */
