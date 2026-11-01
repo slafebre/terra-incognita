@@ -2,6 +2,10 @@
 //   npx vite-node dev/roadstats.ts [areas per region] [R,R,...]
 // Runs the real pipeline in-process on seeded areas and reports road defects;
 // see the README for the options.
+// The per-region lines below measure; the footer judges. DEFECTS gives the counts that
+// stand for a fault a budget, and the run exits non-zero where one is over it. Budgets
+// are on the rate, not the count, so a longer run measures the same map more closely
+// instead of failing for being longer. Lowering them is the work.
 import { ChunkManager } from '../src/chunks/manager';
 import type { RoadEdge, SegmentPath } from '../src/gen/roads';
 import type { Site } from '../src/gen/settle';
@@ -17,7 +21,7 @@ import { rng } from '../src/lib/hash';
 import { smoothPolyline } from '../src/lib/polyline';
 import { SMOOTH_PASSES } from '../src/render/roads';
 
-declare const process: { argv: string[]; env: Record<string, string | undefined> };
+declare const process: { argv: string[]; env: Record<string, string | undefined>; exit(code: number): void };
 const FS = 'node:fs';
 const { writeFileSync } = (await import(/* @vite-ignore */ FS)) as { writeFileSync(file: string, data: string): void };
 
@@ -355,6 +359,35 @@ const shoreEnds = [0, 0, 0, 0, 0];
 const undrawn = [0, 0];
 let lakeCells = 0, areaCells = 0, wetVerts = 0, allVerts = 0, wetCoarse = 0, wetVertsCoarse = 0, lakeCoarse = 0;
 const wetMarks: { x: number; y: number; a: number }[] = [];
+/**
+ * What each region's areas added up to, for the footer's budgets. The counters above are
+ * cleared as each region reports, so a defect has to be banked here before that happens.
+ * Banked per region and not in one pile, because the rates differ with the land by more
+ * than any regression would: one number for all four could only be the alpine's.
+ * Two denominators: counts the tool clips to the area are rated against the road inside
+ * it, counts taken over every drawn piece against all the road drawn.
+ */
+type Banked = {
+  km: number;
+  inKm: number;
+  km2: number;
+  sites: number;
+  deadEnds: number;
+  loops: number;
+  microDetours: number;
+  unreached: number;
+  wetRuns: number;
+  wetEnds: number;
+  undrawnAtWater: number;
+  gradeKm: number;
+  steepKm: number;
+};
+const banked = new Map<number, Banked>();
+const bank = (R: number): Banked => {
+  let t = banked.get(R);
+  if (!t) banked.set(R, (t = { km: 0, inKm: 0, km2: 0, sites: 0, deadEnds: 0, loops: 0, microDetours: 0, unreached: 0, wetRuns: 0, wetEnds: 0, undrawnAtWater: 0, gradeKm: 0, steepKm: 0 }));
+  return t;
+};
 for (const R of REGIONS) {
   let km = 0, crossings = 0, alongside = 0;
   for (let a = 0; a < AREAS; a++) {
@@ -736,6 +769,27 @@ for (const R of REGIONS) {
     crossings += s.crossings;
     alongside += s.alongside;
   }
+  // Bank this region before the lines below clear the counters they print.
+  {
+    const t = bank(R);
+    t.km += km;
+    t.inKm += inKm;
+    t.km2 += areaKm2;
+    t.deadEnds += deadFine;
+    t.loops += loopsN;
+    t.microDetours += microStats[2];
+    for (let i = 0; i < siteCount.length; i++) {
+      t.sites += siteCount[i];
+      t.unreached += unreached[i];
+    }
+    for (const wl of wetLen) t.wetRuns += wl[1];
+    for (const e of wetEnds) t.wetEnds += e;
+    t.undrawnAtWater += undrawn[0];
+    for (const gl of gradeLen) {
+      t.gradeKm += gl[0] / 1000;
+      t.steepKm += gl[2] / 1000;
+    }
+  }
   console.log(`SMALL LOOPS R=${R}: ${loopsN} in ${areaKm2} km² with ${inKm.toFixed(0)} km road → ${((100 * loopsN) / inKm).toFixed(1)} per 100 km`);
   console.log(`MICRO R=${R}: ${microStats[0]} multi-edge pieces drawn (${microStats[1].toFixed(1)} km), ${microStats[2]} paths over 1.5× their chord`);
   console.log(`MICRO GRADE R=${R}: over the class limit on the 16 m surface ${((100 * microGrade[1]) / (microGrade[0] || 1)).toFixed(0)}%, on the DEM ${((100 * microGrade[2]) / (microGrade[0] || 1)).toFixed(0)}% of ${(microGrade[0] / 1000).toFixed(1)} km`);
@@ -775,6 +829,95 @@ for (const R of REGIONS) {
   loopsN = 0; areaKm2 = 0; inKm = 0;
   console.log(`R=${R}  road ${km.toFixed(1)} km  crossings ${crossings} (${(crossings / km).toFixed(2)}/km)  alongside ${alongside.toFixed(2)} km (${((100 * alongside) / km).toFixed(1)}%)`);
 }
+
+/**
+ * What is tolerated today, per region type and in the row's own unit. Per region because
+ * the rates move with the land by more than a regression would: micro detours run ~10
+ * per 100 km in the lowlands and ~46 in the alpine, road over 1.5× its class limit 3 %
+ * to 17 %. One number for all four could only be the alpine's, and would wave a
+ * fourfold lowland regression through. A single `[0, n]` entry is a budget for every
+ * region; otherwise the run's R takes the last entry at or below it. Set from the worst
+ * of three seeds plus a quarter, on three areas per region each — thin, so a near miss
+ * is worth rerunning on another seed before believing it. Lowering them is the work.
+ */
+const BUDGETS: Record<string, [r: number, budget: number][]> = {
+  // Zero: the spec gives these outright (§3.5 no way ends in a lake, §3.4 every
+  // settlement connected), and 36 areas over three seeds hold them everywhere.
+  'way-in-lake': [[0, 0]],
+  'unreached-site': [[0, 0]],
+  'dead-end': [[0.15, 15], [0.3, 21], [0.45, 20], [0.6, 28]],
+  'small-loop': [[0.15, 37], [0.3, 54], [0.45, 51], [0.6, 42]],
+  'micro-detour': [[0.15, 18], [0.3, 38], [0.45, 53], [0.6, 57]],
+  'steep-road': [[0.15, 7], [0.3, 15], [0.45, 19], [0.6, 21]],
+  // Counts of 0–8 a region that moved severalfold between seeds (one seed's land is
+  // simply wetter): too few to put a rate on. Loose ceilings for every region, set to
+  // catch a gross regression and to measure nothing. An undrawn edge is the extreme
+  // case — 0–2 a region, where one edge alone is already ~1 per 100 km, so the ceiling
+  // has to tolerate four of them to not fire on the land it was measured against.
+  'wet-run': [[0, 10]],
+  'undrawn-at-water': [[0, 4]],
+};
+
+const budgetFor = (check: string, R: number): number => {
+  const table = BUDGETS[check];
+  let b = table[0][1];
+  for (const [r, v] of table) if (r <= R) b = v;
+  return b;
+};
+
+/**
+ * A rate off a short run is mostly noise: one 3 km area holds ~47 km of road, and its
+ * loop rate lands within 3 % of the budget by luck alone. A region with less road than
+ * this inside its areas is reported and not judged, so a quick look can't fail for being
+ * quick. Three areas give a region 100–150 km.
+ */
+const JUDGE_KM = 80;
+
+/** Each defect in a region: the count, what it is rated against, and how the rate reads. */
+const defectsOf = (t: Banked): { name: string; n: number; by: number; unit: string; km?: boolean }[] => [
+  { name: 'dead-end', n: t.deadEnds, by: t.inKm, unit: 'per 100 km in area' },
+  { name: 'small-loop', n: t.loops, by: t.inKm, unit: 'per 100 km in area' },
+  { name: 'wet-run', n: t.wetRuns, by: t.inKm, unit: 'per 100 km in area' },
+  { name: 'way-in-lake', n: t.wetEnds, by: t.inKm, unit: 'per 100 km in area' },
+  { name: 'undrawn-at-water', n: t.undrawnAtWater, by: t.inKm, unit: 'per 100 km in area' },
+  { name: 'unreached-site', n: t.unreached, by: t.sites, unit: 'per 100 sites     ' },
+  { name: 'micro-detour', n: t.microDetours, by: t.km, unit: 'per 100 km drawn  ' },
+  { name: 'steep-road', n: t.steepKm, by: t.gradeKm, unit: '% of road length  ', km: true },
+];
+
+let over = 0;
+let judged = 0;
+const sum = { km: 0, inKm: 0, km2: 0, sites: 0 };
+for (const [R, t] of [...banked].sort((a, b) => a[0] - b[0])) {
+  sum.km += t.km;
+  sum.inKm += t.inKm;
+  sum.km2 += t.km2;
+  sum.sites += t.sites;
+  const thin = t.inKm < JUDGE_KM;
+  if (!thin) judged++;
+  console.log(
+    `\nDEFECTS R=${R}: ${AREAS} area(s) of ${SIZE / 1000} km, ${t.km2.toFixed(0)} km² holding ${t.inKm.toFixed(0)} km of road` +
+      ` (${t.km.toFixed(0)} km drawn in all), ${t.sites} settlements and farms` +
+      (thin ? ` — under the ${JUDGE_KM} km a rate needs, so measured and not judged` : ''),
+  );
+  for (const d of defectsOf(t)) {
+    const b = budgetFor(d.name, R);
+    const r = d.by > 0 ? (100 * d.n) / d.by : NaN;
+    const bad = !thin && Number.isFinite(b) && r > b;
+    if (bad) over++;
+    const n = d.km ? `${d.n.toFixed(1)} km` : String(d.n);
+    const rate = Number.isNaN(r) ? '     —' : r.toFixed(2).padStart(6);
+    console.log(`  ${d.name.padEnd(17)} ${n.padStart(8)}   ${rate} ${d.unit}   budget ${Number.isFinite(b) ? b.toFixed(2) : '—'}${bad ? '   OVER' : ''}`);
+  }
+}
+// The land differs too much between regions for a rate over all of them to mean anything,
+// so the total says what was looked at and leaves the judging to the rows above.
+console.log(
+  `\nLOOKED AT: ${banked.size} region(s) × ${AREAS} area(s) of ${SIZE / 1000} km, ${sum.km2.toFixed(0)} km² holding ${sum.inKm.toFixed(0)} km of road` +
+    ` (${sum.km.toFixed(0)} km drawn in all), ${sum.sites} settlements and farms; ${judged} of ${banked.size} region(s) had road enough to judge.`,
+);
+console.log(over ? `\n${over} defect rate(s) over budget.` : judged ? '\nAll budgeted defect rates within budget.' : '\nNothing judged: too little road in every region.');
+process.exit(over ? 1 : 0);
 
 /** Writes roads (by class), waypoints and defect marks as an SVG, north up. */
 function svg(segs: SegmentPath[], file: string): void {
