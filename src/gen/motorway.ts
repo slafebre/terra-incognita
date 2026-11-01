@@ -1099,10 +1099,17 @@ export class MotorwayLookup {
   }
 
   /**
-   * Segment a–b against the motorways (at most 2 × BIN_REACH long): how many
-   * times it crosses one, the smallest angle (rad, 0 to π/2) of those crossings, its
-   * least distance from a centre line where it doesn't cross, and where it crosses (one
-   * of the crossings).
+   * Segment a–b against the motorways (at most 2 × BIN_REACH long): how many times it
+   * crosses one, the smallest angle (rad, 0 to π/2) of those crossings, where it crosses
+   * (one of the crossings), and its least distance from a centre line over the ground the
+   * MW_EDGE rule holds over.
+   *
+   * That last is the whole of a–b where it crosses nothing. Where it does cross, what the
+   * crossing buys it is its bridge — MW_BRIDGE_FREE either side of where the line crosses
+   * — and not its whole length, so the distance is measured along what is left (§3.5.1 A
+   * barrier). An edge may be 293 m long (MAX_EDGE) against a 160 m bridge, which is room
+   * enough to graze a carriageway for a hundred metres on the way to a legitimate
+   * crossing; letting the angle alone stand for the rule is what did that.
    */
   crossing(ax: number, ay: number, bx: number, by: number): { n: number; angle: number; dist: number; x: number; y: number } {
     const refs = new Set<number>();
@@ -1112,6 +1119,8 @@ export class MotorwayLookup {
     let dist = Infinity;
     let x = NaN;
     let y = NaN;
+    /** Where along a–b it crosses, kept only if it does: the bridges to measure around. */
+    let ts: number[] | undefined;
     const dx = bx - ax;
     const dy = by - ay;
     for (const r of refs) {
@@ -1130,12 +1139,45 @@ export class MotorwayLookup {
           x = ax + t * dx;
           y = ay + t * dy;
           angle = Math.min(angle, Math.asin(Math.min(1, Math.abs(den) / (Math.hypot(dx, dy) * Math.hypot(fx, fy)))));
+          (ts ??= []).push(t);
           continue;
         }
       }
       dist = Math.min(dist, pointSeg(ax, ay, cx, cy, ex, ey), pointSeg(bx, by, cx, cy, ex, ey), pointSeg(cx, cy, ax, ay, bx, by), pointSeg(ex, ey, ax, ay, bx, by));
     }
-    return { n, angle, dist, x, y };
+    return { n, angle, dist: ts ? this.offBridge(ax, ay, dx, dy, refs, ts) : dist, x, y };
+  }
+
+  /**
+   * The least distance from a centre line to the stretches of a–b that lie more than
+   * MW_BRIDGE_FREE from a crossing: Infinity where the bridges cover the whole of it,
+   * which is every edge shorter than twice MW_BRIDGE_FREE. Every segment counts here,
+   * the ones a–b crosses included — a motorway that runs alongside and then turns to
+   * cross is close on both counts, and only the bridge excuses the first.
+   */
+  private offBridge(ax: number, ay: number, dx: number, dy: number, refs: Set<number>, ts: number[]): number {
+    const len = Math.hypot(dx, dy);
+    if (!len) return Infinity;
+    const w = MW_BRIDGE_FREE / len;
+    const open: [number, number][] = [];
+    let cur = 0;
+    for (const t of [...ts].sort((p, q) => p - q)) {
+      if (t - w > cur) open.push([cur, t - w]);
+      cur = Math.max(cur, t + w);
+    }
+    if (cur < 1) open.push([cur, 1]);
+    let d = Infinity;
+    for (const r of refs) {
+      const xy = this.lines[Math.floor(r / 65536)];
+      const k = 2 * (r % 65536);
+      const [cx, cy, ex, ey] = [xy[k], xy[k + 1], xy[k + 2], xy[k + 3]];
+      for (const [t0, t1] of open) {
+        const px = ax + t0 * dx, py = ay + t0 * dy;
+        const qx = ax + t1 * dx, qy = ay + t1 * dy;
+        d = Math.min(d, pointSeg(px, py, cx, cy, ex, ey), pointSeg(qx, qy, cx, cy, ex, ey), pointSeg(cx, cy, px, py, qx, qy), pointSeg(ex, ey, px, py, qx, qy));
+      }
+    }
+    return d;
   }
 }
 

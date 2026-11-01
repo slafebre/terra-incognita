@@ -10,8 +10,10 @@
 // the browser at ?at=x,y&seed=n. LOG=1 prints every violation, not just the counts.
 // SNAP=<file> checks one snapshot's own land where it was taken, instead of seeded
 // areas: what you saw on the map, put to the same rules.
-// Exits non-zero where a count is over its budget: BUDGETS holds what is tolerated
-// today, and lowering them is the work.
+// Exits non-zero where a count is over its budget, and it is the only run that does:
+// the budgets live in dev/judge.ts, and ROADS=<file> judges a dev/roadstats.ts run's
+// rates (MEASURE=<file> there) in the same pass, so one command says yes or no.
+// Lowering the budgets is the work.
 import { ChunkManager } from '../src/chunks/manager';
 import {
   FIT_MOTORWAY,
@@ -24,13 +26,16 @@ import {
   MW_END_HEAD,
   MW_END_TAIL,
   MW_PLAN_CLEAR,
+  MW_SITE,
   MW_VERTEX,
   MW_WIDTH,
+  MotorwayLookup,
 } from '../src/gen/motorway';
+import { motorwayTerminus, vertexPos } from '../src/gen/lattice';
 import { CoarseField } from '../src/gen/hydro';
 import { NET_REACH } from '../src/gen/roads';
 import { expand, SeedStore, SeedView } from '../src/gen/seeds';
-import { Settlements } from '../src/gen/settle';
+import { FARM, HAMLET, Settlements } from '../src/gen/settle';
 import { setRegionOverride, Terrain } from '../src/gen/terrain';
 import { BUILT_CLEAR, CROSS, placePois, STREET_CLEAR as POI_STREET_CLEAR, WAY_CLEAR, type Poi } from '../src/gen/poi';
 import { segQuadDist } from '../src/gen/buildings';
@@ -41,6 +46,10 @@ import { rng } from '../src/lib/hash';
 import type { TaskRequest, TaskResult } from '../src/worker/protocol';
 import { runTask } from '../src/worker/tasks';
 import { applySnap, snap } from './snap';
+import { JUDGE_KM, judgeRoad, judgeSeam, type RoadRegion, SEAM_BUDGETS } from './judge';
+
+const FS = 'node:fs';
+const { readFileSync } = (await import(/* @vite-ignore */ FS)) as { readFileSync(file: string, enc: 'utf8'): string };
 
 declare const process: { argv: string[]; env: Record<string, string | undefined>; exit(code: number): void };
 
@@ -54,6 +63,8 @@ const LOG = !!process.env.LOG;
 const MW_SNAP_CLEAR = FIT_MOTORWAY;
 /** What a plan's own symbol (a water tower, a reservoir) keeps from every way and building (§3.8). */
 const PLAN_POI_CLEAR = 15;
+/** Margin round an area to gather hamlet and farm sites in: more than any plan's extent. */
+const SITE_PAD = 2000;
 /** How far around a random point to look for a motorway to stand the area on (m). */
 const FIND = Number(process.env.FIND ?? 24000);
 
@@ -79,34 +90,10 @@ function motorwayNear(seeds: SeedStore, x: number, y: number): [number, number] 
 }
 
 /**
- * What each count is allowed to be over the whole run, and why. Zero means the invariant
- * is meant to hold outright; a number is a defect the spec already records as tolerated,
- * or one not yet fixed — see SPEC §3.5.1 Open.
- */
-const BUDGETS: Record<string, number> = {
-  'mw-end-tunnel': 0, // a motorway ending inside a tunnel: the drawing stops at the portal
-  'mw-vertex': 0, // the lattice vertex of a junction within MW_VERTEX: the network's own rule
-  'mw-junction': 0, // the junction as drawn within MW_SNAP_CLEAR: what the snap guarantees
-  'poi-on-mw': 0, // a symbol on the carriageway or a ramp
-  'ramp-merge': Infinity, // merging on a viaduct or in a tunnel: ramps are not fitted to the terrain
-  'ramp-crossing': Infinity, // a ramp crossed without a junction: the network cannot see ramps
-  'mw-alongside': Infinity, // a way within MW_EDGE without crossing
-  'mw-cross-angle': Infinity, // a crossing shallower than 35°
-  'poi-on-building': 0, // §3.8: a symbol within BUILT_CLEAR of a building, or POI_STREET_CLEAR of a street
-  'poi-on-way': 0, // §3.8: a wayside cross inside its ways' own clearance
-  'plan-poi-clear': Infinity, // a plan's symbol against the world beyond its own plan
-  'ramp-building': Infinity, // a ramp over a building: plans are laid out before ramps exist
-  'ramp-street': Infinity, // a ramp over a street, for the same reason
-};
-
-/** Which denominator each check's rate is per: motorway length, or the land checked. */
-const PER_KM2 = new Set(['poi-on-building', 'poi-on-way', 'plan-poi-clear']);
-
-/**
  * What the run actually looked at, so a count of 0 can be told from nothing to count: a
  * check over land with no settlement in it has no building to stand a symbol in.
  */
-const seen = { symbols: 0, planSymbols: 0, buildings: 0, streetKm: 0, rampKm: 0 };
+const seen = { symbols: 0, planSymbols: 0, buildings: 0, streetKm: 0, rampKm: 0, lowSites: 0, siteless: 0 };
 const seenPlans = new Set<string>();
 
 type Hit = { check: string; x: number; y: number; note: string };
@@ -194,6 +181,26 @@ async function checkArea(R: number, areaNo: number): Promise<{ km: number; km2: 
     await new Promise((r) => setTimeout(r, 0));
   }
 
+  /**
+   * The sites a hamlet or a farm may not stand on (§3.5.1 A barrier): the network leaves a
+   * site within MW_SITE of a motorway out, so the drawn world should hold no plan for one.
+   * Checked by site id, because a plan's centre is its crossroads and a farmstead's is its
+   * vertex — neither is the site the rule judges, and a distance measured at the centre
+   * would be measuring the wrong point, which is the mistake `mw-vertex` made twice. The
+   * sites and the motorways are rebuilt from the same seeds the pipeline used (both are
+   * pure functions of them), and the lookup is given the terminus run-ons latticeCell gives
+   * it, so a site beside a terminus counts as near as the network counts it.
+   */
+  const sview = new SeedView(m.seeds.payloadFor(view, expand(view, NET_REACH)));
+  const sterrain = new Terrain(sview);
+  const sfield = new CoarseField(sterrain, sview);
+  const sset = new Settlements(sfield, sterrain, sview);
+  const slook = new MotorwayLookup(new Motorways(sfield, sterrain, sset, sview), (px, py, tx, ty) => vertexPos(motorwayTerminus(px, py, tx, ty)));
+  const siteOff = new Map<string, { x: number; y: number; off: number }>();
+  for (const rank of [HAMLET, FARM] as const)
+    for (const q of sset.sitesIn(rank, view.x0 - SITE_PAD, view.y0 - SITE_PAD, view.x1 + SITE_PAD, view.y1 + SITE_PAD))
+      siteOff.set(q.id, { x: q.x, y: q.y, off: slook.dist(q.x, q.y) });
+
   let km = 0;
   let km2 = 0;
   for (const c of m.chunks.values()) {
@@ -226,6 +233,16 @@ async function checkArea(R: number, areaNo: number): Promise<{ km: number; km2: 
       if (!seenPlans.has(pl.id)) {
         seenPlans.add(pl.id);
         seen.buildings += pl.buildings.length / 8;
+        const need = MW_SITE[pl.rank] ?? 0;
+        if (need) {
+          const q = siteOff.get(pl.id);
+          // No site of its own found means the margin above is too small for this plan, and
+          // the check passed over it rather than holding: counted, not swallowed.
+          if (!q) seen.siteless++;
+          else if (q.off < need)
+            add('mw-site', q.x, q.y, `a ${pl.rank === HAMLET ? 'hamlet' : 'farm'} drawn on a site ${q.off.toFixed(0)} m from the motorway (MW_SITE ${need} m)`);
+          else seen.lowSites++;
+        }
       }
     for (const q of pois) if (inChunk(q.x, q.y)) seen.symbols++;
     for (const pl of plans) for (const q of pl.pois) if (inChunk(q.x, q.y)) seen.planSymbols++;
@@ -491,19 +508,41 @@ console.log(
   `\nINVARIANTS: ${snap ? `the snapshot's land` : `${REGIONS.length * AREAS} areas`} of ${SIZE / 1000} km, ${km2.toFixed(0)} km² of land drawn, ${km.toFixed(1)} km of motorway in it`,
 );
 let over = 0;
-for (const check of Object.keys(BUDGETS)) {
-  const n = counts.get(check) ?? 0;
-  const b = BUDGETS[check];
-  if (n > b) over++;
-  // A symbol or a plan is as common as the land; a ramp or a crossing, as the motorway in it.
-  const by = PER_KM2.has(check) ? km2 : km;
-  const unit = PER_KM2.has(check) ? 'per 100 km²' : 'per 10 km  ';
-  const per = by > 0 ? (((PER_KM2.has(check) ? 100 : 10) * n) / by).toFixed(2) : '—';
-  console.log(`  ${check.padEnd(16)} ${String(n).padStart(4)}   ${per.padStart(6)} ${unit}   budget ${b === Infinity ? '—' : b}${n > b ? '   OVER' : ''}`);
+for (const check of Object.keys(SEAM_BUDGETS)) {
+  const v = judgeSeam(check, counts.get(check) ?? 0, km, km2);
+  if (v.over) over++;
+  console.log(v.line);
 }
 console.log(
   `  looked at ${seen.symbols} symbols and ${seen.planSymbols} a plan's, ${seenPlans.size} plans with ${seen.buildings} buildings` +
-    ` and ${seen.streetKm.toFixed(1)} km of street, ${seen.rampKm.toFixed(1)} km of ramp`,
+    ` and ${seen.streetKm.toFixed(1)} km of street, ${seen.rampKm.toFixed(1)} km of ramp` +
+    `, ${seen.lowSites} hamlet and farm sites${seen.siteless ? ` (${seen.siteless} whose own site the margin missed)` : ''}`,
 );
-console.log(over ? `\n${over} check(s) over budget.` : '\nAll checks within budget.');
+/**
+ * The network's own defects, measured by dev/roadstats.ts and judged here: its rates are
+ * per region, because they move with the land by more than a regression would, and a
+ * region with too little road in its areas is reported and not judged, so a quick look
+ * cannot fail for being quick. Without a file this run judges the seams alone and says
+ * so, rather than letting a silent half-verdict read as a pass.
+ */
+if (process.env.ROADS) {
+  const regions = JSON.parse(readFileSync(process.env.ROADS, 'utf8')) as RoadRegion[];
+  for (const t of regions) {
+    const thin = t.inKm < JUDGE_KM;
+    console.log(
+      `\nROAD DEFECTS R=${t.R}: ${t.areas} area(s) of ${t.size / 1000} km, ${t.km2.toFixed(0)} km² holding ${t.inKm.toFixed(0)} km of road` +
+        ` (${t.km.toFixed(0)} km drawn in all), ${t.sites} settlements and farms` +
+        (thin ? ` — under the ${JUDGE_KM} km a rate needs, so measured and not judged` : ''),
+    );
+    for (const d of t.rows) {
+      const v = judgeRoad(d, t.R, thin);
+      if (v.over) over++;
+      console.log(v.line);
+    }
+  }
+  console.log(`  from ${process.env.ROADS}, ${regions.length} region(s) of road measurements`);
+} else {
+  console.log('\n  (seams only: no road measurements handed over. MEASURE=<file> npx vite-node dev/roadstats.ts, then ROADS=<file> here.)');
+}
+console.log(over ? `\n${over} check(s) over budget.` : '\nEverything judged is within budget.');
 process.exit(over ? 1 : 0);

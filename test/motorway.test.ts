@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { CoarseField } from '../src/gen/hydro';
-import { MW_CELL, MW_END_TAIL, MW_RMIN, MW_SPILL, Motorways, motorwayEnd, tightestRadius, type MotorwayPiece } from '../src/gen/motorway';
+import { MW_ANGLE, MW_BRIDGE_FREE, MW_CELL, MW_EDGE, MW_END_TAIL, MW_RMIN, MW_SPILL, Motorways, MotorwayLookup, motorwayEnd, tightestRadius, type MotorwayPiece } from '../src/gen/motorway';
 import { NET_REACH } from '../src/gen/roads';
 import { expand, SeedStore, SeedView } from '../src/gen/seeds';
 import { Settlements } from '../src/gen/settle';
@@ -184,6 +184,58 @@ describe('motorways', () => {
     expect(last(motorwayEnd(piece, roads, buried))).toEqual([150, 0]);
     // With the end at grade, the same hill ahead does refuse that terminus.
     expect(last(motorwayEnd(piece, roads, (x) => (x > 60 ? 60 : 0)))).toEqual([0, 0]);
+  });
+
+  /**
+   * What a crossing buys an edge (SPEC §3.5.1): its bridge, MW_BRIDGE_FREE either side of
+   * where the chord crosses, and not its whole length. `crossing()` measures the distance
+   * over what is left, and edgeCostRaw holds that to MW_EDGE.
+   */
+  describe('the bridge a crossing buys', () => {
+    const lookup = new MotorwayLookup(motorways(store, area));
+    /** A point on a chain and the way it runs there, `want` m further along. */
+    const along = (p: MotorwayPiece, from: number, want: number) => {
+      let s = 0;
+      for (let k = from + 2; k < p.xy.length; k += 2) {
+        s += Math.hypot(p.xy[k] - p.xy[k - 2], p.xy[k + 1] - p.xy[k - 1]);
+        if (s >= want) {
+          const [ax, ay, bx, by] = [p.xy[from], p.xy[from + 1], p.xy[k], p.xy[k + 1]];
+          const L = Math.hypot(bx - ax, by - ay) || 1;
+          return { ax, ay, bx, by, nx: -(by - ay) / L, ny: (bx - ax) / L };
+        }
+      }
+      return undefined;
+    };
+    const run = all.reduce((a, p) => (p.xy.length > a.xy.length ? p : a));
+    const far = along(run, 2 * Math.floor(run.xy.length / 8), 400);
+
+    it('measures the distance beyond the bridge, not nothing at all', () => {
+      expect(far).toBeDefined();
+      // Crosses a sixth of the way along and runs 25 m out at the far end, ~330 m past the
+      // crossing: inside MW_EDGE, and outside the bridge, so the rule still holds there.
+      const m = lookup.crossing(far!.ax - 5 * far!.nx, far!.ay - 5 * far!.ny, far!.bx + 25 * far!.nx, far!.by + 25 * far!.ny);
+      expect(m.n).toBeGreaterThan(0);
+      expect(m.dist).toBeLessThan(MW_EDGE);
+    });
+
+    it('is the whole of an edge too short to reach past it', () => {
+      const near = along(run, 2 * Math.floor(run.xy.length / 8), 60);
+      expect(near).toBeDefined();
+      const m = lookup.crossing(near!.ax - 5 * near!.nx, near!.ay - 5 * near!.ny, near!.bx + 25 * near!.nx, near!.by + 25 * near!.ny);
+      expect(m.n).toBeGreaterThan(0);
+      expect(m.dist).toBe(Infinity);
+    });
+
+    it('is why a straight crossing could never break the rule: 80 m × sin 35° is 46 m', () => {
+      // MW_ANGLE and MW_BRIDGE_FREE already imply MW_EDGE along a straight crossing — a
+      // chord's offset grows by sin(angle), so every point of it within MW_EDGE of a
+      // straight centre line lies within MW_EDGE / sin(MW_ANGLE) of the crossing, which is
+      // 52 m, well inside the bridge. The bound bites only where the motorway curves back
+      // towards the chord or a second chain comes within reach. Lower MW_ANGLE and this
+      // stops holding, which is the case the bound is there for.
+      expect(MW_BRIDGE_FREE * Math.sin(MW_ANGLE)).toBeGreaterThan(MW_EDGE);
+      expect(MW_EDGE / Math.sin(MW_ANGLE)).toBeLessThan(MW_BRIDGE_FREE);
+    });
   });
 
   it('keeps to wide curves', () => {

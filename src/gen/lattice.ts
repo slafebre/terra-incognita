@@ -641,8 +641,9 @@ function edgeCostRaw(field: CoarseField, u: number, v: number, cls: RoadClass): 
       if (back && ((q.x - p.x) * back[0] + (q.y - p.y) * back[1]) / len > Math.cos(MW_END_SECTOR)) return Infinity;
     }
     const m = motorways.crossing(a.x, a.y, b.x, b.y);
-    // (A crossing edge passes close by the motorway's segments either side of the crossing.)
-    if (m.n ? m.angle < MW_ANGLE : m.dist < MW_EDGE) return Infinity;
+    // A crossing buys the edge its bridge, not its whole length: MW_EDGE still holds
+    // beyond MW_BRIDGE_FREE of where the chord crosses, which is what m.dist measures.
+    if (m.dist < MW_EDGE || (m.n > 0 && m.angle < MW_ANGLE)) return Infinity;
     c += m.n * MW_CROSS[cls];
   }
   const lo = Math.min(u, v);
