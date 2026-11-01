@@ -18,6 +18,7 @@ import {
   lineDistance,
   Motorways,
   MW_ANGLE,
+  MW_BRIDGE_FREE,
   MW_EDGE,
   MW_END_CLEAR,
   MW_END_HEAD,
@@ -51,8 +52,6 @@ const LOG = !!process.env.LOG;
 
 /** What the snap guarantees a drawn junction: the fit's own clearance (motorway.ts). */
 const MW_SNAP_CLEAR = FIT_MOTORWAY;
-/** A way counts as crossing (rather than running alongside) within this far of a crossing. */
-const CROSS_NEAR = 60;
 /** What a plan's own symbol (a water tower, a reservoir) keeps from every way and building (§3.8). */
 const PLAN_POI_CLEAR = 15;
 /** How far around a random point to look for a motorway to stand the area on (m). */
@@ -305,16 +304,17 @@ async function checkArea(R: number, areaNo: number): Promise<{ km: number; km2: 
 
     const mwLines = mws.map((q) => q.xy);
     /**
-     * The same chains with the terminus approach cut off, for the vertex rule alone. Where
-     * a motorway runs on to a terminus the network stops seeing it MW_END_CLEAR short of
-     * the ring (runOns in motorway.ts), and that is not an oversight: MW_END_CLEAR is
-     * MW_END_RING + MW_END_SPLIT, so the stretch left out is the roundabout and the lanes
-     * flaring onto it — which roads are meant to reach, and which no vertex rule can keep
-     * them off. The drawing draws that stretch, so measuring a vertex against the drawn
-     * chain reads a legitimate junction near a terminus as a violation. The drawn junction
-     * is still held MW_SNAP_CLEAR out and mw-junction below still checks it.
+     * The same chains with the terminus approach cut off, for the vertex and the alongside rule
+     * both. Where a motorway runs on to a terminus the network stops seeing it MW_END_CLEAR short
+     * of the ring (runOns in motorway.ts), and that is not an oversight: MW_END_CLEAR is
+     * MW_END_RING + MW_END_SPLIT, so the stretch left out is the roundabout and the lanes flaring
+     * onto it — which roads are meant to reach, and which no vertex rule can keep them off. The
+     * drawing draws that stretch, so measuring a vertex against the drawn chain reads a
+     * legitimate junction near a terminus as a violation. The drawn junction is still held
+     * MW_SNAP_CLEAR out and mw-junction below still checks it. Each cut chain keeps the vertex it
+     * starts at, since a level (tunnel, viaduct, at grade) is read off the uncut chain's own cls.
      */
-    const vertexLines = mws.map((q, li) => {
+    const vertexCut = mws.map((q, li) => {
       const flags = motorwayEnds[li] ?? 0;
       const xy = q.xy;
       let a = 0;
@@ -322,8 +322,9 @@ async function checkArea(R: number, areaNo: number): Promise<{ km: number; km2: 
       const seg = (i: number) => Math.hypot(xy[2 * i + 2] - xy[2 * i], xy[2 * i + 3] - xy[2 * i + 1]);
       if (flags & MW_END_HEAD) for (let d = 0; a < b && d < MW_END_CLEAR; a++) d += seg(a);
       if (flags & MW_END_TAIL) for (let d = 0; b > a && d < MW_END_CLEAR; b--) d += seg(b - 1);
-      return b > a ? xy.slice(2 * a, 2 * b + 2) : new Float64Array(0);
+      return { xy: b > a ? xy.slice(2 * a, 2 * b + 2) : new Float64Array(0), a };
     });
+    const vertexLines = vertexCut.map((v) => v.xy);
 
     // §256: a ramp merges onto the carriageway — which must be at grade there, not a
     // viaduct or a tunnel.
@@ -403,21 +404,69 @@ async function checkArea(R: number, areaNo: number): Promise<{ km: number; km2: 
             total += seg;
           }
           add('mw-vertex', vx, vy, `a lattice vertex carrying a way ${lat.toFixed(0)} m from the motorway` +
-            ` (${Math.min(before, total - before).toFixed(0)} m from the chain's nearest end, ends ${motorwayEnds[bi] ?? 0}, level ${mws[bi].cls[bk / 2]})`);
+            ` (${Math.min(before, total - before).toFixed(0)} m from the chain's nearest end, ends ${motorwayEnds[bi] ?? 0},` +
+            ` level ${mws[bi].cls[bk / 2 + vertexCut[bi].a]})`);
         }
       }
+    }
+    /**
+     * Where a lattice chord crosses: the bridge the network's exemption is for. edgeCostRaw
+     * lets a crossing edge off the MW_EDGE rule, and §3.5.1 bounds what that buys to
+     * MW_BRIDGE_FREE of where the *vertices' line* crosses — so that stretch, and not some
+     * radius round where the drawn curve crosses, is the one a way is entitled to run close
+     * in. An edge's route starts and ends at its two unsnapped vertices (see the vertex rule
+     * above), so the chord between them is the network's own. The crossings are collected for
+     * the chunk rather than per way: a way is fitted to one chord but nothing here maps the
+     * one to the other, and a bridge is a place on the motorway either way.
+     */
+    const bridges: { x: number; y: number }[] = [];
+    for (const route of edges) {
+      const n = route.length;
+      if (n < 4) continue;
+      bridges.push(...crossings(Float64Array.of(route[0], route[1], route[n - 2], route[n - 1]), mwLines));
     }
     for (const o of ways) {
       const cross = crossings(o.xy, mwLines);
       for (const q of cross)
         if (inChunk(q.x, q.y) && Math.min(q.angle, Math.PI - q.angle) < MW_ANGLE)
           add('mw-cross-angle', q.x, q.y, `a ${'NDCTP'[o.cls]} way crosses at ${((180 / Math.PI) * Math.min(q.angle, Math.PI - q.angle)).toFixed(0)}°`);
+      const along: { i: number; off: number; bridge: number }[] = [];
       for (let i = 0; i < o.xy.length; i += 2) {
-        if (!inChunk(o.xy[i], o.xy[i + 1])) continue;
-        const off = Math.min(...mwLines.map((xy) => toLine(xy, o.xy[i], o.xy[i + 1])));
-        if (off >= MW_EDGE) continue;
-        if (cross.some((q) => Math.hypot(q.x - o.xy[i], q.y - o.xy[i + 1]) < CROSS_NEAR)) continue;
-        add('mw-alongside', o.xy[i], o.xy[i + 1], `a ${'NDCTP'[o.cls]} way ${off.toFixed(0)} m from the motorway, not crossing`);
+        const px = o.xy[i], py = o.xy[i + 1];
+        if (!inChunk(px, py)) continue;
+        // On the stretches the network sees, and at grade: off a terminus approach, which
+        // vertexCut takes out above, and off a tunnel or a viaduct, where the way passes
+        // under or over the motorway rather than beside it.
+        let off = Infinity, cls = MW_LEVEL;
+        vertexCut.forEach((v, li) => {
+          for (let k = 0; k + 3 < v.xy.length; k += 2) {
+            const dd = toLine(v.xy.subarray(k, k + 4), px, py);
+            if (dd < off) [off, cls] = [dd, mws[li].cls[k / 2 + v.a]];
+          }
+        });
+        if (off >= MW_EDGE || cls !== MW_LEVEL) continue;
+        // How far the nearest bridge is, reported with the hit: inside MW_BRIDGE_FREE the
+        // run is entitled to be there, and just outside it the hit is edgeCostRaw's
+        // unbounded exemption showing through (§3.5.1 Open), which reads differently from
+        // a hit with no crossing for a kilometre.
+        const bridge = Math.min(Infinity, ...bridges.map((q) => Math.hypot(q.x - px, q.y - py)));
+        if (bridge < MW_BRIDGE_FREE) continue;
+        along.push({ i, off, bridge });
+      }
+      // The run alongside, not every 8 m of it: add() keys a hit to an 8 m cell, so one way
+      // running 97 m in counted as twelve defects. A run is the way's consecutive vertices,
+      // reported at its closest, with how far it holds.
+      for (let j = 0; j < along.length; ) {
+        let e = j;
+        while (e + 1 < along.length && along[e + 1].i === along[e].i + 2) e++;
+        let len = 0;
+        for (let k = j + 1; k <= e; k++)
+          len += Math.hypot(o.xy[along[k].i] - o.xy[along[k - 1].i], o.xy[along[k].i + 1] - o.xy[along[k - 1].i + 1]);
+        const worst = along.slice(j, e + 1).reduce((a, b) => (b.off < a.off ? b : a));
+        add('mw-alongside', o.xy[worst.i], o.xy[worst.i + 1],
+          `a ${'NDCTP'[o.cls]} way ${worst.off.toFixed(0)} m from the motorway for ${len.toFixed(0)} m, not crossing` +
+          ` (nearest bridge ${worst.bridge === Infinity ? 'none' : worst.bridge.toFixed(0) + ' m'})`);
+        j = e + 1;
       }
     }
 
