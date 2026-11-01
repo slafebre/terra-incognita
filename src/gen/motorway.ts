@@ -1282,8 +1282,14 @@ export function diamondRamps(road: ArrayLike<number>, lines: ArrayLike<number>[]
 
 /** How far beyond its end a motorway looks for its terminus (m): MW_END_RUN (lattice.ts) and a vertex's jitter. */
 export const MW_END_REACH = 300;
-/** The network sees a run-on as motorway as far as this short of its terminus (m): its ring and lanes, the vertex clear (MW_VERTEX). */
-const MW_END_CLEAR = 75;
+/**
+ * The network sees a run-on as motorway as far as this short of its terminus (m): its
+ * ring and lanes, the vertex clear (MW_VERTEX). It is MW_END_RING + MW_END_SPLIT, so the
+ * stretch left out is exactly the roundabout and the lanes flaring onto it — a roundabout
+ * approach that roads are meant to reach, not motorway. Exported so a check can leave the
+ * same stretch out instead of reading the drawn carriageway there as motorway.
+ */
+export const MW_END_CLEAR = 75;
 
 /**
  * Where a motorway runs into a roundabout, its carriageways part this far (m) before the

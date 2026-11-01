@@ -720,13 +720,15 @@ export class ChunkManager {
    * against what is actually drawn rather than against a second reckoning of it
    * (dev/check.ts). Call it only for a chunk whose roads and neighbours are ready.
    */
-  drawnInput(c: Chunk): { roads: SegmentPath[]; motorways: Float64Array[]; motorwayEnds: Uint8Array; plans: TownPlan[]; poi?: PoiPatch } {
+  drawnInput(c: Chunk): { roads: SegmentPath[]; motorways: Float64Array[]; motorwayEnds: Uint8Array; plans: TownPlan[]; poi?: PoiPatch; edges: number[][] } {
     const roads: SegmentPath[] = [];
     this.ring(c, (n) => (roads.push(...(n?.roads ?? [])), true));
     const poi = this.poiPatch(c);
     // (Adds the lanes where a motorway runs into a roundabout to the roads.)
     const { lines: motorways, ends: motorwayEnds } = this.motorwaysToDraw(c, roads);
-    return { roads, motorways, motorwayEnds, plans: this.plansFor(c) ?? [], poi };
+    // The lattice edges too, as the render gets them: their endpoints are the unsnapped
+    // vertex positions, the only place the network's own vertex rules can be checked.
+    return { roads, motorways, motorwayEnds, plans: this.plansFor(c) ?? [], poi, edges: this.fieldEdges(c) };
   }
 
   /**
@@ -1037,7 +1039,7 @@ export class ChunkManager {
         const water = c.water!.slice();
         const cover = c.cover!.slice();
         const streams = c.streams!.slice();
-        const { roads, motorways, motorwayEnds, plans, poi } = this.drawnInput(c);
+        const { roads, motorways, motorwayEnds, plans, poi, edges } = this.drawnInput(c);
         fieldInputs = this.fieldInputs(c, plans);
         const kept = c.fields && sameItems(c.fields.inputs, fieldInputs) ? c.fields.layout : undefined;
         task = {
@@ -1053,7 +1055,7 @@ export class ChunkManager {
           motorwayEnds,
           plans,
           poi,
-          edges: this.fieldEdges(c),
+          edges,
           fields: kept,
           pxSize: this.pxSize,
           dpr: Math.min(this.dpr, DPR_MAX),

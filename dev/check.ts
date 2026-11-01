@@ -13,9 +13,8 @@
 // Exits non-zero where a count is over its budget: BUDGETS holds what is tolerated
 // today, and lowering them is the work.
 import { ChunkManager } from '../src/chunks/manager';
-import { MW_PLAN_CLEAR, MW_WIDTH, Motorways, lineDistance } from '../src/gen/motorway';
+import { MW_END_CLEAR, MW_END_HEAD, MW_END_TAIL, MW_PLAN_CLEAR, MW_WIDTH, Motorways, lineDistance } from '../src/gen/motorway';
 import { CoarseField } from '../src/gen/hydro';
-import { nearestVertex, vertexPos } from '../src/gen/lattice';
 import { NET_REACH } from '../src/gen/roads';
 import { expand, SeedStore, SeedView } from '../src/gen/seeds';
 import { Settlements } from '../src/gen/settle';
@@ -200,7 +199,7 @@ async function checkArea(R: number, areaNo: number): Promise<{ km: number; km2: 
     } catch {
       continue; // a neighbour not ready: another chunk covers this ground
     }
-    const { roads, motorways, motorwayEnds, plans, poi } = d;
+    const { roads, motorways, motorwayEnds, plans, poi, edges } = d;
     const inChunk = (px: number, py: number) => px >= cx0 && py >= cy0 && px < cx0 + CHUNK && py < cy0 + CHUNK;
     // What the render draws, and what it hands its symbols: the network's segments the
     // plans did not redraw, plus the plans' own pieces (render/chunkRender.ts). The raw
@@ -297,6 +296,26 @@ async function checkArea(R: number, areaNo: number): Promise<{ km: number; km2: 
     });
 
     const mwLines = mws.map((q) => q.xy);
+    /**
+     * The same chains with the terminus approach cut off, for the vertex rule alone. Where
+     * a motorway runs on to a terminus the network stops seeing it MW_END_CLEAR short of
+     * the ring (runOns in motorway.ts), and that is not an oversight: MW_END_CLEAR is
+     * MW_END_RING + MW_END_SPLIT, so the stretch left out is the roundabout and the lanes
+     * flaring onto it — which roads are meant to reach, and which no vertex rule can keep
+     * them off. The drawing draws that stretch, so measuring a vertex against the drawn
+     * chain reads a legitimate junction near a terminus as a violation. The drawn junction
+     * is still held MW_SNAP_CLEAR out and mw-junction below still checks it.
+     */
+    const vertexLines = mws.map((q, li) => {
+      const flags = motorwayEnds[li] ?? 0;
+      const xy = q.xy;
+      let a = 0;
+      let b = xy.length / 2 - 1;
+      const seg = (i: number) => Math.hypot(xy[2 * i + 2] - xy[2 * i], xy[2 * i + 3] - xy[2 * i + 1]);
+      if (flags & MW_END_HEAD) for (let d = 0; a < b && d < MW_END_CLEAR; a++) d += seg(a);
+      if (flags & MW_END_TAIL) for (let d = 0; b > a && d < MW_END_CLEAR; b--) d += seg(b - 1);
+      return b > a ? xy.slice(2 * a, 2 * b + 2) : new Float64Array(0);
+    });
 
     // §256: a ramp merges onto the carriageway — which must be at grade there, not a
     // viaduct or a tunnel.
@@ -338,15 +357,47 @@ async function checkArea(R: number, areaNo: number): Promise<{ km: number; km2: 
     }
     for (const e of ends.values()) {
       if (e.n < 3 || !inChunk(e.x, e.y)) continue;
-      // Two rules, because they are kept in two places. The network holds the lattice
-      // vertex MW_VERTEX clear; the drawing snaps that vertex onto gentler ground and
-      // only keeps it MW_SNAP_CLEAR out, so a drawn junction may sit between the two.
+      // The drawing snaps a junction onto gentler, dry ground and keeps it only
+      // MW_SNAP_CLEAR out, so a drawn junction may sit between the two rules.
       // That gap is real: closing it would push vertices back onto wet or steep ground.
-      const [vx, vy] = vertexPos(nearestVertex(e.x, e.y));
-      const lat = Math.min(...mwLines.map((xy) => toLine(xy, vx, vy)));
       const off = Math.min(...mwLines.map((xy) => toLine(xy, e.x, e.y)));
-      if (lat < MW_VERTEX) add('mw-vertex', e.x, e.y, `a junction of ${e.n} ways on a vertex ${lat.toFixed(0)} m from the motorway`);
-      if (off < MW_SNAP_CLEAR) add('mw-junction', e.x, e.y, `a junction of ${e.n} ways drawn ${off.toFixed(0)} m from the motorway (vertex ${lat.toFixed(0)} m)`);
+      if (off < MW_SNAP_CLEAR) add('mw-junction', e.x, e.y, `a junction of ${e.n} ways drawn ${off.toFixed(0)} m from the motorway`);
+    }
+    // The network's rule, on the network's own vertices. edgeCostRaw gives an edge
+    // Infinity where either endpoint is within MW_VERTEX of a motorway, so no used edge
+    // may touch such a vertex — degree 1 is already a violation, not just a junction.
+    // A lattice edge's route starts and ends at its two vertices, unsnapped; reading the
+    // nearest vertex to a *drawn* junction instead would be unsound, since vertices sit
+    // as little as 30 m apart (LATTICE 150 m, JITTER 0.4) while the snap moves a junction
+    // up to VSNAP fine nodes, so the vertex nearest where it ended up is not always the
+    // one the ways meet at. That is what an earlier version of this check did, and the
+    // two hits it reported were both of its own making.
+    for (const route of edges) {
+      const n = route.length;
+      if (n < 4) continue;
+      for (const [vx, vy] of [[route[0], route[1]], [route[n - 2], route[n - 1]]]) {
+        if (!inChunk(vx, vy)) continue;
+        let bi = -1, bk = -1, lat = Infinity;
+        vertexLines.forEach((xy, li) => {
+          for (let k = 0; k + 3 < xy.length; k += 2) {
+            const dd = toLine(xy.subarray(k, k + 4), vx, vy);
+            if (dd < lat) [lat, bi, bk] = [dd, li, k];
+          }
+        });
+        if (lat < MW_VERTEX) {
+          // Where along the chain, since a hit near one of its ends is the terminus
+          // approach and a hit in the middle of a run is something else.
+          const xy = vertexLines[bi];
+          let before = 0, total = 0;
+          for (let k = 0; k + 3 < xy.length; k += 2) {
+            const seg = Math.hypot(xy[k + 2] - xy[k], xy[k + 3] - xy[k + 1]);
+            if (k < bk + 2) before += seg;
+            total += seg;
+          }
+          add('mw-vertex', vx, vy, `a lattice vertex carrying a way ${lat.toFixed(0)} m from the motorway` +
+            ` (${Math.min(before, total - before).toFixed(0)} m from the chain's nearest end, ends ${motorwayEnds[bi] ?? 0}, level ${mws[bi].cls[bk / 2]})`);
+        }
+      }
     }
     for (const o of ways) {
       const cross = crossings(o.xy, mwLines);
