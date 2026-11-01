@@ -1,8 +1,8 @@
 import { APRON, CELL, CHUNK, DEM_W } from '../lib/constants';
 import { COVER, COVER_SCALE } from '../gen/landcover';
 import { smoothPolyline } from '../lib/polyline';
-import { lineDistance, MW_RAMP_WIDTH, MW_VERGE, MW_WIDTH } from '../gen/motorway';
-import { drawEarthworks, type MotorwayDraw, MW_LEVEL, runsOf, surfaceLines, viaductLines } from './motorway';
+import { lineDistance, type MotorwayDraw, MW_LEVEL, MW_RAMP_WIDTH, MW_VERGE, MW_WIDTH, runsOf, surfaceLines } from '../gen/motorway';
+import { drawEarthworks, viaductLines } from './motorway';
 import { ringDisc, ROAD_C, ROAD_D, ROAD_N, ROAD_P, ROAD_T, type SegmentPath } from '../gen/roads';
 import { LANE, type Street, type TownPlan } from '../gen/town';
 import { STYLE } from './style';

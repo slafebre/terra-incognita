@@ -16,8 +16,11 @@
 // Lowering the budgets is the work.
 import { ChunkManager } from '../src/chunks/manager';
 import {
+  classifyMotorways,
   FIT_MOTORWAY,
   lineDistance,
+  type MotorwayDraw,
+  MotorwayLookup,
   Motorways,
   MW_ANGLE,
   MW_BRIDGE_FREE,
@@ -25,11 +28,12 @@ import {
   MW_END_CLEAR,
   MW_END_HEAD,
   MW_END_TAIL,
+  MW_LEVEL,
   MW_PLAN_CLEAR,
   MW_SITE,
+  MW_TUNNEL,
   MW_VERTEX,
   MW_WIDTH,
-  MotorwayLookup,
 } from '../src/gen/motorway';
 import { motorwayTerminus, vertexPos } from '../src/gen/lattice';
 import { CoarseField } from '../src/gen/hydro';
@@ -40,7 +44,7 @@ import { setRegionOverride, Terrain } from '../src/gen/terrain';
 import { BUILT_CLEAR, CROSS, placePois, STREET_CLEAR as POI_STREET_CLEAR, WAY_CLEAR, type Poi } from '../src/gen/poi';
 import { segQuadDist } from '../src/gen/buildings';
 import { NODE } from '../src/gen/hydro';
-import { classifyMotorways, MW_LEVEL, MW_TUNNEL, type MotorwayDraw } from '../src/render/motorway';
+
 import { CHUNK } from '../src/lib/constants';
 import { rng } from '../src/lib/hash';
 import type { TaskRequest, TaskResult } from '../src/worker/protocol';

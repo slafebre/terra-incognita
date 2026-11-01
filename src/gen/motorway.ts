@@ -1,7 +1,7 @@
 import { gnoise, ND, smoothstep } from '../lib/noise';
 import { hash3 } from '../lib/hash';
-import { coarseEpochNow, type CoarseField, lakesOf } from './hydro';
-import { NET_CELL, ringDisc } from './roads';
+import { coarseEpochNow, type CoarseField, lakesOf, NODE } from './hydro';
+import { NET_CELL, type RoadPatch, ringDisc } from './roads';
 import type { Lattice, SeedView } from './seeds';
 import { HAMLET, type Rank, type Settlements, type Site, TOWN, VILLAGE } from './settle';
 import type { Terrain } from './terrain';
@@ -1379,7 +1379,7 @@ const MW_END_FLARE = (60 * Math.PI) / 180;
 /**
  * A terminus must lie on land the carriageway can reach at grade: ground more than this
  * far (m) above the motorway's approach would have to be tunnelled through, and a
- * junction cannot sit inside a tunnel. Under the renderer's TUNNEL_H (render/motorway),
+ * junction cannot sit inside a tunnel. Under MW_TUNNEL_H below,
  * so the run-on never classes as one, with slack for the two profiles differing.
  */
 const MW_END_RISE = 20;
@@ -1560,3 +1560,171 @@ export function motorwayEnd(
   }
   return { xy: Float64Array.from(line), lanes };
 }
+
+/**
+ * Motorways (experimental) against the ground: each point of a centre line is on the
+ * surface (its earthworks, if any, drawn beside it), on a viaduct or in a tunnel, by how
+ * far the map's ground lies below or above the road's profile.
+ *
+ * This lived in `render/motorway.ts` while only the drawing asked. It reads the map's fine
+ * ground and nothing of the page, and the ramps of an interchange need it to merge at grade
+ * (§3.5.1 Open), so it belongs here with the rest of the motorway's own geometry.
+ */
+export const MW_LEVEL = 0;
+export const MW_VIADUCT = 1;
+export const MW_TUNNEL = 2;
+
+export interface MotorwayDraw {
+  xy: Float64Array;
+  /** Per point: MW_LEVEL, MW_VIADUCT or MW_TUNNEL. */
+  cls: Uint8Array;
+  /** Per point: the ground's height above the road (m; negative below), NaN where unknown. */
+  d: Float32Array;
+}
+
+/** Ground this far below the road (m): a viaduct; MW_TUNNEL_H above: a tunnel; between, earthworks (EARTH_H, render/motorway.ts). */
+const VIADUCT_H = 10;
+/** The road's height: the ground averaged over this many points (25 m apart) either side. */
+const PROFILE_HALF = 20;
+/** Depths are a median over this many points either side (the fine nodes are 16 m apart, points 25 m). */
+const MEDIAN = 2;
+/** Viaducts and tunnels shorter than this many points are left as earthworks. (MIN_RUN above is a length, and another rule's.) */
+const MIN_STRUCT = 3;
+
+/**
+ * Classes the points of each motorway by the ground under them: the fine nodes round the
+ * chunk (each from its own chunk's solve, so every chunk reads them alike; reaching far
+ * beyond it), or none (all on the surface) where they are missing. The road's height is
+ * that ground averaged along it over ±PROFILE_HALF points, the pieces joined end to end
+ * (a chunk is given those within ~700 m, so the average round its own points is whole):
+ * so only valleys deep and narrow against it are bridged, hills cut or tunnelled. (A
+ * profile from the coarse surface, which lies some 15 m off the map's ground in places,
+ * bridged long stretches of flat land.)
+ */
+export function classifyMotorways(lines: Float64Array[], p?: RoadPatch, ends?: ArrayLike<number>): MotorwayDraw[] {
+  const ground = (x: number, y: number) => {
+    if (!p) return NaN;
+    const u = x / NODE - p.gx;
+    const v = y / NODE - p.gy;
+    if (u < 0 || v < 0 || u > p.w - 1.001 || v > p.h - 1.001) return NaN;
+    const i = Math.floor(u);
+    const j = Math.floor(v);
+    const k = j * p.w + i;
+    const fu = u - i;
+    const fv = v - j;
+    const z = p.zE;
+    return (z[k] * (1 - fu) + z[k + 1] * fu) * (1 - fv) + (z[k + p.w] * (1 - fu) + z[k + p.w + 1] * fu) * fv;
+  };
+  // Chains of pieces meeting end to start (their joint shared), each in order.
+  const key = (xy: Float64Array, k: number) => `${xy[k]},${xy[k + 1]}`;
+  const byStart = new Map<string, number>();
+  lines.forEach((xy, li) => byStart.set(key(xy, 0), li));
+  const hasPrev = new Set<number>();
+  lines.forEach((xy) => {
+    const next = byStart.get(key(xy, xy.length - 2));
+    if (next !== undefined) hasPrev.add(next);
+  });
+  const out: MotorwayDraw[] = lines.map((xy) => ({ xy, cls: new Uint8Array(xy.length / 2), d: new Float32Array(xy.length / 2).fill(NaN) }));
+  const seen = new Set<number>();
+  const chain = (first: number) => {
+    const members: number[] = [];
+    for (let li: number | undefined = first; li !== undefined && !seen.has(li); li = byStart.get(key(lines[li], lines[li].length - 2))) {
+      seen.add(li);
+      members.push(li);
+    }
+    // Its points in order (the joints once), and where each line's points lie in it.
+    const pts: number[] = [];
+    const at: number[] = [];
+    for (const li of members) {
+      const xy = lines[li];
+      const skip = pts.length ? 1 : 0;
+      at.push(pts.length / 2 - skip);
+      for (let k = 2 * skip; k < xy.length; k++) pts.push(xy[k]);
+    }
+    const n = pts.length / 2;
+    const g = new Float64Array(n);
+    for (let i = 0; i < n; i++) g[i] = ground(pts[2 * i], pts[2 * i + 1]);
+    const raw = new Float64Array(n).fill(NaN);
+    for (let i = 0; i < n; i++) {
+      if (Number.isNaN(g[i])) continue;
+      let s = 0;
+      let c = 0;
+      for (let j = Math.max(0, i - PROFILE_HALF); j <= Math.min(n - 1, i + PROFILE_HALF); j++)
+        if (!Number.isNaN(g[j])) {
+          s += g[j];
+          c++;
+        }
+      if (c > PROFILE_HALF) raw[i] = g[i] - s / c;
+    }
+    const d = new Float32Array(n);
+    for (let i = 0; i < n; i++) {
+      const w: number[] = [];
+      for (let j = Math.max(0, i - MEDIAN); j <= Math.min(n - 1, i + MEDIAN); j++) if (!Number.isNaN(raw[j])) w.push(raw[j]);
+      w.sort((a, b) => a - b);
+      d[i] = w.length ? w[w.length >> 1] : NaN;
+    }
+    const cls = new Uint8Array(n);
+    for (let i = 0; i < n; i++) cls[i] = d[i] < -VIADUCT_H ? MW_VIADUCT : d[i] > MW_TUNNEL_H ? MW_TUNNEL : MW_LEVEL;
+    for (let i = 0; i < n; i++) {
+      if (cls[i] === MW_LEVEL) continue;
+      let e = i;
+      while (e + 1 < n && cls[e + 1] === cls[i]) e++;
+      if (e - i + 1 < MIN_STRUCT) cls.fill(MW_LEVEL, i, e + 1);
+      i = e;
+    }
+    members.forEach((li, m) => {
+      const k = lines[li].length / 2;
+      out[li].cls.set(cls.subarray(at[m], at[m] + k));
+      out[li].d.set(d.subarray(at[m], at[m] + k));
+    });
+  };
+  lines.forEach((_, li) => !hasPrev.has(li) && chain(li));
+  lines.forEach((_, li) => !seen.has(li) && chain(li)); // closed loops, if any
+  return ends ? out.map((m, li) => atPortal(m, ends[li] ?? 0)) : out;
+}
+
+/**
+ * A motorway cut back to its portal where it ends in a tunnel: one cannot end inside one,
+ * with no portal there and nothing beyond. `flags` are the line's own ends (MW_END_HEAD,
+ * MW_END_TAIL), not the joints between pieces.
+ *
+ * The classes come from the whole line, so cutting it changes no structure along the rest:
+ * the road's height is the ground averaged over ±PROFILE_HALF, which a shorter line would
+ * read differently (it would drop the hill the tunnel goes through, and the cut end would
+ * read as tunnel again). A line in a tunnel end to end is left alone — nowhere to stop.
+ */
+function atPortal(m: MotorwayDraw, flags: number): MotorwayDraw {
+  const n = m.cls.length;
+  let a = 0;
+  let b = n - 1;
+  if (flags & MW_END_HEAD) while (a < b && m.cls[a] === MW_TUNNEL) a++;
+  if (flags & MW_END_TAIL) while (b > a && m.cls[b] === MW_TUNNEL) b--;
+  if (a === 0 && b === n - 1) return m;
+  return b > a ? { xy: m.xy.slice(2 * a, 2 * b + 2), cls: m.cls.slice(a, b + 1), d: m.d.slice(a, b + 1) } : m;
+}
+
+/**
+ * The runs of a motorway whose segments `keep` holds: a segment counts by its points'
+ * classes (both, with `both`; else either), so a surface run reaches a tunnel's portal.
+ */
+export function runsOf(m: MotorwayDraw, keep: (cls: number) => boolean, both = false): Float64Array[] {
+  const out: Float64Array[] = [];
+  const n = m.xy.length / 2;
+  let cur: number[] = [];
+  for (let i = 0; i + 1 < n; i++) {
+    const a = keep(m.cls[i]);
+    const b = keep(m.cls[i + 1]);
+    if (both ? a && b : a || b) {
+      if (!cur.length) cur.push(m.xy[2 * i], m.xy[2 * i + 1]);
+      cur.push(m.xy[2 * i + 2], m.xy[2 * i + 3]);
+    } else if (cur.length) {
+      out.push(Float64Array.from(cur));
+      cur = [];
+    }
+  }
+  if (cur.length) out.push(Float64Array.from(cur));
+  return out;
+}
+
+/** The motorway's centre lines where it runs above ground (not in tunnels). */
+export const surfaceLines = (ms: MotorwayDraw[]) => ms.flatMap((m) => runsOf(m, (c) => c !== MW_TUNNEL));

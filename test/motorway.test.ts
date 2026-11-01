@@ -1,11 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import { CoarseField } from '../src/gen/hydro';
-import { MW_ANGLE, MW_BRIDGE_FREE, MW_CELL, MW_EDGE, MW_END_TAIL, MW_RMIN, MW_SPILL, Motorways, MotorwayLookup, motorwayEnd, tightestRadius, type MotorwayPiece } from '../src/gen/motorway';
+import { classifyMotorways, MW_ANGLE, MW_BRIDGE_FREE, MW_CELL, MW_EDGE, MW_END_TAIL, MW_LEVEL, MW_RMIN, MW_SPILL, MW_TUNNEL, MW_VIADUCT, Motorways, MotorwayLookup, motorwayEnd, surfaceLines, tightestRadius, type MotorwayPiece } from '../src/gen/motorway';
 import { NET_REACH } from '../src/gen/roads';
 import { expand, SeedStore, SeedView } from '../src/gen/seeds';
 import { Settlements } from '../src/gen/settle';
 import { setRegionOverride, Terrain } from '../src/gen/terrain';
-import { classifyMotorways, MW_LEVEL, MW_TUNNEL, MW_VIADUCT, surfaceLines } from '../src/render/motorway';
 
 /** Motorways over a rectangle, from seeds paid out for that rectangle only (as a worker would). */
 function motorways(store: SeedStore, r: { x0: number; y0: number; x1: number; y1: number }): Motorways {

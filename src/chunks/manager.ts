@@ -167,7 +167,7 @@ function pieceBox(p: MotorwayPiece): Rect {
 /**
  * Motorways passing this near a chunk (m) are given to it: it draws those within 64 m
  * (they are wide), and the road's height round its points is the ground averaged along
- * the motorway over ±500 m (render/motorway.ts), so it needs them that far beyond.
+ * the motorway over ±500 m (gen/motorway.ts), so it needs them that far beyond.
  */
 const MOTORWAY_DRAW = 700;
 /**
