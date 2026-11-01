@@ -833,8 +833,8 @@ for (const R of REGIONS) {
 /**
  * What is tolerated today, per region type and in the row's own unit. Per region because
  * the rates move with the land by more than a regression would: micro detours run ~10
- * per 100 km in the lowlands and ~46 in the alpine, road over 1.5× its class limit 3 %
- * to 17 %. One number for all four could only be the alpine's, and would wave a
+ * per 100 km in the lowlands and ~46 in the alpine, road over 1.5× its class limit 2.5 %
+ * to 13 %. One number for all four could only be the alpine's, and would wave a
  * fourfold lowland regression through. A single `[0, n]` entry is a budget for every
  * region; otherwise the run's R takes the last entry at or below it. Set from the worst
  * of three seeds plus a quarter, on three areas per region each — thin, so a near miss
@@ -848,7 +848,7 @@ const BUDGETS: Record<string, [r: number, budget: number][]> = {
   'dead-end': [[0.15, 15], [0.3, 21], [0.45, 20], [0.6, 28]],
   'small-loop': [[0.15, 37], [0.3, 54], [0.45, 51], [0.6, 42]],
   'micro-detour': [[0.15, 18], [0.3, 38], [0.45, 53], [0.6, 57]],
-  'steep-road': [[0.15, 7], [0.3, 15], [0.45, 19], [0.6, 21]],
+  'steep-road': [[0.15, 4.1], [0.3, 8.2], [0.45, 11.5], [0.6, 15.8]],
   // Counts of 0–8 a region that moved severalfold between seeds (one seed's land is
   // simply wetter): too few to put a rate on. Loose ceilings for every region, set to
   // catch a gross regression and to measure nothing. An undrawn edge is the extreme

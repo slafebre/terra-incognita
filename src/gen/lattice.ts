@@ -521,13 +521,14 @@ function edgeGrade(field: CoarseField, u: number, v: number): number {
   return edgeTerrain(field, u, v).grade;
 }
 /**
- * The gradient class `cls` sees on edge u–v: tracks and footpaths also the slope
- * between the edge's own vertices — the long baseline, reaching across a valley
- * floor, reads a valley side as gentle.
+ * The gradient a way of any class sees on edge u–v: the steeper of the long baseline
+ * and the slope between the edge's own vertices — the long baseline, reaching across a
+ * valley floor or over a spur, reads a valley side as gentle. (Roads once saw the
+ * baseline alone, and ran N roads down 50–70 % valley sides it read as 5 %.)
  */
-function classGrade(field: CoarseField, u: number, v: number, cls: RoadClass): number {
+function wayGrade(field: CoarseField, u: number, v: number): number {
   const t = edgeTerrain(field, u, v);
-  return cls >= ROAD_T ? Math.max(t.grade, t.local) : t.grade;
+  return Math.max(t.grade, t.local);
 }
 /**
  * Slope penalty weight and cap (× length) by class: soft — at this scale it is only a
@@ -609,7 +610,7 @@ function edgeCostRaw(field: CoarseField, u: number, v: number, cls: RoadClass): 
   if (nearMotorway(field, u) || nearMotorway(field, v)) return Infinity;
   const len = Math.hypot(b.x - a.x, b.y - a.y);
   const { stream } = edgeTerrain(field, u, v);
-  const g = classGrade(field, u, v, cls);
+  const g = wayGrade(field, u, v);
   let c = len * Math.min(SLOPE_CAP[cls], 1 + SLOPE_W * (g / EASY_GRADE[cls]) ** 2);
   if (stream > BRIDGE_AREA) c += BRIDGE_COST * (1 + Math.log10(stream / BRIDGE_AREA));
   c *= 1 - (VALLEY_BONUS * (a.valley + b.valley)) / 2;
@@ -1020,7 +1021,7 @@ export function latticeCell(
     for (const [u, v] of edges) {
       const l = dist(pos(u), pos(v));
       L += l;
-      c += l * Math.min(SLOPE_CAP[k], 1 + SLOPE_W * (classGrade(field, u, v, k) / EASY_GRADE[k]) ** 2);
+      c += l * Math.min(SLOPE_CAP[k], 1 + SLOPE_W * (wayGrade(field, u, v) / EASY_GRADE[k]) ** 2);
     }
     return L > 0 ? c / L : 1;
   };
@@ -1087,7 +1088,7 @@ export function latticeCell(
           const p = corridorPath(k, a, b, extra);
           if (!p) continue;
           const len = p.reduce((s, [u, v]) => s + dist(pos(u), pos(v)), 0);
-          const steep = p.some(([u, v]) => classGrade(field, u, v, k) > SHORT_STEEP * MAX_GRADE[k]);
+          const steep = p.some(([u, v]) => wayGrade(field, u, v) > SHORT_STEEP * MAX_GRADE[k]);
           if (len > detour * (k === ROAD_P ? PATH_DETOUR : 1) * d || steep || (k === ROAD_T && steepness(p, k) > TRACK_STEEPNESS)) continue;
           for (const [u, v] of p) added.push([u, v, k]);
           break;
@@ -1649,6 +1650,18 @@ export function routeCurves(tasks: SegmentTask[], p: RoadPatch, motorways: Array
     }
     return best;
   };
+  /**
+   * A run's vertices where they are drawn (snapped), with its own ends as given. Room
+   * is shared out on these: a snapped end can lie 50 m off the network's line, which
+   * put it in a neighbour's share, walled off from the rest of its own room.
+   */
+  const drawnLine = (pts: number[], ax: number, ay: number, bx: number, by: number) => {
+    const out = [ax, ay];
+    for (let i = 2; i < pts.length - 2; i += 2) out.push(...snap(pts[i], pts[i + 1]));
+    out.push(bx, by);
+    return out;
+  };
+  const drawnRivals = (rivals: Rival[]) => rivals.map((r) => ({ ...r, pts: r.pts.flatMap((v, i) => (i & 1 ? [] : snap(v, r.pts[i + 1]))), active: active(r) }));
   /** Bilinear fine elevation at world (x, y). */
   const zAt = (x: number, y: number) => {
     const u = Math.min(w - 1.001, Math.max(0, x / NODE - p.gx));
@@ -1678,7 +1691,7 @@ export function routeCurves(tasks: SegmentTask[], p: RoadPatch, motorways: Array
     const m = 48;
     if (x0 - m < p.gx * NODE || y0 - m < p.gy * NODE || x1 + m > (p.gx + w - 1) * NODE || y1 + m > (p.gy + h - 1) * NODE) return true;
     // Tracks and footpaths are routed where too steep for their easy grade.
-    return (r.cls >= ROAD_T ? !!serpentineFrame(r.pts, EASY_GRADE[r.cls], zAt, true) : !!serpentineFrame(r.pts, MAX_GRADE[r.cls], zAt)) || wetLength(r.pts) > 0;
+    return tooSteep(r.pts, r.cls >= ROAD_T ? EASY_GRADE[r.cls] : MAX_GRADE[r.cls], zAt) || wetLength(r.pts) > 0;
   };
   const routed = (
     key: string,
@@ -1699,8 +1712,7 @@ export function routeCurves(tasks: SegmentTask[], p: RoadPatch, motorways: Array
     // minus previous), as the piece or edge on the other side also uses.
     const inDir = pa ? [pts[2] - pa[0], pts[3] - pa[1]] : [bx - ax, by - ay];
     const outDir = pb ? [pb[0] - pts[2 * n - 4], pb[1] - pts[2 * n - 3]] : [bx - ax, by - ay];
-    const near = rivals.map((r) => ({ ...r, active: active(r) }));
-    const xy = microRoute(ax, ay, bx, by, inDir, outDir, MAX_GRADE[cls], p, zAt, obstacles, pts, near, cls, wedges);
+    const xy = microRoute(ax, ay, bx, by, inDir, outDir, MAX_GRADE[cls], p, zAt, obstacles, drawnLine(pts, ax, ay, bx, by), drawnRivals(rivals), cls, wedges);
     return { key, cls, xy: Float32Array.from(xy), micro: true };
   };
   /** A path with no step longer than 8 m (the water checks look at its points). */
@@ -1846,7 +1858,7 @@ export function routeCurves(tasks: SegmentTask[], p: RoadPatch, motorways: Array
       if ((dA || dB) && drowned(pc.pts)) continue;
       if (!pc.owner) continue;
       const g =
-        (!serpentineFrame(pc.pts, EASY_GRADE[t.cls], zAt, true) && chordsOf(pc.key, t.cls, pc.pts, pc.pa, pc.pb, pc.rivals, pc.obstacles, pc.wedges, dA, dB)) ||
+        (!tooSteep(pc.pts, EASY_GRADE[t.cls], zAt) && chordsOf(pc.key, t.cls, pc.pts, pc.pa, pc.pb, pc.rivals, pc.obstacles, pc.wedges, dA, dB)) ||
         routed(pc.key, t.cls, pc.pts, pc.pa, pc.pb, pc.rivals, pc.obstacles, pc.wedges, dA, dB);
       out.push(...drawn(g, dA, dB));
       continue;
@@ -1855,7 +1867,7 @@ export function routeCurves(tasks: SegmentTask[], p: RoadPatch, motorways: Array
     // fine terrain, by the chunk owning its middle edge.
     if (t.piece) {
       const pc = t.piece;
-      if (serpentineFrame(pc.pts, MAX_GRADE[t.cls], zAt) || wetLength(pc.pts) > WET_MIN) {
+      if (tooSteep(pc.pts, MAX_GRADE[t.cls], zAt) || wetLength(pc.pts) > WET_MIN) {
         const dA = drowned(pc.spurA);
         const dB = drowned(pc.spurB);
         // Wholly in the water a way ends in: the way stops at the shore before it.
@@ -1901,13 +1913,12 @@ export function routeCurves(tasks: SegmentTask[], p: RoadPatch, motorways: Array
     rawB: boolean,
   ): SegmentPath | null {
     const n = pts.length / 2;
-    const near = rivals.map((r) => ({ ...r, active: active(r) }));
+    const near = drawnRivals(rivals);
     /** Do other ways meet the piece at its end e (0: first, 1: last)? Its wedge there is then narrower than all round. */
     const junction = (e: number) => wedges.length >= 2 * WEDGE && Math.min(wedges[e * WEDGE + 3], wedges[e * WEDGE + 4]) < Math.PI - 1e-6;
     const end = (i: number) => (i === 0 && rawA) || (i === n - 1 && rawB) ? [pts[2 * i], pts[2 * i + 1]] : snap(pts[2 * i], pts[2 * i + 1]);
     /** The run from vertex i to vertex j, fitted; null if wet, or (unless `force`) out of room. */
     const run = (i: number, j: number, force: boolean): number[] | null => {
-      const own = pts.slice(2 * i, 2 * j + 2);
       // The road's direction beyond the run's ends, for roomOf.
       const inDir = i > 0 ? [pts[2 * i + 2] - pts[2 * i - 2], pts[2 * i + 3] - pts[2 * i - 1]] : pa ? [pts[2] - pa[0], pts[3] - pa[1]] : [pts[2] - pts[0], pts[3] - pts[1]];
       const outDir =
@@ -1920,6 +1931,7 @@ export function routeCurves(tasks: SegmentTask[], p: RoadPatch, motorways: Array
       const wd = wedges.length >= 2 * WEDGE ? [...(i === 0 ? wedges.slice(0, WEDGE) : []), ...(j === n - 1 ? wedges.slice(WEDGE) : [])] : [];
       const [ax, ay] = end(i);
       const [bx, by] = end(j);
+      const own = drawnLine(pts.slice(2 * i, 2 * j + 2), ax, ay, bx, by);
       // At a junction, leave along the edge (nearly): skewed, the run could graze the
       // way it meets there.
       if (!force) {
@@ -2026,48 +2038,25 @@ export function routeCurves(tasks: SegmentTask[], p: RoadPatch, motorways: Array
   }
 }
 
-/** Serpentines: a piece climbing more than SERP_TRIGGER × its class limit, mostly uphill. */
+/** Serpentines: a piece, or an edge of it, climbing more than SERP_TRIGGER × its class limit. */
 const SERP_TRIGGER = 1.3;
-const SERP_UPHILL = 0.5;
 
 /**
- * Whether a piece (vertices `pts`) is too steep for `gmax` on the fine terrain, and if
- * so its frame: e1 along the contour, e2 across it towards the piece's end. Uses
- * only the piece's own vertices and terrain inside it, so every chunk that sees the
- * piece decides alike. A piece running mostly along the contours doesn't count,
- * unless `anyWay`.
+ * Whether a piece (vertices `pts`) is too steep for `gmax` on the fine terrain: from
+ * end to end, or on any one edge (a piece that drops into a gully and climbs out
+ * again is gentle end to end). Whichever way it lies to the contours: a run is never
+ * shorter than its chord, so no line near it climbs less. Uses only the piece's own
+ * vertices and terrain inside it, so every chunk that sees the piece decides alike.
  */
-function serpentineFrame(
-  pts: number[],
-  gmax: number,
-  zAt: (x: number, y: number) => number,
-  anyWay = false,
-): { e1: [number, number]; e2: [number, number] } | null {
+function tooSteep(pts: number[], gmax: number, zAt: (x: number, y: number) => number): boolean {
   const n = pts.length / 2;
-  const ax = pts[0];
-  const ay = pts[1];
-  const bx = pts[2 * n - 2];
-  const by = pts[2 * n - 1];
   let len = 0;
-  for (let i = 1; i < n; i++) len += Math.hypot(pts[2 * i] - pts[2 * i - 2], pts[2 * i + 1] - pts[2 * i - 1]);
-  const dz = Math.abs(zAt(bx, by) - zAt(ax, ay));
-  if (dz <= SERP_TRIGGER * gmax * len) return null;
-  // Slope direction, averaged over three points inside the piece.
-  let gx = 0;
-  let gy = 0;
-  for (const t of [0.25, 0.5, 0.75]) {
-    const px = ax + (bx - ax) * t;
-    const py = ay + (by - ay) * t;
-    gx += zAt(px + 40, py) - zAt(px - 40, py);
-    gy += zAt(px, py + 40) - zAt(px, py - 40);
+  for (let i = 1; i < n; i++) {
+    const l = Math.hypot(pts[2 * i] - pts[2 * i - 2], pts[2 * i + 1] - pts[2 * i - 1]);
+    if (Math.abs(zAt(pts[2 * i], pts[2 * i + 1]) - zAt(pts[2 * i - 2], pts[2 * i - 1])) > SERP_TRIGGER * gmax * l) return true;
+    len += l;
   }
-  const G = Math.hypot(gx, gy);
-  if (G < 1e-6) return null;
-  let e2: [number, number] = [gx / G, gy / G];
-  if ((bx - ax) * e2[0] + (by - ay) * e2[1] < 0) e2 = [-e2[0], -e2[1]];
-  const L = Math.hypot(bx - ax, by - ay);
-  if (!anyWay && (bx - ax) * e2[0] + (by - ay) * e2[1] < SERP_UPHILL * L) return null; // mostly along the contour
-  return { e1: [-e2[1], e2[0]], e2 };
+  return Math.abs(zAt(pts[2 * n - 2], pts[2 * n - 1]) - zAt(pts[0], pts[1])) > SERP_TRIGGER * gmax * len;
 }
 
 
