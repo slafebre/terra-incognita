@@ -158,6 +158,73 @@ describe('points of interest', () => {
   });
 });
 
+/**
+ * A junction's wayside cross is set out along the straight bisector of the widest gap
+ * between the ways' directions at the junction. The grid above runs dead straight, so
+ * nothing there can land inside a way and the clearance test above passes whatever
+ * placePois does about it. These junctions can: three short arms 120° apart, and at
+ * half of them a fourth way running through the very spot the cross is set out at,
+ * passing the junction without meeting it. That is the shape the map produced — a cross
+ * 0.7 m into a track, another 3.3 m into a C road (`dev/check.ts`, seeds 3 and 4).
+ */
+describe('wayside crosses against the ways as drawn', () => {
+  const CLEAR = [6, 5, 4, 2.5, 1.5];
+  const arms: SegmentPath[] = [];
+  const spots: { x: number; y: number; blocked: boolean }[] = [];
+  let n = 0;
+  for (let jy = 350; jy <= 1850; jy += 150)
+    for (let jx = 350; jx <= 1850; jx += 150) {
+      const blocked = n++ % 2 === 1;
+      for (const [i, deg] of [0, 120, 240].entries()) {
+        const a2 = (deg * Math.PI) / 180;
+        const xy: number[] = [];
+        for (let t = 0; t <= 40; t += 10) xy.push(jx + t * Math.cos(a2), jy + t * Math.sin(a2));
+        arms.push({ key: `j${jx},${jy},${i}`, cls: ROAD_C, xy: Float32Array.from(xy) });
+      }
+      // Where placePois will set the cross. The three gaps are equal, and the widest is
+      // taken as the first of them in sorted order: atan2 gives the 240° arm as -120°, so
+      // the directions sort to -120°, 0°, 120° and the gap chosen is the one between the
+      // first two, bisector -60°. The offset is the clearance over sin 60° plus 5 m.
+      const MID = -Math.PI / 3;
+      const off = CLEAR[ROAD_C] / Math.sin(Math.PI / 3) + 5;
+      const sx = jx + off * Math.cos(MID);
+      const sy = jy + off * Math.sin(MID);
+      spots.push({ x: sx, y: sy, blocked });
+      if (!blocked) continue;
+      // A way through that spot, square to the bisector: it passes the junction 9.6 m off
+      // and never meets it, so the gap the cross is set out in cannot see it.
+      const bx = Math.cos(MID + Math.PI / 2);
+      const by = Math.sin(MID + Math.PI / 2);
+      const xy: number[] = [];
+      for (let t = -40; t <= 40; t += 10) xy.push(sx + t * bx, sy + t * by);
+      arms.push({ key: `b${jx},${jy}`, cls: ROAD_C, xy: Float32Array.from(xy) });
+    }
+  const pois = [];
+  for (let cy = 0; cy < 4; cy++) for (let cx = 0; cx < 4; cx++) pois.push(...placePois({ cx, cy, patch: patchFor(cx, cy), roads: arms, plans: [] }));
+  const crosses = pois.filter((q) => q.kind === CROSS && !z0(q));
+
+  it('still sets some', () => {
+    expect(crosses.length).toBeGreaterThan(0);
+  });
+
+  it('never inside a way, counting the ways that do not meet the junction', () => {
+    for (const q of crosses)
+      for (const r of arms)
+        for (let i = 2; i < r.xy.length; i += 2)
+          expect(segPointDist(r.xy[i - 2], r.xy[i - 1], r.xy[i], r.xy[i + 1], q.x, q.y)).toBeGreaterThanOrEqual(CLEAR[r.cls]);
+  });
+
+  it('drops the cross where a way runs through its spot, and keeps the others', () => {
+    // The 20% chance at each junction is what makes this worth counting out loud: with
+    // too few junctions no blocked one is picked, and the test passes while proving
+    // nothing. It caught exactly that at 32 blocked junctions, where 1 was picked.
+    const at = (s: { x: number; y: number }) => crosses.some((q) => Math.hypot(q.x - s.x, q.y - s.y) < 0.5);
+    console.log(`junctions ${spots.length} (${spots.filter((s) => s.blocked).length} blocked); crosses at spots: blocked ${spots.filter((s) => s.blocked && at(s)).length}, clear ${spots.filter((s) => !s.blocked && at(s)).length}; crosses in all ${crosses.length}`);
+    expect(spots.filter((s) => s.blocked).some(at)).toBe(false);
+    expect(spots.filter((s) => !s.blocked).some(at)).toBe(true);
+  });
+});
+
 /** Is a cross a hilltop's (on a node) rather than a junction's? */
 function z0(q: Poi): boolean {
   return Math.abs(q.x / NODE - Math.round(q.x / NODE)) < 1e-6 && Math.abs(q.y / NODE - Math.round(q.y / NODE)) < 1e-6;

@@ -136,6 +136,22 @@ export function placePois({ cx, cy, patch: p, roads, plans, motorways = [] }: Po
     });
   const built = (x: number, y: number) => nearBuilding(x, y, BUILT_CLEAR) || nearLine(streets, x, y, STREET_CLEAR);
   const ways = roads.map((r) => r.xy);
+  /**
+   * Inside a way as it is actually drawn, each by its own clearance. The gap and the
+   * offset a wayside cross is set out by (below) are reckoned from the ways' directions
+   * at the junction, as if they ran straight out of it, and two things make that false:
+   * a way is drawn as a curve fitted to the terrain, so one bending back over the spot
+   * puts the cross in the carriageway; and the offset is capped at JUNCTION_REACH, so a
+   * narrow gap leaves the spot inside the clearance even where the ways do run straight
+   * (a 10° gap wants ~40 m and gets 30, which is 5.2 m off a 6 m way). Same fault the
+   * motorway filter at the end of this function exists for, and measured the same way.
+   */
+  const onWay = (x: number, y: number) =>
+    roads.some((r) => {
+      const c = WAY_CLEAR[r.cls];
+      for (let k = 2; k < r.xy.length; k += 2) if (segPointDist(r.xy[k - 2], r.xy[k - 1], r.xy[k], r.xy[k + 1], x, y) < c) return true;
+      return false;
+    });
 
   // --- Hilltops and summits ---------------------------------------------------------
   const i0 = Math.ceil(x0 / NODE) - p.gx;
@@ -255,7 +271,7 @@ export function placePois({ cx, cy, patch: p, roads, plans, motorways = [] }: Po
     const y = e.y + off * Math.sin(mid);
     if (!inside(x, y)) continue;
     const k = at(Math.round(x / NODE) - p.gx, Math.round(y / NODE) - p.gy);
-    if (!Number.isNaN(p.lake[k]) || built(x, y)) continue;
+    if (!Number.isNaN(p.lake[k]) || built(x, y) || onWay(x, y)) continue;
     out.push({ kind: CROSS, x, y });
   }
   // Nothing stands on a motorway or its ramps. They are not ways to the network (no
