@@ -40,7 +40,7 @@ import { setRegionOverride, Terrain } from '../src/gen/terrain';
 import { BUILT_CLEAR, CROSS, placePois, STREET_CLEAR as POI_STREET_CLEAR, WAY_CLEAR, type Poi } from '../src/gen/poi';
 import { segQuadDist } from '../src/gen/buildings';
 import { NODE } from '../src/gen/hydro';
-import { classifyMotorways, MW_LEVEL, MW_TUNNEL } from '../src/render/motorway';
+import { classifyMotorways, MW_LEVEL, MW_TUNNEL, type MotorwayDraw } from '../src/render/motorway';
 import { CHUNK } from '../src/lib/constants';
 import { rng } from '../src/lib/hash';
 import type { TaskRequest, TaskResult } from '../src/worker/protocol';
@@ -100,6 +100,42 @@ type Hit = { check: string; x: number; y: number; note: string };
 const hits = new Map<string, Hit>();
 const add = (check: string, x: number, y: number, note: string) =>
   hits.set(`${check}:${Math.round(x / 8)},${Math.round(y / 8)}`, { check, x, y, note });
+
+/**
+ * How much room there is to slide a merge off a structure, for the slide policy SPEC
+ * §3.5.1 Open leaves open: how far the run the merge landed on holds, and how far along
+ * the chain the nearest point at grade lies each way — inward meaning towards the
+ * crossing the ramp came from, which costs no reach, outward meaning away from it, which
+ * does. A run spanning the whole window is escaped neither way, and then the answer is to
+ * refuse the diamond rather than to reach further. Measurement only: nothing is slid here.
+ */
+function slideRoom(m: MotorwayDraw, k: number, cls: number, rx: number, ry: number): string {
+  const n = m.cls.length;
+  const step = (a: number, b: number) => Math.hypot(m.xy[2 * b] - m.xy[2 * a], m.xy[2 * b + 1] - m.xy[2 * a + 1]);
+  let s = k, e = k;
+  while (s > 0 && m.cls[s - 1] === cls) s--;
+  while (e + 1 < n && m.cls[e + 1] === cls) e++;
+  let run = 0;
+  for (let i = s; i < e; i++) run += step(i, i + 1);
+  /** Distance along the chain to the first point at grade, going `dir`. */
+  const toLevel = (dir: number) => {
+    let d = 0;
+    for (let i = k; i + dir >= 0 && i + dir < n; i += dir) {
+      d += step(i, i + dir);
+      if (m.cls[i + dir] === MW_LEVEL) return d;
+    }
+    return Infinity;
+  };
+  // Which way the crossing lies: the chain point nearest where the ramp leaves the road.
+  let near = 0, nd = Infinity;
+  for (let i = 0; i < n; i++) {
+    const q = Math.hypot(m.xy[2 * i] - rx, m.xy[2 * i + 1] - ry);
+    if (q < nd) [nd, near] = [q, i];
+  }
+  const inward = near < k ? -1 : 1;
+  const say = (d: number) => (Number.isFinite(d) ? `${d.toFixed(0)} m` : 'never');
+  return `run ${run.toFixed(0)} m, level ${say(toLevel(inward))} inward / ${say(toLevel(-inward))} outward`;
+}
 
 /** A hilltop symbol stands on a fine node; a wayside cross stands off one, beside a junction. */
 const onNode = (q: Poi) => Math.abs(q.x / NODE - Math.round(q.x / NODE)) < 1e-6 && Math.abs(q.y / NODE - Math.round(q.y / NODE)) < 1e-6;
@@ -349,14 +385,16 @@ async function checkArea(R: number, areaNo: number): Promise<{ km: number; km2: 
       const n = r.xy.length;
       const [ex, ey] = [r.xy[n - 2], r.xy[n - 1]];
       if (!inChunk(ex, ey)) continue;
-      let best = Infinity, cls = MW_LEVEL, dep = 0;
-      for (const mw of mws)
+      let best = Infinity, cls = MW_LEVEL, dep = 0, bi = -1, bk = -1;
+      mws.forEach((mw, li) => {
         for (let i = 0; i < mw.xy.length; i += 2) {
           const q = Math.hypot(mw.xy[i] - ex, mw.xy[i + 1] - ey);
-          if (q < best) [best, cls, dep] = [q, mw.cls[i / 2], mw.d[i / 2]];
+          if (q < best) [best, cls, dep, bi, bk] = [q, mw.cls[i / 2], mw.d[i / 2], li, i / 2];
         }
+      });
       if (best < MW_WIDTH && cls !== MW_LEVEL)
-        add('ramp-merge', ex, ey, `${cls === MW_TUNNEL ? 'in a tunnel' : 'on a viaduct'}, ground ${dep.toFixed(0)} m above the road`);
+        add('ramp-merge', ex, ey, `${cls === MW_TUNNEL ? 'in a tunnel' : 'on a viaduct'}, ground ${dep.toFixed(0)} m above the road` +
+          `, ${slideRoom(mws[bi], bk, cls, r.xy[0], r.xy[1])}`);
     }
 
     // §265 open: the network cannot see ramps, so a way may cross one without a junction.
