@@ -1,8 +1,10 @@
 import { describe, expect, it, vi } from 'vitest';
 import { ChunkManager } from '../src/chunks/manager';
 import { NODES } from '../src/gen/hydro';
+import { NET_CELL, ROAD_C, type NetCell, type RoadEdge } from '../src/gen/roads';
 import type { Rect } from '../src/gen/seeds';
-import { M_PER_CSS_PX } from '../src/lib/constants';
+import { FARM, type Site } from '../src/gen/settle';
+import { CHUNK, M_PER_CSS_PX } from '../src/lib/constants';
 import type { TaskRunner } from '../src/worker/pool';
 import type { TaskRequest, TaskResult } from '../src/worker/protocol';
 
@@ -36,6 +38,24 @@ class HoldingPool implements TaskRunner {
   }
 }
 
+/** A main road crossing a motorway at an interchange, from (x, y) to a vertex 200 m east. */
+const crossing = (i: number, x: number, y: number): RoadEdge => {
+  const site = (sx: number, sy: number): Site => ({ id: `s:${sx},${sy}`, rank: FARM, x: sx, y: sy, z: 0, R: 0 });
+  return { id: `e:${i}`, cls: ROAD_C, a: site(x, y), b: site(x + 200, y), route: [x, y, x + 200, y], interchange: true };
+};
+
+/**
+ * Puts `edges` in the net cells round (x, y), as though those cells had been made. Reaching
+ * into the manager for it because a net cell waits on its coarse tiles, which the pool above
+ * holds for good, so nothing here can make one the ordinary way.
+ */
+function seedNets(m: ChunkManager, x: number, y: number, edges: RoadEdge[]): void {
+  const nets = (m as unknown as { nets: Map<string, { busy: boolean; data: NetCell }> }).nets;
+  for (let gy = Math.floor(y / NET_CELL) - 1; gy <= Math.floor(y / NET_CELL) + 1; gy++)
+    for (let gx = Math.floor(x / NET_CELL) - 1; gx <= Math.floor(x / NET_CELL) + 1; gx++)
+      nets.set(`${gx},${gy}`, { busy: false, data: { sites: [], edges } });
+}
+
 /** A desktop window (1920 × 1080 CSS px) at `zoom`, centred on (x, y). */
 const screen = (x: number, y: number, zoom: number): Rect => {
   const m = M_PER_CSS_PX / zoom;
@@ -43,9 +63,10 @@ const screen = (x: number, y: number, zoom: number): Rect => {
 };
 
 /** Frames of a view held at `actual` while the desired one waits `lead` m east (main.ts lets it lead by a screen). */
-async function hold(zoom: number, lead: number, frames = 120) {
-  const pool = new HoldingPool(4);
+async function hold(zoom: number, lead: number, frames = 120, prepare?: (m: ChunkManager) => void, workers = 4) {
+  const pool = new HoldingPool(workers);
   const m = new ChunkManager(pool, () => {}, 7);
+  prepare?.(m);
   pool.onIdle = () => m.schedule();
   const actual = screen(100_000, 50_000, zoom);
   const desired = screen(100_000 + lead, 50_000, zoom);
@@ -54,8 +75,8 @@ async function hold(zoom: number, lead: number, frames = 120) {
     await new Promise((r) => setTimeout(r, 0));
   }
   // (A busy chunk without pre data has its pre task under way.)
-  const kept = [...m.chunks.values()].filter((c) => c.pre || c.busy).length;
-  return { sent: pool.sent, wasted: pool.preChunks - kept };
+  const held = [...m.chunks.values()].filter((c) => c.pre || c.busy);
+  return { sent: pool.sent, wasted: pool.preChunks - held.length, east: Math.max(...held.map((c) => c.cx)) };
 }
 
 describe('generation and retention', () => {
@@ -71,6 +92,30 @@ describe('generation and retention', () => {
     expect(wasted).toBe(0);
     expect(Object.keys(sent).filter((k) => k !== 'pre').length).toBeGreaterThan(0);
   });
+
+  // A roads task building an interchange waits on the solves its ramps merge on, four rings
+  // out (IC_GROUND) — further than GEN_LEAD covers, so forget() holds those itself and
+  // pick() asks for them off the same reckoning. Both have to be there: ground nothing asks
+  // for is never made, and ground nothing keeps is made and dropped again every frame.
+  //
+  // Four workers are not enough to see it: the tasks this pool holds take every one of them
+  // long before the pre data reaches that far, so this case is given as many as it wants.
+  it('makes and keeps the solves an interchange asks for', async () => {
+    const [x, y] = [100_000, 50_000];
+    // Crossing edges running east a chunk apart, so the easternmost chunk to own one lies at
+    // the edge of the roads rectangle, where the ground its ramps read reaches furthest out.
+    const edges = Array.from({ length: 10 }, (_, i) => crossing(i, x + i * CHUNK, y));
+    const plain = await hold(1, 0, 250, undefined, 400);
+    const ramps = await hold(1, 0, 250, (m) => seedNets(m, x, y, edges), 400);
+    // Pre data runs further east, out to the windows behind the ramps' own ground: four
+    // rings of solves and two of windows past the chunk that builds them.
+    expect(plain.east).toBeGreaterThan(0); // (nothing held at all would make both -Infinity)
+    expect(ramps.east - plain.east).toBeGreaterThanOrEqual(3);
+    // …and nothing was made that nothing holds. This says nothing about forget()'s own hold
+    // on that ground: today's numbers leave the furthest of it 56 m inside tileKeep, so the
+    // hold is dormant and only pick()'s side of the demand is under test here.
+    expect(ramps.wasted).toBe(0);
+  }, 30000);
 
   // GEN_LEAD comes from FORGET less what generation reaches beyond its rectangle. Were it
   // to vanish (FORGET lowered, a town's plan reaching further), generation couldn't run

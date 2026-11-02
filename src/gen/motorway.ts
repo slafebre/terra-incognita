@@ -1253,8 +1253,16 @@ export function lineCrossings(pts: ArrayLike<number>, lines: ArrayLike<number>[]
  * motorway IC_MERGE m along it from the crossing, either way, their outer edge on its.
  */
 const IC_JOIN = 90;
-const IC_MERGE = 380;
+export const IC_MERGE = 380;
 const IC_STEP = 10;
+/**
+ * How far either way along the motorway a merge may slide to find ground at grade (m).
+ * Measured, not assumed: over SEED=1,2,3 the six merges that land on a structure have
+ * level ground 70, 23, 124, 100, 44 and 96 m away, taking whichever way is nearer, so
+ * 130 m clears all six (on six samples); inward alone needs 200 m to clear three. The
+ * runs they sit on are 94-600 m long, so refusing the diamond is never the answer.
+ */
+export const IC_SLIDE = 130;
 /**
  * The ramps swing out to about this far from the centre line (m) before running in to
  * merge: the road's crossing edge often ends near the motorway (its vertices keep only

@@ -17,7 +17,18 @@ import {
   type PreResult,
 } from '../gen/hydro';
 import { latticeSegments } from '../gen/lattice';
-import { motorwayEnd, MW_END_HEAD, MW_END_PROFILE, MW_END_REACH, MW_END_TAIL, MW_PROFILE_REACH, MW_SPILL, type MotorwayPiece } from '../gen/motorway';
+import {
+  IC_MERGE,
+  IC_SLIDE,
+  motorwayEnd,
+  MW_END_HEAD,
+  MW_END_PROFILE,
+  MW_END_REACH,
+  MW_END_TAIL,
+  MW_PROFILE_REACH,
+  MW_SPILL,
+  type MotorwayPiece,
+} from '../gen/motorway';
 import { FIELD_PAD, FIELD_REACH, type Fields } from '../gen/fields';
 import { POI_PAD, type PoiPatch } from '../gen/poi';
 import { NET_CELL, NET_REACH, ROAD_C, ROAD_PAD, zOnPatch, type NetCell, type RoadEdge, type RoadPatch, type SegmentPath } from '../gen/roads';
@@ -176,6 +187,51 @@ const MOTORWAY_DRAW = MW_PROFILE_REACH + 100;
  * (up to three edges out) and the room around it.
  */
 const MOTORWAY_ROADS = 2000;
+/**
+ * How far outside its chunk an interchange's crossing can lie (m). The chunk owns the
+ * straight midpoint of the crossing edge's *route*, and the road drawn there is that edge's
+ * own curve, or the piece it belongs to — at most PIECE_EDGES edges, and drawn only by the
+ * chunk owning its middle one (`pieceOf`, `pc.owner`), so the piece reaches at most
+ * 1.5 MAX_EDGE (440 m) along. Where this chunk's edge is *not* that owner it draws nothing
+ * for it and the interchange gets no ramps at all, which is a separate fault (§3.5.1).
+ *
+ * Sideways, a piece is routed (`routed`, `roomOf`) and keeps within MICRO_BAND of its
+ * end-to-end chord — 250 m for the ROAD_N, 220 m for the ROAD_D an interchange is scored
+ * on — measured to that chord as a *segment*, so it may also run that far past its own end:
+ * 440 + 250 = 690 m. (FIT_BAND and the curve's bulge bound the single-edge `curveOf` case,
+ * which is the smaller one.) Rounded up, because every value to 922 m costs the same four
+ * rings of solves, so the slack is free.
+ *
+ * Not a containment proof — a routed road is in world coordinates and consults no patch.
+ * A crossing beyond this reads no ground, so its ramps merge where they always did; it
+ * cannot read the wrong ground.
+ */
+const IC_OUT = 900;
+/**
+ * Ground the ramps of an interchange need beyond their chunk (m, 2,010): a merge IC_MERGE
+ * along the motorway, free to slide IC_SLIDE either way, each candidate's structure read
+ * over ±MW_PROFILE_REACH, all of it reckoned from a crossing up to IC_OUT out.
+ */
+const IC_GROUND = IC_OUT + IC_MERGE + IC_SLIDE + MW_PROFILE_REACH;
+/** The block of fine nodes covering `r`, as nodePatch is asked for it (a node past either edge). */
+const nodeBlock = (r: Rect) => {
+  const gx = Math.floor(r.x0 / NODE);
+  const gy = Math.floor(r.y0 / NODE);
+  return { gx, gy, w: Math.ceil(r.x1 / NODE) - gx + 1, h: Math.ceil(r.y1 / NODE) - gy + 1 };
+};
+/**
+ * The chunks whose solves a node block is read from: nodePatch takes every node from the
+ * chunk owning it, so CORE_PAD pads the cores and buys no readiness, and the node past
+ * the edge can belong to one chunk further out than the rect does.
+ */
+const blockChunks = (b: { gx: number; gy: number; w: number; h: number }): Rect => ({
+  x0: Math.floor(b.gx / NODES) * CHUNK,
+  y0: Math.floor(b.gy / NODES) * CHUNK,
+  x1: (Math.floor((b.gx + b.w - 1) / NODES) + 1) * CHUNK,
+  y1: (Math.floor((b.gy + b.h - 1) / NODES) + 1) * CHUNK,
+});
+/** The solves an interchange chunk's roads wait on, demand and gate from one reckoning. */
+const rampHydroRect = (cx: number, cy: number) => blockChunks(nodeBlock(expand(chunkRect(cx, cy), IC_GROUND)));
 /** Where a settlement's street plan may draw. */
 const planDrawRect = (s: Site) => expand(point(s), PLAN_EXTENT[s.rank] + PLAN_DRAW_PAD);
 /** Chunks whose roads a plan reads: its extent and margin, plus one lattice edge (edges are owned by their midpoint's chunk). */
@@ -228,7 +284,9 @@ const PLAN_CHUNKS = Math.ceil((PLAN_REACH + PLAN_EXTENT[TOWN] + PLAN_MARGIN + PL
 /**
  * How far (in chunks) other chunks' drawing waits on a chunk's stage: render reads the
  * roads of its 3×3, a roads task the solves of its 3×3, a solve the pre data of its window,
- * and a plan the roads round its town.
+ * and a plan the roads round its town. A roads task building an interchange waits on solves
+ * four rings out, which is too far to put in a radius every chunk pays: `stuck` takes those
+ * from the demand itself.
  */
 const STUCK_REACH = { pre: WIN_CHUNKS + 2 + PLAN_CHUNKS, hydro: 2 + PLAN_CHUNKS, roads: 1 + PLAN_CHUNKS, dem: 0, render: 0 };
 
@@ -266,6 +324,8 @@ export class ChunkManager {
   private mwRect: Rect = this.genRect;
   /** Chunks whose roads the needed plans read (beyond the roads rectangle too), as of the last schedule. */
   private planRoads: Rect[] = [];
+  /** Chunks whose roads build an interchange's ramps, and the solves each of them waits on. */
+  private rampHydro = new Map<string, { cx: number; cy: number; hydro: Rect }>();
   readonly nets = new Map<string, NetState>();
   /** Motorway pieces by net cell: cheap, but needed much further out than the lattice. */
   readonly mws = new Map<string, MwState>();
@@ -326,16 +386,26 @@ export class ChunkManager {
     let done = 0;
     let total = 0;
     const running = (since: number | undefined, weight: number) => (since === undefined ? 0 : Math.min(0.9 * weight, now - since));
-    const stage = (r: Rect, has: (c: Chunk) => boolean, weight: number, kind: 'pre' | 'hydro' | 'roads' | 'dem' | 'render') =>
+    const stage = (r: Rect, has: (c: Chunk) => boolean, weight: number, kind: 'pre' | 'hydro' | 'roads' | 'dem' | 'render', seen?: Set<string>) =>
       forChunksIn(r, (cx, cy) => {
+        if (seen?.has(chunkKey(cx, cy))) return;
+        seen?.add(chunkKey(cx, cy));
         const c = this.get(cx, cy);
         total += weight;
         if (c && has(c)) done += weight;
         // A busy chunk is working on its first missing stage.
         else if (c?.busy && firstMissing(c) === kind) done += running(c.since, weight);
       });
-    stage(this.preRect, (c) => !!c.pre, w.pre, 'pre');
-    stage(this.hydroRect, (c) => !!c.hydro, w.hydro, 'hydro');
+    // The solves an interchange's ramps wait on, and the windows behind them, lie outside
+    // hydroRect and preRect: rectangles that overlap those and each other (IC_GAP is 5 km
+    // and these are 4.6 km across), so each chunk counts once, or the bar takes its shape
+    // from wherever the interchanges happen to be.
+    const preSeen = new Set<string>();
+    stage(this.preRect, (c) => !!c.pre, w.pre, 'pre', preSeen);
+    for (const v of this.rampHydro.values()) stage(expand(v.hydro, WIN_CHUNKS * CHUNK), (c) => !!c.pre, w.pre, 'pre', preSeen);
+    const hydroSeen = new Set<string>();
+    stage(this.hydroRect, (c) => !!c.hydro, w.hydro, 'hydro', hydroSeen);
+    for (const v of this.rampHydro.values()) stage(v.hydro, (c) => !!c.hydro, w.hydro, 'hydro', hydroSeen);
     stage(this.roadsRect, (c) => !!c.roads, w.roads, 'roads');
     stage(this.genRect, (c) => !!c.dem, w.dem, 'dem');
     stage(this.genRect, (c) => !!c.bitmap, w.render, 'render');
@@ -380,8 +450,18 @@ export class ChunkManager {
         this.givenUp.delete(g);
         continue;
       }
-      const r = STUCK_REACH[firstMissing(g)];
+      const kind = firstMissing(g);
+      const r = STUCK_REACH[kind];
       if (Math.abs(g.cx - cx) <= r && Math.abs(g.cy - cy) <= r) return true;
+      if (kind !== 'pre' && kind !== 'hydro') continue;
+      // A solve an interchange's own chunk waits on lies further out than any of those
+      // rings: that chunk can't be given roads, so it and whatever waits on its roads
+      // can't be drawn either.
+      const gr = chunkRect(g.cx, g.cy);
+      for (const v of this.rampHydro.values()) {
+        if (Math.abs(v.cx - cx) > STUCK_REACH.roads || Math.abs(v.cy - cy) > STUCK_REACH.roads) continue;
+        if (intersects(gr, kind === 'pre' ? expand(v.hydro, WIN_CHUNKS * CHUNK) : v.hydro)) return true;
+      }
     }
     return false;
   }
@@ -413,6 +493,11 @@ export class ChunkManager {
     this.keepBitmapRect = expand(union, 2 * CHUNK);
     this.forgetRect = expand(actual, FORGET);
     this.focus = focus;
+    // What the plans and the interchanges ask for, taken before forget() reads it: a demand
+    // taken after would be a frame old, and one flipping between frames would be dropped on
+    // exactly the frames it is live. (schedule() takes it again for the pool's own calls.)
+    this.planRoads = this.neededPlans().map(planRoadsRect);
+    this.rampHydro = this.rampDemand();
     this.forget();
     this.schedule();
   }
@@ -423,9 +508,15 @@ export class ChunkManager {
     // Chunks just outside the forget rectangle survive one more ring, so every
     // retained chunk keeps the neighbours whose solves its DEM blends.
     const tileKeep = expand(this.forgetRect, CHUNK);
+    // The ground an interchange's ramps read, and the pre data behind it: held explicitly,
+    // because it reaches further out than GEN_LEAD covers, and dropping it would leave that
+    // interchange's chunk waiting on solves nothing is making any more. Today's numbers put
+    // the furthest of it 56 m inside tileKeep anyway, so this holds nothing yet; it goes
+    // live the moment IC_GROUND passes 2,032 m and takes a fifth ring of solves.
+    const rampKeep = [...this.rampHydro.values()].map((v) => expand(v.hydro, WIN_CHUNKS * CHUNK));
     for (const [k, c] of this.chunks) {
       const r = chunkRect(c.cx, c.cy);
-      if (!intersects(r, tileKeep)) {
+      if (!intersects(r, tileKeep) && !rampKeep.some((q) => intersects(r, q))) {
         c.bitmap?.close();
         this.chunks.delete(k);
         this.dropPlans(r);
@@ -491,6 +582,7 @@ export class ChunkManager {
 
   schedule(): void {
     this.planRoads = this.neededPlans().map(planRoadsRect);
+    this.rampHydro = this.rampDemand();
     // Every net cell and motorway cell something waits on (otherwise it waits forever):
     // lattice edges within EDGE_REACH of every chunk getting roads (plans pull some beyond
     // the roads rectangle) and the sites a drawn chunk's surface and plans read; motorway
@@ -509,6 +601,33 @@ export class ChunkManager {
       if (!next.length) return;
       this.dispatch(next);
     }
+  }
+
+  /**
+   * The chunks whose roads build an interchange's ramps, and the solves each one waits on:
+   * the ramps are built by the chunk holding the straight midpoint of the crossing edge's
+   * route (`latticeSegments`), and merging them at grade reads the ground IC_GROUND beyond
+   * it. Taken here so the demand and the gate in roadsReady are one reckoning; everywhere
+   * else is untouched, so a view with no interchange in it costs what it did before.
+   */
+  private rampDemand(): Map<string, { cx: number; cy: number; hydro: Rect }> {
+    const out = new Map<string, { cx: number; cy: number; hydro: Rect }>();
+    const rects = [this.roadsRect, ...this.planRoads];
+    // One pass over the edges of every cell those rectangles read (a cell holds some two
+    // thousand), by whole chunks: the gate reads its cells from a chunk, which may stick
+    // out of the rectangle by nearly one.
+    for (const e of this.edgesNear(wholeChunks(bounds(rects)))) {
+      if (!e.interchange) continue;
+      const cx = Math.floor((e.route[0] + e.route[2]) / 2 / CHUNK);
+      const cy = Math.floor((e.route[1] + e.route[3]) / 2 / CHUNK);
+      const k = chunkKey(cx, cy);
+      if (out.has(k)) continue;
+      // Only where that chunk is one being given roads, as pick() offers them.
+      const r = chunkRect(cx, cy);
+      if (!rects.some((q) => intersects(r, q))) continue;
+      out.set(k, { cx, cy, hydro: rampHydroRect(cx, cy) });
+    }
+    return out;
   }
 
   // --- Net cells (settlements + road corridors) -------------------------------
@@ -861,7 +980,21 @@ export class ChunkManager {
 
   private roadsReady(c: Chunk): boolean {
     const r = chunkRect(c.cx, c.cy);
-    return this.ring(c, (n) => !!n?.hydro && !!n.pre) && this.netsReady(expand(r, EDGE_REACH)) && this.mwsReady(expand(r, MW_SPILL + MOTORWAY_ROADS));
+    if (!this.ring(c, (n) => !!n?.hydro && !!n.pre)) return false;
+    if (!this.netsReady(expand(r, EDGE_REACH)) || !this.mwsReady(expand(r, MW_SPILL + MOTORWAY_ROADS))) return false;
+    // Where it builds an interchange it waits on the ground its ramps merge on as well, so
+    // the merge lands where the land puts it and not where the scheduling happened to.
+    const ramp = this.rampHydro.get(c.key);
+    return !ramp || this.hydroIn(ramp.hydro);
+  }
+
+  /** Every chunk overlapping `r` has its solve. */
+  private hydroIn(r: Rect): boolean {
+    let ok = true;
+    forChunksIn(r, (cx, cy) => {
+      if (ok && !this.get(cx, cy)?.hydro) ok = false;
+    });
+    return ok;
   }
 
   private demReady(c: Chunk): boolean {
@@ -886,23 +1019,31 @@ export class ChunkManager {
     // those roads, the solves under them and the pre data those need are made too.
     const planRoads = this.planRoads;
     const planHydro = planRoads.map((r) => expand(r, CHUNK));
+    // The solves an interchange's ramps read, and the pre data behind them: asked for here
+    // as a plan's are, because pick() only ever visits chunks inside preBox — left out,
+    // they would never be made and the interchange's chunk would wait on them for good.
+    const rampHydro = [...this.rampHydro.values()].map((v) => v.hydro);
+    // The windows behind every solve asked for off a rectangle, and the box holding the lot.
+    // A chunk inside the box but in none of them is wanted by nothing and kept by nothing,
+    // so it must not be made: pre tasks go first, and land made and dropped again every
+    // frame is what GEN_LEAD exists to prevent.
+    const preNeed = [this.preRect, ...[...planHydro, ...rampHydro].map((q) => expand(q, WIN_CHUNKS * CHUNK))];
     let preBox = this.preRect;
-    for (const r of planHydro) {
-      const q = expand(r, WIN_CHUNKS * CHUNK);
+    for (const q of preNeed)
       preBox = { x0: Math.min(preBox.x0, q.x0), y0: Math.min(preBox.y0, q.y0), x1: Math.max(preBox.x1, q.x1), y1: Math.max(preBox.y1, q.y1) };
-    }
     const now = performance.now();
     forChunksIn(preBox, (cx, cy) => {
+      const r = chunkRect(cx, cy);
+      if (!preNeed.some((q) => intersects(r, q))) return;
       const c = this.ensure(cx, cy);
       if (c.busy || c.failed || resting(c, now)) return;
-      const r = chunkRect(cx, cy);
       const d = Math.hypot((cx + 0.5) * CHUNK - fx, (cy + 0.5) * CHUNK - fy);
       if (!c.pre) {
         pres.push({ chunk: c, kind: 'pre', priority: d });
         return;
       }
       if (!c.hydro) {
-        if (intersects(r, this.hydroRect) || planHydro.some((q) => intersects(r, q)))
+        if (intersects(r, this.hydroRect) || planHydro.some((q) => intersects(r, q)) || rampHydro.some((q) => intersects(r, q)))
           consider({ chunk: c, kind: 'hydro', priority: d }, () => this.hydroReady(c));
         return;
       }
