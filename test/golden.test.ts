@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { capture, PLACES } from '../dev/capture';
+import { capture, IC_PLACE, PLACES } from '../dev/capture';
 
 /**
  * The land itself, pinned: a digest of every task's output (pre, hydro, net, motorway,
@@ -18,6 +18,21 @@ describe('golden land', () => {
     const sorted = Object.fromEntries(Object.entries(digests).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)));
     console.log(`golden: ${Object.keys(sorted).length} outputs`);
     await expect(`${JSON.stringify(sorted, null, 1)}\n`).toMatchFileSnapshot('golden/seed7-place0.json');
+  }, 300_000);
+
+  /**
+   * …and the land round a diamond interchange, which the place above holds none of: the
+   * ramps, and with them everything the merge is reckoned from — the solves `rampGround`
+   * reads, `classifyMotorways` over the chain, `mergeable`, and the slide itself. Its four
+   * merges slide 76-106 m to reach ground at grade, so this file moves if any of that
+   * breaks, where the place above cannot tell.
+   */
+  it('is the land the digests hold where a motorway has an interchange', async () => {
+    const digests: Record<string, string> = {};
+    await capture(7, [IC_PLACE], (key, o) => (digests[key] = digest(o)));
+    const sorted = Object.fromEntries(Object.entries(digests).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)));
+    console.log(`golden interchange: ${Object.keys(sorted).length} outputs`);
+    await expect(`${JSON.stringify(sorted, null, 1)}\n`).toMatchFileSnapshot('golden/seed7-interchange.json');
   }, 300_000);
 
   it('digests tell apart what differs, and only that', () => {

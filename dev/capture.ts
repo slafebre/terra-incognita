@@ -7,6 +7,14 @@ import { setRegionOverride } from '../src/gen/terrain';
 import type { TaskRequest, TaskResult } from '../src/worker/protocol';
 import { runTask } from '../src/worker/tasks';
 
+/**
+ * A place standing on a diamond interchange, where an N road crosses a motorway and all
+ * four ramps are drawn. The other places hold none — interchanges are IC_GAP (5 km) apart
+ * at the closest — so without this one nothing pins the ramps at all, and the whole path
+ * from `ChunkManager.rampGround` to `mergeable` to `diamondRamps` is unwatched. Here the
+ * merge slides 76-106 m to reach ground at grade, so a digest moves if any of it breaks.
+ */
+export const IC_PLACE: [number, number, number] = [52_417, 30_186, NaN];
 /** Places: centre (world m) and forced region (NaN: the region field). */
 export const PLACES: [number, number, number][] = [
   [100_750, 50_600, NaN],
@@ -14,6 +22,8 @@ export const PLACES: [number, number, number][] = [
   [23_400, -77_100, 0.42],
   [61_800, 88_300, 0.65],
   [-90_200, -30_700, 0.9],
+  // Last, so the places before it keep the indices their comparison files were written with.
+  IC_PLACE,
 ];
 /** Half the side of the view made at each place (m). */
 const HALF = 700;
