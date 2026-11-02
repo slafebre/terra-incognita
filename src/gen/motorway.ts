@@ -1,7 +1,7 @@
 import { gnoise, ND, smoothstep } from '../lib/noise';
 import { hash3 } from '../lib/hash';
-import { coarseEpochNow, type CoarseField, lakesOf, NODE } from './hydro';
-import { NET_CELL, type RoadPatch, ringDisc } from './roads';
+import { coarseEpochNow, type CoarseField, lakesOf } from './hydro';
+import { NET_CELL, ringDisc } from './roads';
 import type { Lattice, SeedView } from './seeds';
 import { HAMLET, type Rank, type Settlements, type Site, TOWN, VILLAGE } from './settle';
 import type { Terrain } from './terrain';
@@ -1608,29 +1608,20 @@ const MIN_STRUCT = 3;
 export const MW_PROFILE_REACH = (PROFILE_HALF + MEDIAN + MIN_STRUCT - 1) * OUT_STEP;
 
 /**
- * Classes the points of each motorway by the ground under them: the fine nodes round the
- * chunk (each from its own chunk's solve, so every chunk reads them alike; reaching far
- * beyond it), or none (all on the surface) where they are missing. The road's height is
- * that ground averaged along it over ±PROFILE_HALF points, the pieces joined end to end
- * (a chunk is given those within ~700 m, so the average round its own points is whole):
- * so only valleys deep and narrow against it are bridged, hills cut or tunnelled. (A
- * profile from the coarse surface, which lies some 15 m off the map's ground in places,
- * bridged long stretches of flat land.)
+ * Classes the points of each motorway by the ground under them, read through `at` — the
+ * fine nodes, from a patch (`zOnPatch`) or straight from the solves that own them, NaN
+ * where there are none, and every point all on the surface where no reader is given. Each
+ * node comes from its own chunk's solve, so every reader of the same node has the same
+ * value, and the class of a point is the same wherever it is reckoned.
+ *
+ * The road's height is that ground averaged along it over ±PROFILE_HALF points, the pieces
+ * joined end to end (a chunk is given those within MOTORWAY_DRAW, so the average round its
+ * own points is whole): so only valleys deep and narrow against it are bridged, hills cut
+ * or tunnelled. (A profile from the coarse surface, which lies some 15 m off the map's
+ * ground in places, bridged long stretches of flat land.)
  */
-export function classifyMotorways(lines: Float64Array[], p?: RoadPatch, ends?: ArrayLike<number>): MotorwayDraw[] {
-  const ground = (x: number, y: number) => {
-    if (!p) return NaN;
-    const u = x / NODE - p.gx;
-    const v = y / NODE - p.gy;
-    if (u < 0 || v < 0 || u > p.w - 1.001 || v > p.h - 1.001) return NaN;
-    const i = Math.floor(u);
-    const j = Math.floor(v);
-    const k = j * p.w + i;
-    const fu = u - i;
-    const fv = v - j;
-    const z = p.zE;
-    return (z[k] * (1 - fu) + z[k + 1] * fu) * (1 - fv) + (z[k + p.w] * (1 - fu) + z[k + p.w + 1] * fu) * fv;
-  };
+export function classifyMotorways(lines: Float64Array[], at?: (x: number, y: number) => number, ends?: ArrayLike<number>): MotorwayDraw[] {
+  const ground = at ?? (() => NaN);
   // Chains of pieces meeting end to start (their joint shared), each in order.
   const key = (xy: Float64Array, k: number) => `${xy[k]},${xy[k + 1]}`;
   const byStart = new Map<string, number>();

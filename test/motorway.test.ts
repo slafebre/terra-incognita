@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { CoarseField } from '../src/gen/hydro';
 import { classifyMotorways, MW_ANGLE, MW_BRIDGE_FREE, MW_CELL, MW_EDGE, MW_END_TAIL, MW_LEVEL, MW_RMIN, MW_SPILL, MW_TUNNEL, MW_VIADUCT, Motorways, MotorwayLookup, motorwayEnd, surfaceLines, tightestRadius, type MotorwayPiece } from '../src/gen/motorway';
-import { NET_REACH } from '../src/gen/roads';
+import { NET_REACH, zOnPatch } from '../src/gen/roads';
 import { expand, SeedStore, SeedView } from '../src/gen/seeds';
 import { Settlements } from '../src/gen/settle';
 import { setRegionOverride, Terrain } from '../src/gen/terrain';
@@ -98,7 +98,7 @@ describe('motorways', () => {
       }
     const a = xy.slice(0, 2 * 31);
     const b = xy.slice(2 * 30);
-    const ms = classifyMotorways([b, a], patch);
+    const ms = classifyMotorways([b, a], (x, y) => zOnPatch(patch, x, y));
     const cls = (x: number) => {
       const i = Math.round((x - 160) / 25);
       return i <= 30 ? ms[1].cls[i] : ms[0].cls[i - 30];
@@ -152,12 +152,12 @@ describe('motorways', () => {
     for (let j = 0; j < 9; j++) for (let i = 0; i < w; i++) patch.zE[j * w + i] = i * 16 > 1450 ? 160 : 100;
 
     // Left to itself the drawing ends underground.
-    const [whole] = classifyMotorways([xy], patch);
+    const [whole] = classifyMotorways([xy], (x, y) => zOnPatch(patch, x, y));
     expect(whole.cls[n - 1]).toBe(MW_TUNNEL);
     expect(whole.xy.length).toBe(2 * n);
 
     // Told that this end is a motorway's, it stops where the road leaves the hill.
-    const [cut] = classifyMotorways([xy], patch, [MW_END_TAIL]);
+    const [cut] = classifyMotorways([xy], (x, y) => zOnPatch(patch, x, y), [MW_END_TAIL]);
     const k = cut.xy.length / 2;
     expect(k).toBeLessThan(n);
     expect(cut.cls[k - 1]).not.toBe(MW_TUNNEL);

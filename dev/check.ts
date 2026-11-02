@@ -37,7 +37,7 @@ import {
 } from '../src/gen/motorway';
 import { motorwayTerminus, vertexPos } from '../src/gen/lattice';
 import { CoarseField } from '../src/gen/hydro';
-import { NET_REACH } from '../src/gen/roads';
+import { NET_REACH, zOnPatch } from '../src/gen/roads';
 import { expand, SeedStore, SeedView } from '../src/gen/seeds';
 import { FARM, HAMLET, Settlements } from '../src/gen/settle';
 import { setRegionOverride, Terrain } from '../src/gen/terrain';
@@ -346,7 +346,7 @@ async function checkArea(R: number, areaNo: number): Promise<{ km: number; km2: 
     }
 
     if (!motorways.length) continue;
-    const mws = classifyMotorways(motorways, poi, motorwayEnds);
+    const mws = classifyMotorways(motorways, poi && ((x, y) => zOnPatch(poi, x, y)), motorwayEnds);
     for (const mw of mws)
       for (let i = 2; i < mw.xy.length; i += 2)
         if (inChunk(mw.xy[i], mw.xy[i + 1])) km += Math.hypot(mw.xy[i] - mw.xy[i - 2], mw.xy[i + 1] - mw.xy[i - 1]) / 1000;

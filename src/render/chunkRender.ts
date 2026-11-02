@@ -4,7 +4,7 @@ import { smoothPolyline } from '../lib/polyline';
 import { COVER } from '../gen/landcover';
 import { type Fields, layFields } from '../gen/fields';
 import { placePois, type PoiPatch } from '../gen/poi';
-import type { SegmentPath } from '../gen/roads';
+import { zOnPatch, type SegmentPath } from '../gen/roads';
 import type { TownPlan } from '../gen/town';
 import { cellCoverage, drawCoverSymbols, FILLS } from './landcover';
 import { drawBuildings, drawSquares } from './buildings';
@@ -95,7 +95,7 @@ export function renderChunk({ cx, cy, dem, cover, water, streams, roads, motorwa
   // Motorways against the ground (viaducts, tunnels, earthworks); where they run level
   // they clear the woods and fields beside them (under a viaduct and over a tunnel the
   // land runs on).
-  const mws = classifyMotorways(lines, poi, motorwayEnds);
+  const mws = classifyMotorways(lines, poi && ((x, y) => zOnPatch(poi, x, y)), motorwayEnds);
   const motorways = mws.flatMap((m) => runsOf(m, (c) => c === MW_LEVEL));
   const canvas = new OffscreenCanvas(pxSize, pxSize);
   const ctx = canvas.getContext('2d')!;
