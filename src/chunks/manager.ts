@@ -17,7 +17,7 @@ import {
   type PreResult,
 } from '../gen/hydro';
 import { latticeSegments } from '../gen/lattice';
-import { motorwayEnd, MW_END_HEAD, MW_END_PROFILE, MW_END_REACH, MW_END_TAIL, MW_SPILL, type MotorwayPiece } from '../gen/motorway';
+import { motorwayEnd, MW_END_HEAD, MW_END_PROFILE, MW_END_REACH, MW_END_TAIL, MW_PROFILE_REACH, MW_SPILL, type MotorwayPiece } from '../gen/motorway';
 import { FIELD_PAD, FIELD_REACH, type Fields } from '../gen/fields';
 import { POI_PAD, type PoiPatch } from '../gen/poi';
 import { NET_CELL, NET_REACH, ROAD_C, ROAD_PAD, zOnPatch, type NetCell, type RoadEdge, type RoadPatch, type SegmentPath } from '../gen/roads';
@@ -166,10 +166,11 @@ function pieceBox(p: MotorwayPiece): Rect {
 }
 /**
  * Motorways passing this near a chunk (m) are given to it: it draws those within 64 m
- * (they are wide), and the road's height round its points is the ground averaged along
- * the motorway over ±500 m (gen/motorway.ts), so it needs them that far beyond.
+ * (they are wide), and the road's height round its points is read from the ground along
+ * the motorway over ±MW_PROFILE_REACH (gen/motorway.ts), so it needs them that far beyond,
+ * and a little further for a point just outside it.
  */
-const MOTORWAY_DRAW = 700;
+const MOTORWAY_DRAW = MW_PROFILE_REACH + 100;
 /**
  * …and this near, its roads keep clear of them: every run a chunk's edges belong to
  * (up to three edges out) and the room around it.

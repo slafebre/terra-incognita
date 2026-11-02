@@ -1590,6 +1590,14 @@ const PROFILE_HALF = 20;
 const MEDIAN = 2;
 /** Viaducts and tunnels shorter than this many points are left as earthworks. (MIN_RUN above is a length, and another rule's.) */
 const MIN_STRUCT = 3;
+/**
+ * How far either side of a point its class is read from (m, 600): the ground averaged over
+ * ±PROFILE_HALF points at OUT_STEP, the median over ±MEDIAN of those, and the run pruning
+ * below, which only has to tell a run of MIN_STRUCT points from a shorter one and so reads
+ * MIN_STRUCT - 1 points out. Ground this far around a point settles its class, where the
+ * averaging alone would suggest ±500 m.
+ */
+export const MW_PROFILE_REACH = (PROFILE_HALF + MEDIAN + MIN_STRUCT - 1) * OUT_STEP;
 
 /**
  * Classes the points of each motorway by the ground under them: the fine nodes round the
