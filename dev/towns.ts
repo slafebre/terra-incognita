@@ -7,7 +7,7 @@
 // pipeline's output (the plans' inputs), so plans can be tuned without rerunning it. OUT=<prefix> names the
 // files (default towns), one per settlement, plus <prefix>-sheet.svg of all (COLS per row).
 // SNAP=<file> (a snapshot from the app's info panel) plans the settlement nearest its view instead
-// (TOWNS=1 / HAMLETS=1: the nearest of that rank).
+// (TOWNS=1 / VILLAGES=1 / HAMLETS=1: the nearest of that rank; NEAR=x,y: nearest that point, not the view).
 import { ChunkManager } from '../src/chunks/manager';
 import { CoarseField, NODE } from '../src/gen/hydro';
 import { SeedStore, SeedView } from '../src/gen/seeds';
@@ -57,12 +57,12 @@ function findSites(R: number, n: number): Site[] {
 function snapSite(s: NonNullable<typeof snap>): Site | undefined {
   const store = new SeedStore(s.seed ?? undefined);
   store.load(s);
-  const [x, y] = s.at;
+  const [x, y] = process.env.NEAR ? process.env.NEAR.split(',').map(Number) : s.at;
   const D = 3000;
   const view = new SeedView(store.payloadFor({ x0: x, y0: y, x1: x + 16, y1: y + 16 }, { x0: x - D - NET_REACH, y0: y - D - NET_REACH, x1: x + D + NET_REACH, y1: y + D + NET_REACH }));
   const t = new Terrain(view);
   const set = new Settlements(new CoarseField(t, view), t, view);
-  const ranks: Rank[] = process.env.TOWNS || process.env.HAMLETS ? [RANK] : [TOWN, VILLAGE, HAMLET];
+  const ranks: Rank[] = process.env.TOWNS || process.env.VILLAGES || process.env.HAMLETS ? [RANK] : [TOWN, VILLAGE, HAMLET];
   const sites = ranks.flatMap((rank) => set.sitesIn(rank, x - D, y - D, x + D, y + D));
   return sites.sort((a, b) => Math.hypot(a.x - x, a.y - y) - Math.hypot(b.x - x, b.y - y))[0];
 }

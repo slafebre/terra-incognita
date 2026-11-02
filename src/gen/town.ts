@@ -190,6 +190,19 @@ const LINK_GRADE = 0.16;
 const LINK_TRY = [1, 0.8, 1.25, 0.65, 1.5];
 /** A routed link stays within LINK_BAND × its radius of the centre, costs length × (1 + (grade / LINK_ROUTE_GRADE)²) and LINK_BRIDGE m more per river node. */
 const LINK_BAND = [0.4, 1.7];
+/**
+ * A link's shape: not one smooth curve but straight runs with angled bends, like a
+ * lane grown along field edges. Runs LINK_RUN m long (the shorter the nearer the centre:
+ * at LINK_NEAR × the core's radius and in, the shortest), between points pushed off the
+ * smooth curve by up to LINK_SWAY × a run (more near the centre); the first and last
+ * LINK_LEAVE m keep to the curve, square off the roads. Bends are rounded by cutting
+ * their corners LINK_ROUND of the way along each run.
+ */
+const LINK_RUN = [40, 100];
+const LINK_NEAR = [0.5, 1];
+const LINK_SWAY = [0.4, 0.22];
+const LINK_LEAVE = 18;
+const LINK_ROUND = 0.2;
 const LINK_ROUTE_GRADE = 0.07;
 const LINK_BRIDGE = 150;
 /**
@@ -1400,6 +1413,85 @@ export function planTown({ site, roads, patch: p, motorways = [] }: PlanInput): 
      * not towards the other end: across a straight road's two arms, the other end
      * lies on the road's own line.)
      */
+    /** Points pts rounded (`passes` of Chaikin's corner cutting, cutting `cut` of each piece; ends fixed) and resampled every STEP m. */
+    const polish = (pts: [number, number][], passes: number, cut = 0.25): [number[], number[]] => {
+      let sm = pts;
+      for (let pass = 0; pass < passes; pass++) {
+        const nx3: [number, number][] = [sm[0]];
+        for (let q = 0; q + 1 < sm.length; q++) {
+          const [ax2, ay2] = sm[q];
+          const [bx2, by2] = sm[q + 1];
+          if (q > 0) nx3.push([(1 - cut) * ax2 + cut * bx2, (1 - cut) * ay2 + cut * by2]);
+          if (q + 2 < sm.length) nx3.push([cut * ax2 + (1 - cut) * bx2, cut * ay2 + (1 - cut) * by2]);
+        }
+        nx3.push(sm[sm.length - 1]);
+        sm = nx3;
+      }
+      const xs: number[] = [sm[0][0]];
+      const ys: number[] = [sm[0][1]];
+      let carry = 0;
+      for (let q = 1; q < sm.length; q++) {
+        const [ax2, ay2] = sm[q - 1];
+        const [bx2, by2] = sm[q];
+        const l = Math.hypot(bx2 - ax2, by2 - ay2);
+        let t = STEP - carry;
+        while (t < l) {
+          xs.push(ax2 + ((bx2 - ax2) * t) / l);
+          ys.push(ay2 + ((by2 - ay2) * t) / l);
+          t += STEP;
+        }
+        carry = l - (t - STEP);
+      }
+      const [ex, ey] = sm[sm.length - 1];
+      if (Math.hypot(ex - xs[xs.length - 1], ey - ys[ys.length - 1]) > 1) {
+        xs.push(ex);
+        ys.push(ey);
+      } else {
+        xs[xs.length - 1] = ex;
+        ys[ys.length - 1] = ey;
+      }
+      return [xs, ys];
+    };
+    /**
+     * Curve xs, ys made crooked: straight runs between points pushed off it, bends
+     * rounded; shorter runs and sharper bends near the centre (see LINK_RUN).
+     */
+    const crook = (xs: number[], ys: number[]): [number[], number[]] => {
+      const n = xs.length;
+      const s: number[] = [0];
+      for (let q = 1; q < n; q++) s.push(s[q - 1] + Math.hypot(xs[q] - xs[q - 1], ys[q] - ys[q - 1]));
+      const total = s[n - 1];
+      const at = (u: number): [number, number, number, number] => {
+        let q = 1;
+        while (q < n - 1 && s[q] < u) q++;
+        const t = (u - s[q - 1]) / (s[q] - s[q - 1] || 1);
+        const dx = xs[q] - xs[q - 1];
+        const dy = ys[q] - ys[q - 1];
+        const l = Math.hypot(dx, dy) || 1;
+        return [xs[q - 1] + t * dx, ys[q - 1] + t * dy, -dy / l, dx / l];
+      };
+      // Near the centre: the link's closest approach, as a share of the core's radius.
+      let dmin = Infinity;
+      for (let q = 0; q < n; q++) dmin = Math.min(dmin, Math.hypot(xs[q] - cx, ys[q] - cy));
+      const far = smoothstep(LINK_NEAR[0], LINK_NEAR[1], dmin / core);
+      const run = lerp(LINK_RUN[0], LINK_RUN[1], far);
+      const sway = lerp(LINK_SWAY[0], LINK_SWAY[1], far);
+      const inner = total - 2 * LINK_LEAVE;
+      if (inner < run) return [xs, ys];
+      const m = Math.max(2, Math.round(inner / run));
+      const pts: [number, number][] = [[xs[0], ys[0]], at(LINK_LEAVE).slice(0, 2) as [number, number]];
+      // Bends alternate mostly, sometimes not: a lane wanders, it doesn't zigzag.
+      let side = rand() < 0.5 ? 1 : -1;
+      for (let q = 1; q < m; q++) {
+        const u = LINK_LEAVE + (inner * (q + (rand() - 0.5) * 0.5)) / m;
+        const [x, y, nx, ny] = at(u);
+        side = rand() < 0.7 ? -side : side;
+        const o = side * sway * run * (0.4 + 0.6 * rand());
+        pts.push([x + nx * o, y + ny * o]);
+      }
+      pts.push(at(total - LINK_LEAVE).slice(0, 2) as [number, number], [xs[n - 1], ys[n - 1]]);
+      return polish(pts, 2, LINK_ROUND);
+    };
     const link = (A: ReturnType<typeof armsAt>[number], B: ReturnType<typeof armsAt>[number], mid: number) => {
       const into = (hh: typeof A): [number, number] => {
         const sd = -hh.ty * Math.cos(mid) + hh.tx * Math.sin(mid) > 0 ? 1 : -1;
@@ -1498,37 +1590,7 @@ export function planTown({ site, roads, patch: p, motorways = [] }: PlanInput): 
       for (let k = from[goal]; k >= 0 && k !== start; k = from[k]) pts.push(posOf(k));
       pts.push([A.x, A.y]);
       pts.reverse();
-      // Smoothed (Chaikin, ends fixed) and resampled every STEP m.
-      let sm = pts;
-      for (let pass = 0; pass < 3; pass++) {
-        const nx3: [number, number][] = [sm[0]];
-        for (let q = 0; q + 1 < sm.length; q++) {
-          const [ax2, ay2] = sm[q];
-          const [bx2, by2] = sm[q + 1];
-          if (q > 0) nx3.push([0.75 * ax2 + 0.25 * bx2, 0.75 * ay2 + 0.25 * by2]);
-          if (q + 2 < sm.length) nx3.push([0.25 * ax2 + 0.75 * bx2, 0.25 * ay2 + 0.75 * by2]);
-        }
-        nx3.push(sm[sm.length - 1]);
-        sm = nx3;
-      }
-      const xs: number[] = [sm[0][0]];
-      const ys: number[] = [sm[0][1]];
-      let carry = 0;
-      for (let q = 1; q < sm.length; q++) {
-        const [ax2, ay2] = sm[q - 1];
-        const [bx2, by2] = sm[q];
-        const l = Math.hypot(bx2 - ax2, by2 - ay2);
-        let t = STEP - carry;
-        while (t < l) {
-          xs.push(ax2 + ((bx2 - ax2) * t) / l);
-          ys.push(ay2 + ((by2 - ay2) * t) / l);
-          t += STEP;
-        }
-        carry = l - (t - STEP);
-      }
-      xs.push(B.x);
-      ys.push(B.y);
-      return [xs, ys];
+      return polish(pts, 3);
     };
     // Each gap between neighbouring arms (as seen at r0), tried at r0 and, failing
     // that, a little inside and outside it.
@@ -1555,11 +1617,14 @@ export function planTown({ site, roads, patch: p, motorways = [] }: PlanInput): 
         const B = at[after < 0 ? 0 : after];
         const A = at[((after < 0 ? 0 : after) - 1 + at.length) % at.length];
         if (A.li !== arms[i].li || B.li !== arms[(i + 1) % arms.length].li) continue;
-        // A smooth curve first; where that fails, a route over the ground. It carries
-        // the lesser of the two roads it joins (a bypass may take over below).
+        // A crooked lane round the curve first (twice, bending differently); where that
+        // fails, a route over the ground. It carries the lesser of the two roads it joins
+        // (a bypass may take over below).
         let ok = false;
         const cls = Math.max(A.cls, B.cls, ROAD_D);
-        for (const [xs, ys] of [link(A, B, mid), f >= LINK_TRY[1] ? route(A, B, r0 * f, mid, gap) : [[], []]]) {
+        const [lx, ly] = link(A, B, mid);
+        for (const shape of [() => crook(lx, ly), () => crook(lx, ly), () => (f >= LINK_TRY[1] ? route(A, B, r0 * f, mid, gap) : [[], []])]) {
+          const [xs, ys] = shape();
           if (!xs.length) continue;
           ok = tryStreet(xs, ys, organic, 0, cls, `${site.id}#d${made}`);
           linkTries.push({ xy: xs.flatMap((x, q) => [x, ys[q]]), made: ok });
