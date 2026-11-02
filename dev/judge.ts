@@ -101,7 +101,7 @@ export const SEAM_BUDGETS: Record<string, number> = {
   'mw-junction': 0, // the junction as drawn within MW_SNAP_CLEAR: what the snap guarantees
   'poi-on-mw': 0, // a symbol on the carriageway or a ramp
   'mw-site': 0, // a hamlet or a farm drawn on a site MW_SITE says the network leaves out
-  'ramp-merge': Infinity, // merging on a viaduct or in a tunnel: ramps are not fitted to the terrain
+  'ramp-merge': Infinity, // merging on a structure: the slide clears every case measured, but not a merge with no grade within IC_SLIDE, nor one in a motorway end's blind stretch
   'ramp-crossing': Infinity, // a ramp crossed without a junction: the network cannot see ramps
   'mw-alongside': Infinity, // a way within MW_EDGE without crossing
   'mw-cross-angle': Infinity, // a crossing shallower than 35°

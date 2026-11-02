@@ -1586,7 +1586,7 @@ const RING_SAMPLES = 16;
  * edge still in the water after fitting is routed on its own. Where no way round
  * fits, the route crosses at the narrowest place (a bridge or causeway).
  */
-export function routeCurves(tasks: SegmentTask[], p: RoadPatch, motorways: ArrayLike<number>[] = []): SegmentPath[] {
+export function routeCurves(tasks: SegmentTask[], p: RoadPatch, motorways: ArrayLike<number>[] = [], merge?: ArrayLike<number>[]): SegmentPath[] {
   const { w, h } = p;
   const mwDist = lineDistance(motorways, FIT_MOTORWAY);
   const isLake = (k: number) => !Number.isNaN(p.lake[k]);
@@ -1896,7 +1896,7 @@ export function routeCurves(tasks: SegmentTask[], p: RoadPatch, motorways: Array
   for (const t of tasks) {
     if (!t.interchange) continue;
     const road = out.find((g) => !g.ramp && (g.key === t.key || g.key.split('+').includes(t.key)));
-    if (road) diamondRamps(road.xy, motorways).forEach((xy, i) => out.push({ key: `ic:${t.key}:${i}`, cls: ROAD_C, xy: Float32Array.from(xy), ramp: true }));
+    if (road) diamondRamps(road.xy, motorways, merge).forEach((xy, i) => out.push({ key: `ic:${t.key}:${i}`, cls: ROAD_C, xy: Float32Array.from(xy), ramp: true }));
   }
   return out.flatMap(cutAtRings);
 

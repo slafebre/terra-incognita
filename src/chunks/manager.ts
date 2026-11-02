@@ -18,8 +18,10 @@ import {
 } from '../gen/hydro';
 import { latticeSegments } from '../gen/lattice';
 import {
+  classifyMotorways,
   IC_MERGE,
   IC_SLIDE,
+  mergeable,
   motorwayEnd,
   MW_END_HEAD,
   MW_END_PROFILE,
@@ -31,7 +33,7 @@ import {
 } from '../gen/motorway';
 import { FIELD_PAD, FIELD_REACH, type Fields } from '../gen/fields';
 import { POI_PAD, type PoiPatch } from '../gen/poi';
-import { NET_CELL, NET_REACH, ROAD_C, ROAD_PAD, zOnPatch, type NetCell, type RoadEdge, type RoadPatch, type SegmentPath } from '../gen/roads';
+import { NET_CELL, NET_REACH, ROAD_C, ROAD_PAD, zOnNodes, zOnPatch, type NetCell, type RoadEdge, type RoadPatch, type SegmentPath } from '../gen/roads';
 import { expand, intersects, SeedStore, type Rect } from '../gen/seeds';
 import { TOWN, type Site } from '../gen/settle';
 import { PLAN_DRAW_PAD, PLAN_EXTENT, PLAN_MARGIN, type PlanInput, type TownPlan } from '../gen/town';
@@ -85,6 +87,9 @@ const chunkRect = (cx: number, cy: number): Rect => ({
 });
 
 export const chunkKey = (cx: number, cy: number) => `${cx},${cy}`;
+
+/** Which of a piece's extremities are the motorway's own end (MW_END_HEAD, MW_END_TAIL). */
+const endFlags = (p: MotorwayPiece) => (p.endA ? MW_END_HEAD : 0) | (p.endB ? MW_END_TAIL : 0);
 
 /** The stage a chunk's next task makes. */
 const firstMissing = (c: Chunk) => (!c.pre ? 'pre' : !c.hydro ? 'hydro' : !c.roads ? 'roads' : !c.dem ? 'dem' : 'render');
@@ -184,7 +189,10 @@ function pieceBox(p: MotorwayPiece): Rect {
 const MOTORWAY_DRAW = MW_PROFILE_REACH + 100;
 /**
  * …and this near, its roads keep clear of them: every run a chunk's edges belong to
- * (up to three edges out) and the room around it.
+ * (up to three edges out) and the room around it. It is also the chain an interchange's
+ * ramps are classified along, which wants IC_GROUND (2,010 m) — a piece lying wholly in
+ * the 10 m between the two cannot exist, pieces being hundreds of metres, but the two
+ * numbers answer to each other now.
  */
 const MOTORWAY_ROADS = 2000;
 /**
@@ -822,7 +830,7 @@ export class ChunkManager {
           // Where the end is at grade its run-on reaches ground the carriageway can get
           // to, so a line with lanes into a ring is not one that gets cut back; where the
           // end is buried the cut is what keeps the drawing out of the hill.
-          ends.push((p.endA ? MW_END_HEAD : 0) | (p.endB ? MW_END_TAIL : 0));
+          ends.push(endFlags(p));
         }
         // Its lanes into the roundabout: drawn as ramps, with the roads.
         end.lanes.forEach((xy, i) => near(xy) && lanes.push({ key: `mwlane:${p.key}:${i}`, cls: ROAD_C, xy: Float32Array.from(xy), ramp: true }));
@@ -883,13 +891,40 @@ export class ChunkManager {
       : undefined;
   }
 
-  /** Centre lines of the motorway pieces passing within `m` of `r`. */
-  private motorwaysNear(r: Rect, m: number): Float64Array[] {
-    const out: Float64Array[] = [];
+  /** The motorway pieces passing within `m` of `r`. */
+  private piecesNear(r: Rect, m: number): MotorwayPiece[] {
+    const out: MotorwayPiece[] = [];
     const q = expand(r, m);
     for (const [gx, gy] of this.netCells(expand(r, MW_SPILL)))
-      for (const p of this.mws.get(`${gx},${gy}`)?.data ?? []) if (intersects(pieceBox(p), q)) out.push(p.xy);
+      for (const p of this.mws.get(`${gx},${gy}`)?.data ?? []) if (intersects(pieceBox(p), q)) out.push(p);
     return out;
+  }
+
+  /** …as centre lines alone. */
+  private motorwaysNear(r: Rect, m: number): Float64Array[] {
+    return this.piecesNear(r, m).map((p) => p.xy);
+  }
+
+  /**
+   * The ground an interchange's ramps are classified on: the fine nodes within IC_GROUND of
+   * the chunk, each from the solve of the chunk that owns it, as nodePatch takes them.
+   * Nothing outside that block is read, so what the ramps see is a function of the chunk and
+   * the land and not of which solves happen to be about — and roadsReady has waited for
+   * every one of them, so inside it nothing is missing. (A patch would be some 80,000
+   * nodes; the chain's points are a few hundred.)
+   */
+  private rampGround(c: Chunk): (x: number, y: number) => number {
+    const b = nodeBlock(expand(chunkRect(c.cx, c.cy), IC_GROUND));
+    const at = (gx: number, gy: number) => {
+      if (gx < b.gx || gy < b.gy || gx >= b.gx + b.w || gy >= b.gy + b.h) return NaN;
+      const own = this.get(Math.floor(gx / NODES), Math.floor(gy / NODES));
+      // roadsReady waited on every solve this block names, so a missing one is a hole in
+      // the gate and not ground to read round: left as NaN it would read as level, and the
+      // merge would land where the scheduling put it. Loud, and tried again.
+      if (!own?.hydro) throw new Error(`no solve under node ${gx},${gy} of the ramp ground of chunk ${c.cx},${c.cy}`);
+      return own.hydro.zE[(gy - (own.cy * NODES - CORE_PAD)) * CORE + (gx - (own.cx * NODES - CORE_PAD))];
+    };
+    return (x, y) => zOnNodes(at, x, y);
   }
 
   private edgesNear(r: Rect): RoadEdge[] {
@@ -1155,17 +1190,29 @@ export class ChunkManager {
         throw new Error('net and motorway cells are scheduled by scheduleCell');
       case 'plan':
         throw new Error('plans are scheduled by schedulePlan');
-      case 'roads':
-        const motorways = this.motorwaysNear(chunkRect(c.cx, c.cy), MOTORWAY_ROADS);
+      case 'roads': {
+        const pieces = this.piecesNear(chunkRect(c.cx, c.cy), MOTORWAY_ROADS);
+        const motorways = pieces.map((p) => p.xy);
+        const segments = latticeSegments(this.edgesNear(chunkRect(c.cx, c.cy)), c.cx, c.cy, motorways);
         task = {
           kind,
           cx: c.cx,
           cy: c.cy,
-          segments: latticeSegments(this.edgesNear(chunkRect(c.cx, c.cy)), c.cx, c.cy, motorways),
+          segments,
           patch: this.roadPatch(c),
           motorways,
+          // Where this chunk builds an interchange, where along each motorway a ramp may
+          // merge. Reckoned here because this is where the solves its ramps reach are to
+          // hand, and sent as one byte for every 25 m rather than as the ground itself.
+          merge: segments.some((t) => t.interchange)
+            ? mergeable(
+                classifyMotorways(motorways, this.rampGround(c)),
+                Uint8Array.from(pieces, endFlags),
+              )
+            : undefined,
         };
         break;
+      }
       case 'dem':
         task = {
           kind,

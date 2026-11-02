@@ -54,7 +54,7 @@ export function runTask(t: TaskRequest): { result: TaskResult; transfer: Transfe
       return { result: { kind: 'tile', key, tile, ms: ms() }, transfer: [] };
     }
     case 'roads': {
-      const result = routeCurves(t.segments, t.patch, t.motorways);
+      const result = routeCurves(t.segments, t.patch, t.motorways, t.merge);
       return { result: { kind: 'roads', result, ms: ms() }, transfer: result.map((r) => r.xy.buffer) };
     }
     case 'plan': {

@@ -1274,8 +1274,13 @@ const IC_SWING = 70;
  * The four ramps of a diamond where `road` crosses one of the motorways `lines` (their
  * centre lines, pieces joined end to end): cubic curves from the road, leaving along the
  * motorway, to its edge, tangent to it. Empty where the road doesn't cross one.
+ *
+ * `merge` says, per point of each line, whether a ramp may merge onto the carriageway there
+ * (`mergeable`): the merge slides up to IC_SLIDE along the motorway to reach one. Without
+ * it every merge stands IC_MERGE along whatever is there, which is how this read the world
+ * before anything in its tier knew (§3.5.1 Open).
  */
-export function diamondRamps(road: ArrayLike<number>, lines: ArrayLike<number>[]): number[][] {
+export function diamondRamps(road: ArrayLike<number>, lines: ArrayLike<number>[], merge?: ArrayLike<number>[]): number[][] {
   // The crossing: the road's segment i, the motorway's line li and segment k.
   let hit: { i: number; li: number; k: number; x: number; y: number } | undefined;
   for (let i = 0; i + 3 < road.length && !hit; i += 2)
@@ -1292,20 +1297,26 @@ export function diamondRamps(road: ArrayLike<number>, lines: ArrayLike<number>[]
   if (!hit) return [];
   const { i, li, k, x: X, y: Y } = hit;
   const near = lineDistance(lines, 2 * IC_JOIN);
-  /** The point `dist` m along the motorway from the crossing (dir ±1), and the heading there, onward; across joined pieces. */
-  const along = (dir: number, dist: number): [number, number, number, number] => {
-    let xy = lines[li];
+  /**
+   * The point `dist` m along the motorway from the crossing (dir ±1), and the heading there,
+   * onward; across joined pieces. `each` is told of every point it passes on the way: how
+   * far along it lies, and where to find it (the line, and the point's place in it).
+   */
+  const along = (dir: number, dist: number, each?: (d: number, lj: number, q: number) => void): [number, number, number, number] => {
+    let lj = li;
     let q = dir > 0 ? k + 2 : k; // the next point
     let px = X;
     let py = Y;
     let left = dist;
+    let run = 0;
     for (let guard = 0; guard < 10000; guard++) {
+      const xy = lines[lj];
       if (q < 0 || q >= xy.length) {
         // Onto the piece joined here, if any.
-        const next = lines.find((o) => o !== xy && Math.hypot(o[dir > 0 ? 0 : o.length - 2] - px, o[dir > 0 ? 1 : o.length - 1] - py) < 1);
-        if (!next) break;
-        xy = next;
-        q = dir > 0 ? 2 : next.length - 4;
+        const nj = lines.findIndex((o) => o !== xy && Math.hypot(o[dir > 0 ? 0 : o.length - 2] - px, o[dir > 0 ? 1 : o.length - 1] - py) < 1);
+        if (nj < 0) break;
+        lj = nj;
+        q = dir > 0 ? 2 : lines[nj].length - 4;
         continue;
       }
       const sx = xy[q] - px;
@@ -1314,16 +1325,41 @@ export function diamondRamps(road: ArrayLike<number>, lines: ArrayLike<number>[]
       // (sx, sy) points the way we go: onward is the heading, whichever way that is.
       if (L >= left && L > 0) return [px + (sx * left) / L, py + (sy * left) / L, sx / L, sy / L];
       left -= L;
+      run += L;
       px = xy[q];
       py = xy[q + 1];
+      each?.(run, lj, q / 2);
       q += 2 * dir;
     }
     // Ran out of motorway (it ends): as far as it goes.
-    const b = dir > 0 ? xy.length - 4 : 0;
-    const L = Math.hypot(xy[b + 2] - xy[b], xy[b + 3] - xy[b + 1]) || 1;
-    return [px, py, (dir * (xy[b + 2] - xy[b])) / L, (dir * (xy[b + 3] - xy[b + 1])) / L];
+    const end = lines[lj];
+    const b = dir > 0 ? end.length - 4 : 0;
+    const L = Math.hypot(end[b + 2] - end[b], end[b + 3] - end[b + 1]) || 1;
+    return [px, py, (dir * (end[b + 2] - end[b])) / L, (dir * (end[b + 3] - end[b + 1])) / L];
+  };
+  /**
+   * How far along the motorway the ramps on this side of the crossing merge: IC_MERGE, or
+   * the nearest point to it within IC_SLIDE that `merge` allows — the one further out on a
+   * tie, which makes the longer and gentler ramp. IC_MERGE where no point within reach
+   * will take a merge, and where nothing says: the drawing cannot put that right on its
+   * own, and dev/check.ts reports it (§3.5.1).
+   */
+  const mergeDist = (dir: number): number => {
+    if (!merge) return IC_MERGE;
+    let best = IC_MERGE;
+    let off = Infinity;
+    along(dir, IC_MERGE + IC_SLIDE, (d, lj, q) => {
+      if (d < IC_MERGE - IC_SLIDE || !merge[lj]?.[q]) return;
+      const e = Math.abs(d - IC_MERGE);
+      if (e < off || (e === off && d > best)) [off, best] = [e, d];
+    });
+    return best;
   };
   const out: number[][] = [];
+  // Where the ramps merge, ahead of drawing any: both sides of the road merge at the same
+  // two points, and each costs a walk along the chain.
+  const back = mergeDist(-1);
+  const fwd = mergeDist(1);
   for (const side of [-1, 1]) {
     // Where the ramps leave the road on this side.
     let j = side < 0 ? i : i + 2;
@@ -1331,7 +1367,7 @@ export function diamondRamps(road: ArrayLike<number>, lines: ArrayLike<number>[]
     const jx = road[j];
     const jy = road[j + 1];
     for (const dir of [-1, 1]) {
-      const [mx, my, tx, ty] = along(dir, IC_MERGE);
+      const [mx, my, tx, ty] = along(dir, dir > 0 ? fwd : back);
       // The side of the motorway the road leaves it on, and where the ramp ends: its outer
       // edge on the carriageway's (ending on the edge line, half of it stuck out in a bump).
       const s = Math.sign(-ty * (jx - mx) + tx * (jy - my)) || 1;
@@ -1688,6 +1724,43 @@ export function classifyMotorways(lines: Float64Array[], at?: (x: number, y: num
   lines.forEach((_, li) => !hasPrev.has(li) && chain(li));
   lines.forEach((_, li) => !seen.has(li) && chain(li)); // closed loops, if any
   return ends ? out.map((m, li) => atPortal(m, ends[li] ?? 0)) : out;
+}
+
+/**
+ * Per point of each motorway line, whether a ramp may merge onto the carriageway there: it
+ * must be at grade, the height of the ground under it must be known, and the class must be
+ * one the drawing will agree with.
+ *
+ * Ground that is not known reads as MW_LEVEL, because the depth is NaN and both of the
+ * comparisons that would make a structure are false — so the class alone would say a ramp
+ * may merge onto every stretch nothing was read for. The depth says which those are.
+ *
+ * Near a piece's own end it will not be. The renderer is handed the piece *and its run-on*
+ * to a terminus (`motorwaysToDraw`, up to MW_END_REACH of points that are not in `p.xy` at
+ * all), so within MW_PROFILE_REACH of such an end the two average different lines and may
+ * read different structures. A merge is judged by the chunk holding it, which is the one
+ * with the run-on, so there the merge keeps to its blind IC_MERGE rather than slide onto
+ * ground the drawing will not call level. `ends` are the lines' own ends (MW_END_HEAD,
+ * MW_END_TAIL), as `motorwayEnds` gives them.
+ */
+export function mergeable(ms: MotorwayDraw[], ends: ArrayLike<number>): Uint8Array[] {
+  return ms.map((m, li) => {
+    const n = m.cls.length;
+    const ok = Uint8Array.from(m.cls, (c, i) => (c === MW_LEVEL && !Number.isNaN(m.d[i]) ? 1 : 0));
+    /** From an end of the line, inward, as far as a class there is read from. */
+    const blind = (from: number, step: number) => {
+      for (let i = from, d = 0; i >= 0 && i < n && d <= MW_PROFILE_REACH; i += step) {
+        ok[i] = 0;
+        const j = i + step;
+        if (j < 0 || j >= n) break;
+        d += Math.hypot(m.xy[2 * j] - m.xy[2 * i], m.xy[2 * j + 1] - m.xy[2 * i + 1]);
+      }
+    };
+    const flags = ends[li] ?? 0;
+    if (flags & MW_END_HEAD) blind(0, 1);
+    if (flags & MW_END_TAIL) blind(n - 1, -1);
+    return ok;
+  });
 }
 
 /**

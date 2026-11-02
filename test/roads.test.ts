@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import { CoarseField } from '../src/gen/hydro';
+import { CoarseField, NODE } from '../src/gen/hydro';
 import { LATTICE, latticeCell, MAX_EDGE, nearestVertex, neighbours, routeCurves, vertexPos, verticesIn } from '../src/gen/lattice';
-import { NET_CELL, NET_REACH, ROAD_C } from '../src/gen/roads';
+import { NET_CELL, NET_REACH, ROAD_C, zOnNodes, zOnPatch } from '../src/gen/roads';
 import { SeedStore, SeedView } from '../src/gen/seeds';
 import { Settlements } from '../src/gen/settle';
 import { Terrain } from '../src/gen/terrain';
@@ -147,5 +147,31 @@ describe('vertex snapping', () => {
     // Given the motorway, every end keeps clear of it: MW_VERTEX holds the unsnapped
     // position 50 m away, and the snap may no longer cross that.
     for (const [, y] of ends([mw])) expect(Math.abs(y - 300)).toBeGreaterThanOrEqual(28);
+  });
+});
+
+describe('the fine surface', () => {
+  // zOnNodes is what ground too far for a patch is read through (an interchange's ramps,
+  // ChunkManager.rampGround): the same bilinear surface, from nodes fetched one at a time.
+  it('reads the same height from nodes as from a patch', () => {
+    const w = 7;
+    const h = 5;
+    const p = { gx: -3, gy: 2, w, h, zE: new Float32Array(w * h), A: new Float32Array(w * h), lake: new Float32Array(w * h).fill(NaN) };
+    for (let j = 0; j < h; j++) for (let i = 0; i < w; i++) p.zE[j * w + i] = 10 * i - 3 * j + (i * j) / 7;
+    const at = (gx: number, gy: number) => {
+      const i = gx - p.gx;
+      const j = gy - p.gy;
+      return i < 0 || j < 0 || i >= w || j >= h ? NaN : p.zE[j * w + i];
+    };
+    let checked = 0;
+    for (let y = 2 * NODE; y < 5.9 * NODE; y += 3.7)
+      for (let x = -3 * NODE; x < 2.9 * NODE; x += 2.3) {
+        expect(zOnNodes(at, x, y)).toBeCloseTo(zOnPatch(p, x, y), 6);
+        checked++;
+      }
+    expect(checked).toBeGreaterThan(100);
+    // Beyond the nodes it is given: nothing, rather than the value at the edge.
+    expect(zOnNodes(at, -10 * NODE, 3 * NODE)).toBeNaN();
+    expect(zOnNodes(at, 0, 20 * NODE)).toBeNaN();
   });
 });

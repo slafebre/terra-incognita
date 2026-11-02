@@ -15,7 +15,16 @@ export type TaskRequest =
   | { kind: 'mw'; gx: number; gy: number; seeds: SeedPayload }
   /** A coarse tile, made once and handed to every worker (see WorkerTiles). */
   | { kind: 'tile'; tx: number; ty: number; seeds: SeedPayload }
-  | { kind: 'roads'; cx: number; cy: number; segments: SegmentTask[]; patch: RoadPatch; motorways: Float64Array[] }
+  | {
+      kind: 'roads';
+      cx: number;
+      cy: number;
+      segments: SegmentTask[];
+      patch: RoadPatch;
+      motorways: Float64Array[];
+      /** Per point of each motorway: whether an interchange's ramp may merge there (`mergeable`). */
+      merge?: Uint8Array[];
+    }
   | { kind: 'plan'; input: PlanInput }
   | { kind: 'dem'; cx: number; cy: number; patch: DemPatch; sites: Site[]; seeds: SeedPayload }
   | {

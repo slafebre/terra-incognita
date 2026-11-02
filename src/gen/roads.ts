@@ -250,5 +250,20 @@ export function zOnPatch(p: RoadPatch, x: number, y: number): number {
   return (z[k] * (1 - fu) + z[k + 1] * fu) * (1 - fv) + (z[k + p.w] * (1 - fu) + z[k + p.w + 1] * fu) * fv;
 }
 
+/**
+ * …and from fine nodes read one at a time rather than from a patch: the same bilinear
+ * surface, NaN wherever `at` has no node. For ground reaching too far for a patch to be
+ * worth building (the solves an interchange's ramps read, `ChunkManager.rampGround`).
+ */
+export function zOnNodes(at: (gx: number, gy: number) => number, x: number, y: number): number {
+  const u = x / NODE;
+  const v = y / NODE;
+  const i = Math.floor(u);
+  const j = Math.floor(v);
+  const fu = u - i;
+  const fv = v - j;
+  return (at(i, j) * (1 - fu) + at(i + 1, j) * fu) * (1 - fv) + (at(i, j + 1) * (1 - fu) + at(i + 1, j + 1) * fu) * fv;
+}
+
 /** Fine-patch margin around a chunk (nodes): an edge drawn by the chunk, its neighbours, and the fitting band. */
 export const ROAD_PAD = 32;

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { CoarseField } from '../src/gen/hydro';
-import { classifyMotorways, MW_ANGLE, MW_BRIDGE_FREE, MW_CELL, MW_EDGE, MW_END_TAIL, MW_LEVEL, MW_RMIN, MW_SPILL, MW_TUNNEL, MW_VIADUCT, Motorways, MotorwayLookup, motorwayEnd, surfaceLines, tightestRadius, type MotorwayPiece } from '../src/gen/motorway';
+import { classifyMotorways, diamondRamps, mergeable, MW_ANGLE, MW_END_HEAD, MW_BRIDGE_FREE, MW_CELL, MW_EDGE, MW_END_TAIL, MW_LEVEL, MW_RMIN, MW_SPILL, MW_TUNNEL, MW_VIADUCT, Motorways, type MotorwayDraw, MotorwayLookup, motorwayEnd, surfaceLines, tightestRadius, type MotorwayPiece } from '../src/gen/motorway';
 import { NET_REACH, zOnPatch } from '../src/gen/roads';
 import { expand, SeedStore, SeedView } from '../src/gen/seeds';
 import { Settlements } from '../src/gen/settle';
@@ -110,6 +110,74 @@ describe('motorways', () => {
     // The joint (shared by both pieces) is classed alike in each.
     expect(ms[1].cls[30]).toBe(ms[0].cls[0]);
     expect(surfaceLines(ms).length).toBeGreaterThan(1);
+  });
+
+  it("slides a ramp's merge along the motorway to find ground at grade", () => {
+    // A straight motorway along +x, a main road crossing it at 12.5 m, level ground (100 m)
+    // but for a valley 128 m wide and 40 m deep: IC_MERGE, 380 m along, lands on the viaduct
+    // over it, and the carriageway is back at grade 450 m out.
+    const n = 81;
+    const xy = new Float64Array(2 * n);
+    for (let i = 0; i < n; i++) xy[2 * i] = (i - 40) * 25;
+    const w = 130;
+    const patch = { gx: -64, gy: -2, w, h: 5, zE: new Float32Array(w * 5), A: new Float32Array(w * 5), lake: new Float32Array(w * 5).fill(NaN) };
+    for (let j = 0; j < 5; j++)
+      for (let i = 0; i < w; i++) patch.zE[j * w + i] = (patch.gx + i) * 16 >= 304 && (patch.gx + i) * 16 <= 432 ? 60 : 100;
+    const road = [12.5, -400, 12.5, 400];
+    const ms = classifyMotorways([xy], (x, y) => zOnPatch(patch, x, y));
+    const cls = (x: number) => ms[0].cls[x / 25 + 40];
+    expect(cls(400)).toBe(MW_VIADUCT);
+    expect(cls(450)).toBe(MW_LEVEL);
+
+    /** Where each of the two ramps on the +x side of the crossing ends (world x). */
+    const merges = (merge?: Uint8Array[]) =>
+      diamondRamps(road, [xy], merge)
+        .map((r) => r[r.length - 2])
+        .filter((x) => x > 12.5)
+        .map((x) => Math.round(x));
+    // Blind to the ground, both stand IC_MERGE along, on the viaduct.
+    expect(merges()).toEqual([393, 393]);
+    // Told where a ramp may merge, they slide out to the carriageway at grade.
+    expect(merges(mergeable(ms, [0]))).toEqual([450, 450]);
+    // Where nothing within reach will take a merge, they stand where they stood.
+    const noneLevel = ms.map((m) => ({ ...m, cls: new Uint8Array(m.cls.length).fill(MW_VIADUCT) }));
+    expect(merges(mergeable(noneLevel, [0]))).toEqual([393, 393]);
+    // No point sits at IC_MERGE itself: the two either side stand 17.5 m from it, and a tie
+    // goes to the one further out, for the longer and gentler ramp.
+    const tie = new Uint8Array(n);
+    tie[55] = tie[56] = 1;
+    expect(merges([tie])).toEqual([400, 400]);
+    // Nor onto a stretch whose class the drawing may read differently: within
+    // MW_PROFILE_REACH of a motorway's own end the renderer averages the run-on beyond it
+    // as well. The head is the far end, so it takes nothing away…
+    expect(merges(mergeable(ms, [MW_END_HEAD]))).toEqual([450, 450]);
+    // …while the tail's 600 m covers the ground at grade out there, and the merge slides
+    // the other way instead, to the grade 118 m back.
+    expect(merges(mergeable(ms, [MW_END_TAIL]))).toEqual([275, 275]);
+  });
+
+  it('will not merge a ramp onto ground it has not read', () => {
+    /** A line of points `step` m apart along +x, with the classes and depths given. */
+    const draw = (cls: number[], d: number[], step = 25): MotorwayDraw => ({
+      xy: Float64Array.from(cls.flatMap((_, i) => [i * step, 0])),
+      cls: Uint8Array.from(cls),
+      d: Float32Array.from(d),
+    });
+    const mask = (m: MotorwayDraw, ends: number[] = [0]) => [...mergeable([m], ends)[0]];
+
+    // At grade, with the ground under it read: a ramp may merge.
+    expect(mask(draw([MW_LEVEL, MW_VIADUCT, MW_LEVEL], [1, -20, 1]))).toEqual([1, 0, 1]);
+    // Ground nothing was read for classes as level, since NaN is neither deep nor high.
+    // A merge there would be guesswork, so the depth is what says which points those are.
+    expect(mask(draw([MW_LEVEL, MW_LEVEL], [NaN, 2]))).toEqual([0, 1]);
+    // Within MW_PROFILE_REACH of the motorway's own end the drawing reads the run-on too,
+    // so nothing there may be merged onto — a short line is blind end to end…
+    expect(mask(draw([MW_LEVEL, MW_LEVEL], [1, 1]), [MW_END_HEAD])).toEqual([0, 0]);
+    expect(mask(draw([MW_LEVEL], [1]), [MW_END_HEAD | MW_END_TAIL])).toEqual([0]);
+    // …and a long one is its own again beyond that.
+    expect(mask(draw([MW_LEVEL, MW_LEVEL], [1, 1], 900), [MW_END_HEAD])).toEqual([0, 1]);
+    // An end it is told nothing of takes nothing away (and a missing flag is not an end).
+    expect(mask(draw([MW_LEVEL, MW_LEVEL], [1, 1]), [])).toEqual([1, 1]);
   });
 
   it('ends on land it can reach, not inside a hill', () => {
