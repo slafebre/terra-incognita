@@ -1419,7 +1419,8 @@ export function latticeSegments(edges: RoadEdge[], cx: number, cy: number, motor
       const ka = k2(r[0], r[1]);
       const kb = k2(r[2], r[3]);
       if ((ka === endA || ka === endB) && (kb === endA || kb === endB)) continue;
-      // A way meeting the run at an end: kept apart by the wedges, not by room.
+      // A way meeting the run at an end: kept apart by the wedge there, near it, and
+      // further out as a rival like any other.
       const meets = ka === endA || ka === endB || kb === endA || kb === endB;
       if (meets) {
         const [vx, vy, wx, wy] = ka === endA || ka === endB ? r : [r[2], r[3], r[0], r[1]];
@@ -1431,7 +1432,6 @@ export function latticeSegments(edges: RoadEdge[], cx: number, cy: number, motor
         if (Math.abs((r[0] + r[2]) / 2 - (sgm[0] + sgm[2]) / 2) > 600 || Math.abs((r[1] + r[3]) / 2 - (sgm[1] + sgm[3]) / 2) > 600) continue;
         const d = segDist(sgm, r);
         if (d < ROOM_REACH) near = true;
-        if (meets) continue;
         if (d < ROOM_REACH && !rivals.has(piecePts(o).key)) {
           const pc = piecePts(o);
           const weight = cls < o.cls ? RIVAL_MAJOR : cls > o.cls ? RIVAL_MINOR : RIVAL_EQUAL;
@@ -2538,8 +2538,8 @@ function segDist(x: number, y: number, s: number[], o: number): number {
  * the line A–B; against a rival that may wind too, nearer this run's line than
  * `weight` × the rival's; against one that won't, its fitted band and clearance away
  * unless nearer this line; never across the road's own continuation beyond either
- * end; within the wedges at its ends; and clear of other ways (near the ends only a
- * little, as junctions are close, and right at the junction not at all).
+ * end; within the wedge at each end, on that end's side; and clear of other ways (near
+ * the ends only a little, as junctions are close, and right at the junction not at all).
  */
 function roomOf(
   ax: number,
@@ -2579,13 +2579,14 @@ function roomOf(
   const beyondB = ray(bx, by, outDir[0], outDir[1]);
   return (x, y) => {
     if (segDist(x, y, ab, 0) > Math.max(MICRO_BAND[cls], MICRO_FREE)) return false;
-    if (!ownSide(x, y)) return false;
+    const dA = Math.hypot(x - ax, y - ay);
+    const dB = Math.hypot(x - bx, y - by);
+    // Right at a junction the ways meeting there are rivals too, and every share is thin.
+    if (Math.min(dA, dB) >= MICRO_JUNCTION && !ownSide(x, y)) return false;
     // Never across the road's own continuation beyond either end (a tight turn there
     // would curl round it, losing height in a loop).
     if (segDist(x, y, beyondA, 0) < MICRO_BEYOND || segDist(x, y, beyondB, 0) < MICRO_BEYOND) return false;
-    if (!inWedges(wedges, x, y)) return false;
-    const dA = Math.hypot(x - ax, y - ay);
-    const dB = Math.hypot(x - bx, y - by);
+    if (!inWedges(wedges, x, y, ax, ay, bx, by)) return false;
     const nearEnd = dA < MICRO_FREE || dB < MICRO_FREE;
     const need = !nearEnd ? MICRO_CLEAR : Math.min(dA, dB) < MICRO_JUNCTION ? 0 : MICRO_BEYOND;
     if (need > 0) for (let o = 0; o + 3 < obstacles.length; o += 4) if (segDist(x, y, obstacles, o) < need) return false;
@@ -2620,12 +2621,20 @@ function cutLoops(pts: number[]): void {
 /** Wedges are narrowed to this share, so runs in neighbouring wedges keep a gap. */
 const WEDGE_SHARE = 0.9;
 
-/** Inside every wedge (see `Wedge`), or within MICRO_JUNCTION of its vertex? */
-function inWedges(wedges: number[], x: number, y: number): boolean {
+/**
+ * Inside every wedge (see `Wedge`) on its own end's side of a run from A to B (nearer
+ * its vertex than the run's other end), or within MICRO_JUNCTION of its vertex? Held
+ * everywhere, the wedge at one end shut out the other end of a bent piece (its first
+ * edge heading north, its end due west), and it was drawn straight down the slope;
+ * beyond, the ways meeting it there are kept apart as rivals.
+ */
+function inWedges(wedges: number[], x: number, y: number, ax: number, ay: number, bx: number, by: number): boolean {
   for (let o = 0; o + WEDGE - 1 < wedges.length; o += WEDGE) {
     const dx = x - wedges[o];
     const dy = y - wedges[o + 1];
-    if (Math.hypot(dx, dy) < MICRO_JUNCTION) continue;
+    const atA = Math.hypot(wedges[o] - ax, wedges[o + 1] - ay) <= Math.hypot(wedges[o] - bx, wedges[o + 1] - by);
+    const d = Math.hypot(dx, dy);
+    if (d < MICRO_JUNCTION || d > (atA ? Math.hypot(x - bx, y - by) : Math.hypot(x - ax, y - ay))) continue;
     let rel = Math.atan2(dy, dx) - wedges[o + 2];
     rel -= 2 * Math.PI * Math.round(rel / (2 * Math.PI));
     if (rel > WEDGE_SHARE * wedges[o + 3] || -rel > WEDGE_SHARE * wedges[o + 4]) return false;
