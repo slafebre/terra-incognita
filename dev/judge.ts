@@ -63,8 +63,11 @@ export const ROAD_BUDGETS: Record<string, [r: number, budget: number][]> = {
   'unreached-site': [[0, 0]],
   'dead-end': [[0.15, 15], [0.3, 21], [0.45, 20], [0.6, 28]],
   'small-loop': [[0.15, 37], [0.3, 54], [0.45, 51], [0.6, 42]],
-  'micro-detour': [[0.15, 18], [0.3, 38], [0.45, 53], [0.6, 57]],
-  'steep-road': [[0.15, 4.1], [0.3, 8.2], [0.45, 11.5], [0.6, 15.8]],
+  // Mountains' detours re-set when steep pieces got room to wind (58.8 at worst): the
+  // count rose with switchbacks the climb needs; paths longer than both 1.5× their chord
+  // and 1.5× what their climb needs held at ~5 per 100 km.
+  'micro-detour': [[0.15, 18], [0.3, 38], [0.45, 53], [0.6, 73.5]],
+  'steep-road': [[0.15, 3.8], [0.3, 6.8], [0.45, 9.8], [0.6, 14.8]],
   // Counts of 0–8 a region that moved severalfold between seeds (one seed's land is
   // simply wetter): too few to put a rate on. Loose ceilings for every region, set to
   // catch a gross regression and to measure nothing. An undrawn edge is the extreme

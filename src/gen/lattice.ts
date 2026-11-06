@@ -1669,6 +1669,20 @@ export function routeCurves(tasks: SegmentTask[], p: RoadPatch, motorways: Array
     return out;
   };
   const drawnRivals = (rivals: Rival[]) => rivals.map((r) => ({ ...r, pts: r.pts.flatMap((v, i) => (i & 1 ? [] : snap(v, r.pts[i + 1]))), active: active(r) }));
+  /**
+   * Other ways' segments between their vertices as drawn (snapped; motorways' points,
+   * never on a vertex, as they are). Unsnapped, the clearance from a way meeting a run
+   * at its end fell up to 30 m from the snapped end, outside the junction's exemption,
+   * and walled it in.
+   */
+  const drawnObstacles = (o: number[]) => {
+    const out = o.slice();
+    for (let i = 0; i < out.length; i += 2) {
+      const [vx, vy] = vertexPos(nearestVertex(out[i], out[i + 1]));
+      if (Math.hypot(vx - out[i], vy - out[i + 1]) < 1e-6) [out[i], out[i + 1]] = snap(out[i], out[i + 1]);
+    }
+    return out;
+  };
   /** Bilinear fine elevation at world (x, y). */
   const zAt = (x: number, y: number) => {
     const u = Math.min(w - 1.001, Math.max(0, x / NODE - p.gx));
@@ -1719,7 +1733,7 @@ export function routeCurves(tasks: SegmentTask[], p: RoadPatch, motorways: Array
     // minus previous), as the piece or edge on the other side also uses.
     const inDir = pa ? [pts[2] - pa[0], pts[3] - pa[1]] : [bx - ax, by - ay];
     const outDir = pb ? [pb[0] - pts[2 * n - 4], pb[1] - pts[2 * n - 3]] : [bx - ax, by - ay];
-    const xy = microRoute(ax, ay, bx, by, inDir, outDir, MAX_GRADE[cls], p, zAt, obstacles, drawnLine(pts, ax, ay, bx, by), drawnRivals(rivals), cls, wedges);
+    const xy = microRoute(ax, ay, bx, by, inDir, outDir, MAX_GRADE[cls], p, zAt, drawnObstacles(obstacles), drawnLine(pts, ax, ay, bx, by), drawnRivals(rivals), cls, wedges);
     return { key, cls, xy: Float32Array.from(xy), micro: true };
   };
   /** A path with no step longer than 8 m (the water checks look at its points). */
@@ -1921,6 +1935,7 @@ export function routeCurves(tasks: SegmentTask[], p: RoadPatch, motorways: Array
   ): SegmentPath | null {
     const n = pts.length / 2;
     const near = drawnRivals(rivals);
+    const others = drawnObstacles(obstacles);
     /** Do other ways meet the piece at its end e (0: first, 1: last)? Its wedge there is then narrower than all round. */
     const junction = (e: number) => wedges.length >= 2 * WEDGE && Math.min(wedges[e * WEDGE + 3], wedges[e * WEDGE + 4]) < Math.PI - 1e-6;
     const end = (i: number) => (i === 0 && rawA) || (i === n - 1 && rawB) ? [pts[2 * i], pts[2 * i + 1]] : snap(pts[2 * i], pts[2 * i + 1]);
@@ -1947,7 +1962,7 @@ export function routeCurves(tasks: SegmentTask[], p: RoadPatch, motorways: Array
         if (i === 0 && junction(0) && skew(pts[0], pts[1], pts[2], pts[3], pts[2 * j], pts[2 * j + 1]) > CHORD_SKEW) return null;
         if (j === n - 1 && junction(1) && skew(pts[2 * j], pts[2 * j + 1], pts[2 * j - 2], pts[2 * j - 1], pts[2 * i], pts[2 * i + 1]) > CHORD_SKEW) return null;
       }
-      const xy = chordOf(ax, ay, bx, by, cls, force ? null : roomOf(ax, ay, bx, by, inDir, outDir, obstacles, own, near, cls, wd));
+      const xy = chordOf(ax, ay, bx, by, cls, force ? null : roomOf(ax, ay, bx, by, inDir, outDir, others, own, near, cls, wd));
       return xy;
     };
     // Breaks: none; then each single vertex; then every vertex.
